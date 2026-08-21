@@ -256,6 +256,10 @@ def successful_report(
             "environment": request.get("user_environment_declarations", {}),
         },
         "observed_environment": environment_facts(),
+        "reference_inspection": {
+            "status": "not_configured",
+            "adapter_contract_version": None,
+        },
         "target_precisions": tuple_states(request["requested_targets"]),
         "issues": [],
         "warnings": warnings,
@@ -296,6 +300,10 @@ def failed_report(
             }
         ),
         "observed_environment": environment_facts(),
+        "reference_inspection": {
+            "status": "not_configured",
+            "adapter_contract_version": None,
+        },
         "target_precisions": tuple_states(request.get("requested_targets", [])),
         "issues": issues,
         "warnings": [],
@@ -780,10 +788,14 @@ def artifact_record(
 ) -> dict[str, Any]:
     return {
         "path": path.relative_to(port_dir).as_posix(),
-        "status": "fresh",
         "fingerprints": {
             "content_sha256": file_sha256(path),
-            "tool_sha256": file_sha256(Path(__file__).resolve()),
+            "tool_sha256": {
+                "orchestrator": file_sha256(Path(__file__).resolve()),
+                "reference_adapter": file_sha256(
+                    port_dir / "private" / "reference_adapter.py"
+                ),
+            },
             "source_sha256": request["source"]["sha256"],
             "checkpoint_sha256": request["checkpoint"]["sha256"],
             "environment_sha256": file_sha256(environment_path),
@@ -853,22 +865,23 @@ def run_reference_inspection(
         return MISSING_INPUT, [issue], {}
 
     environment_dir = private_dir / "reference_environment"
-    virtual_environment = environment_dir / "venv"
+    environment_id = secrets.token_hex(12)
+    virtual_environment = environment_dir / "venvs" / environment_id
     environment_path = environment_dir / "environment.json"
     try:
-        if not virtual_environment.is_dir():
-            venv.EnvBuilder(with_pip=True).create(virtual_environment)
+        venv.EnvBuilder(with_pip=True).create(virtual_environment)
         python = virtual_environment / (
             "Scripts/python.exe" if os.name == "nt" else "bin/python"
         )
         lock_text = lock_path.read_text(encoding="utf-8")
-        if "http://" in lock_text.lower() or "https://" in lock_text.lower():
-            raise RuntimeError("dependency lock contains a network URL")
         requirements = [
             line
             for line in lock_text.splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         ]
+        active_lock_text = "\n".join(requirements).lower()
+        if "http://" in active_lock_text or "https://" in active_lock_text:
+            raise RuntimeError("dependency lock contains a network URL")
         if requirements:
             installed = subprocess.run(
                 [
@@ -893,6 +906,28 @@ def run_reference_inspection(
             if installed.returncode != 0:
                 message = installed.stderr.strip() or installed.stdout.strip()
                 raise RuntimeError(f"locked dependency installation failed: {message}")
+        listed = subprocess.run(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "list",
+                "--format=json",
+                "--disable-pip-version-check",
+            ],
+            cwd=source,
+            env=offline_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        if listed.returncode != 0:
+            message = listed.stderr.strip() or listed.stdout.strip()
+            raise RuntimeError(f"could not inventory locked environment: {message}")
+        installed_distributions = sorted(
+            json.loads(listed.stdout), key=lambda distribution: distribution["name"].lower()
+        )
         environment = {
             "schema_version": "1.0",
             "python": platform.python_version(),
@@ -902,13 +937,20 @@ def run_reference_inspection(
             },
             "isolation": {
                 "kind": "venv",
+                "environment_id": environment_id,
                 "system_site_packages": False,
             },
+            "installed_distributions": installed_distributions,
             "runtime_network_access": False,
             "network_enforcement": ["offline_environment", "python_socket_guard"],
         }
         write_json(environment_path, environment)
-    except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+    except (
+        OSError,
+        json.JSONDecodeError,
+        subprocess.SubprocessError,
+        RuntimeError,
+    ) as error:
         issue = {
             "path": "reference.environment",
             "message": f"could not prepare locked reference environment: {error}",
@@ -1108,15 +1150,17 @@ def run_intake(args: argparse.Namespace) -> int:
             port_dir, request
         )
         report["artifacts"] = artifacts
+        report["reference_inspection"] = {
+            "status": "passed" if outcome == SUCCESS else "failed",
+            "adapter_contract_version": REFERENCE_ADAPTER_CONTRACT_VERSION,
+        }
         if outcome == SUCCESS:
-            report["stages"]["preflight"] = "passed"
             report["exit"]["message"] = (
                 "Intake and source inspection passed with warnings"
                 if warnings
                 else "Intake and source inspection passed"
             )
         else:
-            report["stages"]["preflight"] = "failed"
             report["exit"] = {
                 "code": outcome.code,
                 "category": outcome.category,

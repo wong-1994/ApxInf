@@ -87,7 +87,8 @@ are inside either ApxInf or the trusted source checkout, so adapters and capture
 inputs cannot enter a proposed public commit. Tensor captures contain f32 data
 with explicit source dtype and shape metadata. Report artifact records carry
 content, workflow-tool, source, checkpoint, environment, and upstream-request
-fingerprints and a fresh/stale state for later resume processing.
+fingerprints. Dependency-aware stale retention and resume are added by the later
+workflow-resume stage.
 
 | Exit code | Category | Meaning |
 | ---: | --- | --- |

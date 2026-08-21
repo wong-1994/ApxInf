@@ -12,6 +12,7 @@
     "exit",
     "request_declarations",
     "observed_environment",
+    "reference_inspection",
     "target_precisions",
     "issues",
     "warnings",
@@ -42,6 +43,15 @@
     },
     "request_declarations": {"type": "object"},
     "observed_environment": {"type": "object"},
+    "reference_inspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "adapter_contract_version"],
+      "properties": {
+        "status": {"enum": ["not_configured", "passed", "failed"]},
+        "adapter_contract_version": {"type": ["string", "null"]}
+      }
+    },
     "target_precisions": {
       "type": "array",
       "items": {
@@ -84,10 +94,9 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path", "status", "fingerprints"],
+        "required": ["path", "fingerprints"],
         "properties": {
           "path": {"type": "string", "minLength": 1},
-          "status": {"enum": ["fresh", "stale"]},
           "fingerprints": {
             "type": "object",
             "additionalProperties": false,
@@ -101,7 +110,15 @@
             ],
             "properties": {
               "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "tool_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "tool_sha256": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["orchestrator", "reference_adapter"],
+                "properties": {
+                  "orchestrator": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "reference_adapter": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                }
+              },
               "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "checkpoint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "environment_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},

@@ -9,6 +9,7 @@
     "python",
     "dependency_lock",
     "isolation",
+    "installed_distributions",
     "runtime_network_access",
     "network_enforcement"
   ],
@@ -28,10 +29,23 @@
     "isolation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "system_site_packages"],
+      "required": ["kind", "environment_id", "system_site_packages"],
       "properties": {
         "kind": {"const": "venv"},
+        "environment_id": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
         "system_site_packages": {"const": false}
+      }
+    },
+    "installed_distributions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "version"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "version": {"type": "string", "minLength": 1}
+        }
       }
     },
     "network_enforcement": {

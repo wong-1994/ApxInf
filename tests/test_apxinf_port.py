@@ -79,27 +79,46 @@ class PortIntakeTest(unittest.TestCase):
         checkpoint = root / "model.ckpt"
         port = root / "private-port"
         source.mkdir()
+        package = source / "reference_pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("", encoding="utf-8")
         (source / "requirements.lock").write_text(lock_text, encoding="utf-8")
-        (source / "model_support.py").write_text(
+        (package / "model_support.py").write_text(
             "MODEL_VALUE = 3.0\n", encoding="utf-8"
         )
-        (source / "reference_impl.py").write_text(
+        (package / "reference_impl.py").write_text(
             """
 FAILURE = __FAILURE__
 
 import sys
-from model_support import MODEL_VALUE
+from .model_support import MODEL_VALUE
+
+
+class Storage:
+    def data_ptr(self):
+        return id(self)
 
 
 class Tensor:
-    def __init__(self, shape, value):
+    def __init__(self, shape, value, storage=None, offset=0):
         self.shape = shape
         self.dtype = "float32"
         self.value = value
         self.requires_grad = False
+        self._storage = storage or Storage()
+        self._offset = offset
 
     def data_ptr(self):
-        return id(self)
+        return self._storage.data_ptr() + self._offset
+
+    def untyped_storage(self):
+        return self._storage
+
+    def storage_offset(self):
+        return self._offset
+
+    def stride(self):
+        return tuple(reversed(range(1, len(self.shape) + 1)))
 
     def detach(self):
         return self
@@ -122,13 +141,20 @@ class Block:
 class Model:
     def __init__(self):
         self.shared = Tensor((2, 2), MODEL_VALUE)
+        self.shared_view = Tensor(
+            (1, 2), [[MODEL_VALUE, MODEL_VALUE]], self.shared._storage, offset=2
+        )
         self.position = Tensor((4,), 1.0)
 
     def named_modules(self):
         return [("", self), ("encoder", Block())]
 
     def named_parameters(self, remove_duplicate=False):
-        return [("encoder.weight", self.shared), ("action_head.weight", self.shared)]
+        return [
+            ("encoder.weight", self.shared),
+            ("action_head.weight", self.shared),
+            ("encoder.weight_view", self.shared_view),
+        ]
 
     def named_buffers(self, remove_duplicate=False):
         return [("position_ids", self.position)]
@@ -207,7 +233,7 @@ if FAILURE == "missing_description":
             "--checkpoint",
             str(checkpoint),
             "--reference-entrypoint",
-            "reference_impl.py",
+            "reference_pkg/reference_impl.py",
             "--dependency-lock",
             "requirements.lock",
             "--port-dir",
@@ -222,7 +248,7 @@ if FAILURE == "missing_description":
             root = Path(temporary)
             port, source = self.initialize_inspectable_port(root)
             source_digest = hashlib.sha256(
-                (source / "reference_impl.py").read_bytes()
+                (source / "reference_pkg/reference_impl.py").read_bytes()
             ).hexdigest()
 
             result = self.run_port("run", "--port-dir", str(port))
@@ -230,7 +256,8 @@ if FAILURE == "missing_description":
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["stages"]["intake"], "passed")
-            self.assertEqual(report["stages"]["preflight"], "passed")
+            self.assertEqual(report["stages"]["preflight"], "not_started")
+            self.assertEqual(report["reference_inspection"]["status"], "passed")
             self.assertEqual(report["exit"]["category"], "success")
 
             artifacts = report["artifacts"]
@@ -246,7 +273,6 @@ if FAILURE == "missing_description":
             ):
                 self.assertTrue(artifact_path.is_file(), artifact_path)
             for artifact in artifacts.values():
-                self.assertEqual(artifact["status"], "fresh")
                 self.assertEqual(
                     set(artifact["fingerprints"]),
                     {
@@ -259,6 +285,10 @@ if FAILURE == "missing_description":
                     },
                 )
                 self.assertEqual(len(artifact["fingerprints"]["content_sha256"]), 64)
+                self.assertEqual(
+                    set(artifact["fingerprints"]["tool_sha256"]),
+                    {"orchestrator", "reference_adapter"},
+                )
 
             adapter_spec = importlib.util.spec_from_file_location(
                 "generated_reference_adapter", adapter_path
@@ -293,16 +323,21 @@ if FAILURE == "missing_description":
                 [module["name"] for module in inventory["modules"]],
                 ["", "encoder"],
             )
-            self.assertEqual(len(inventory["parameters"]), 2)
+            self.assertEqual(len(inventory["parameters"]), 3)
             self.assertEqual(len(inventory["buffers"]), 1)
             self.assertEqual(
                 {parameter["name"] for parameter in inventory["parameters"]},
-                {"encoder.weight", "action_head.weight"},
+                {"encoder.weight", "action_head.weight", "encoder.weight_view"},
             )
+            parameter_shapes = {
+                parameter["name"]: parameter["shape"]
+                for parameter in inventory["parameters"]
+            }
+            self.assertEqual(parameter_shapes["encoder.weight"], [2, 2])
+            self.assertEqual(parameter_shapes["encoder.weight_view"], [1, 2])
             self.assertTrue(
                 all(
-                    parameter["shape"] == [2, 2]
-                    and parameter["dtype"] == "float32"
+                    parameter["dtype"] == "float32"
                     for parameter in inventory["parameters"]
                 )
             )
@@ -312,7 +347,10 @@ if FAILURE == "missing_description":
                 inventory["tied_weights"],
                 [["action_head.weight", "encoder.weight"]],
             )
-            self.assertEqual(inventory["aliases"], inventory["tied_weights"])
+            self.assertEqual(
+                inventory["aliases"],
+                [["action_head.weight", "encoder.weight", "encoder.weight_view"]],
+            )
             self.assertEqual(
                 inventory["operator_traces"][0]["operator"], "aten.linear"
             )
@@ -335,7 +373,11 @@ if FAILURE == "missing_description":
             self.assertFalse(environment["runtime_network_access"])
             self.assertEqual(
                 environment["isolation"],
-                {"kind": "venv", "system_site_packages": False},
+                {
+                    "kind": "venv",
+                    "environment_id": environment["isolation"]["environment_id"],
+                    "system_site_packages": False,
+                },
             )
             self.assertEqual(
                 environment["dependency_lock"]["sha256"],
@@ -380,7 +422,8 @@ if FAILURE == "missing_description":
             self.assertEqual(result.returncode, 5)
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["stages"]["intake"], "passed")
-            self.assertEqual(report["stages"]["preflight"], "failed")
+            self.assertEqual(report["stages"]["preflight"], "not_started")
+            self.assertEqual(report["reference_inspection"]["status"], "failed")
             self.assertEqual(report["exit"]["category"], "environment_failure")
             self.assertEqual(report["issues"][0]["path"], "reference.environment")
             self.assertEqual(
@@ -390,6 +433,40 @@ if FAILURE == "missing_description":
                     for path in source.rglob("*")
                     if path.is_file()
                 },
+            )
+
+    def test_each_inspection_uses_a_fresh_locked_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(Path(temporary))
+
+            first = self.run_port("run", "--port-dir", str(port))
+            self.assertEqual(first.returncode, 0, first.stderr)
+            first_environment = json.loads(
+                (port / "private/reference_environment/environment.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            second = self.run_port("run", "--port-dir", str(port))
+            self.assertEqual(second.returncode, 0, second.stderr)
+            second_environment = json.loads(
+                (port / "private/reference_environment/environment.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            self.assertNotEqual(
+                first_environment["isolation"]["environment_id"],
+                second_environment["isolation"]["environment_id"],
+            )
+            self.assertIsInstance(
+                second_environment["installed_distributions"], list
+            )
+            self.assertTrue(
+                all(
+                    set(distribution) == {"name", "version"}
+                    for distribution in second_environment["installed_distributions"]
+                )
             )
 
     def test_reference_load_failure_has_a_distinct_structured_category(self) -> None:
@@ -404,7 +481,8 @@ if FAILURE == "missing_description":
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["exit"]["category"], "reference_load_failure")
             self.assertEqual(report["issues"][0]["path"], "reference.load")
-            self.assertEqual(report["stages"]["preflight"], "failed")
+            self.assertEqual(report["stages"]["preflight"], "not_started")
+            self.assertEqual(report["reference_inspection"]["status"], "failed")
 
     def test_reference_trace_failure_has_a_distinct_structured_category(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

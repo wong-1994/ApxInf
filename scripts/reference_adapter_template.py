@@ -8,7 +8,7 @@ an explicitly declared path; it never copies that source into ApxInf.
 from __future__ import annotations
 
 import argparse
-import importlib.util
+import importlib
 import json
 import socket
 import sys
@@ -39,16 +39,16 @@ class ReferenceAdapter:
         entrypoint_path = (source_root / entrypoint).resolve()
         if not entrypoint_path.is_relative_to(source_root):
             raise ValueError("reference entrypoint escapes the trusted source root")
-        spec = importlib.util.spec_from_file_location(
-            "apxinf_trusted_reference", entrypoint_path
-        )
-        if spec is None or spec.loader is None:
-            raise ImportError(f"cannot load reference entrypoint: {entrypoint}")
-        module = importlib.util.module_from_spec(spec)
+        relative_entrypoint = entrypoint_path.relative_to(source_root)
+        if relative_entrypoint.suffix != ".py":
+            raise ValueError("reference entrypoint must be a Python module")
+        module_parts = relative_entrypoint.with_suffix("").parts
+        if module_parts[-1] == "__init__":
+            module_parts = module_parts[:-1]
+        if not module_parts or any(not part.isidentifier() for part in module_parts):
+            raise ValueError("reference entrypoint must use importable module names")
         sys.path.insert(0, str(source_root))
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        self._module = module
+        self._module = importlib.import_module(".".join(module_parts))
 
     def load(self, checkpoint_path: str) -> Any:
         return self._call("load", checkpoint_path)
@@ -211,6 +211,18 @@ def storage_key(value: Any) -> tuple[str, int]:
     return ("object", id(value))
 
 
+def tensor_layout_key(value: Any) -> tuple[Any, ...]:
+    storage_offset = getattr(value, "storage_offset", None)
+    offset = int(storage_offset()) if callable(storage_offset) else 0
+    stride_method = getattr(value, "stride", None)
+    stride = (
+        tuple(int(item) for item in stride_method())
+        if callable(stride_method)
+        else None
+    )
+    return (storage_key(value), offset, tuple(tensor_shape(value) or []), stride)
+
+
 def tensor_record(name: str, value: Any) -> dict[str, Any]:
     return {
         "name": name,
@@ -224,6 +236,16 @@ def alias_groups(values: list[tuple[str, Any]]) -> list[list[str]]:
     groups: dict[tuple[str, int], list[str]] = {}
     for name, value in values:
         groups.setdefault(storage_key(value), []).append(name)
+    return sorted(
+        [sorted(names) for names in groups.values() if len(names) > 1],
+        key=lambda names: names[0],
+    )
+
+
+def tied_weight_groups(parameters: list[tuple[str, Any]]) -> list[list[str]]:
+    groups: dict[tuple[Any, ...], list[str]] = {}
+    for name, value in parameters:
+        groups.setdefault(tensor_layout_key(value), []).append(name)
     return sorted(
         [sorted(names) for names in groups.values() if len(names) > 1],
         key=lambda names: names[0],
@@ -328,7 +350,7 @@ def inspect_source(args: argparse.Namespace) -> None:
             "parameters": [tensor_record(name, value) for name, value in parameters],
             "buffers": [tensor_record(name, value) for name, value in buffers],
             "aliases": alias_groups(parameters + buffers),
-            "tied_weights": alias_groups(parameters),
+            "tied_weights": tied_weight_groups(parameters),
             "input_schema": input_schemas,
             "output_schema": output_schemas,
             "intermediate_schema": intermediate_schemas,
