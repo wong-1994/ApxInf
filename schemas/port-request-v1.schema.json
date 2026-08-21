@@ -28,6 +28,16 @@
         "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
       }
     },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entrypoint", "dependency_lock", "network_access"],
+      "properties": {
+        "entrypoint": {"type": ["string", "null"], "minLength": 1},
+        "dependency_lock": {"type": ["string", "null"], "minLength": 1},
+        "network_access": {"const": false}
+      }
+    },
     "representative_profiles": {
       "type": "array",
       "items": {

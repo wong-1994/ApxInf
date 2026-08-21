@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apxinf.dev/schemas/reference-capture-v1.schema.json",
+  "title": "ApxInf private reference capture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profiles"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "profile",
+          "inputs",
+          "output",
+          "intermediates",
+          "postprocessed"
+        ],
+        "properties": {
+          "profile": {"type": ["string", "null"]},
+          "inputs": {},
+          "output": {},
+          "intermediates": {},
+          "postprocessed": {}
+        }
+      }
+    }
+  }
+}

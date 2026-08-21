@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Initialize and run the read-only Intake stage of an ApxInf VLA Port."""
+"""Initialize Intake and inspect trusted source code for an ApxInf VLA Port."""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ import json
 import math
 import os
 import platform
+import secrets
+import subprocess
 import sys
+import venv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +20,7 @@ from typing import Any
 
 REQUEST_SCHEMA_VERSION = "1.0"
 REPORT_SCHEMA_VERSION = "1.0"
+REFERENCE_ADAPTER_CONTRACT_VERSION = "1.0"
 SUPPORTED_TUPLES = (
     ("thor", "bf16"),
     ("thor", "fp8"),
@@ -38,10 +42,16 @@ MISSING_INPUT = IntakeOutcome(2, "missing_input")
 INVALID_INPUT = IntakeOutcome(3, "invalid_input")
 UNSUPPORTED_TARGET = IntakeOutcome(4, "unsupported_target")
 ENVIRONMENT_FAILURE = IntakeOutcome(5, "environment_failure")
+REFERENCE_LOAD_FAILURE = IntakeOutcome(6, "reference_load_failure")
+REFERENCE_TRACE_FAILURE = IntakeOutcome(7, "reference_trace_failure")
 
 
 def repository_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def reference_adapter_template() -> Path:
+    return repository_root() / "scripts" / "reference_adapter_template.py"
 
 
 def port_dir_is_unsafe(port_dir: Path, source: Path | None = None) -> bool:
@@ -82,7 +92,8 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
-        json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+        json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
     )
     os.replace(temporary, path)
 
@@ -101,6 +112,26 @@ def initialize(args: argparse.Namespace) -> int:
         print("port directory must be outside source checkouts", file=sys.stderr)
         return INVALID_INPUT.code
 
+    reference_values = (args.reference_entrypoint, args.dependency_lock)
+    if any(reference_values) and not all(reference_values):
+        print(
+            "--reference-entrypoint and --dependency-lock must be supplied together",
+            file=sys.stderr,
+        )
+        return INVALID_INPUT.code
+    if all(reference_values) and source is None:
+        print("reference inspection requires --source", file=sys.stderr)
+        return INVALID_INPUT.code
+    if source is not None and all(reference_values):
+        for option, relative_path in (
+            ("reference entrypoint", args.reference_entrypoint),
+            ("dependency lock", args.dependency_lock),
+        ):
+            candidate = (source / relative_path).resolve()
+            if not candidate.is_relative_to(source) or not candidate.is_file():
+                print(f"{option} does not exist inside source: {relative_path}", file=sys.stderr)
+                return MISSING_INPUT.code
+
     source_revision = args.source_revision
     source_name = source.name if source is not None else port_dir.name
     revision_suffix = source_revision[:8] if source_revision else "draft"
@@ -116,6 +147,11 @@ def initialize(args: argparse.Namespace) -> int:
         "checkpoint": {
             "path": str(checkpoint) if checkpoint is not None else None,
             "sha256": file_sha256(checkpoint) if checkpoint is not None else None,
+        },
+        "reference": {
+            "entrypoint": args.reference_entrypoint,
+            "dependency_lock": args.dependency_lock,
+            "network_access": False,
         },
         "representative_profiles": [{"name": None, "inputs": {}}],
         "requested_targets": [
@@ -134,6 +170,12 @@ def initialize(args: argparse.Namespace) -> int:
         print(f"request already exists: {request_path}", file=sys.stderr)
         return 3
     write_json(request_path, request)
+    if all(reference_values):
+        adapter_path = port_dir / "private" / "reference_adapter.py"
+        adapter_path.parent.mkdir(parents=True, exist_ok=True)
+        adapter_path.write_text(
+            reference_adapter_template().read_text(encoding="utf-8"), encoding="utf-8"
+        )
     print(request_path)
     return 0
 
@@ -194,7 +236,11 @@ def successful_report(
         "schema_version": REPORT_SCHEMA_VERSION,
         "port_id": request["port_id"],
         "request_schema_version": request["schema_version"],
-        "stages": {"intake": "passed", "preflight": "not_started"},
+        "stages": {
+            "intake": "passed",
+            "inspection": "not_started",
+            "preflight": "not_started",
+        },
         "exit": {
             "code": SUCCESS.code,
             "category": SUCCESS.category,
@@ -203,6 +249,7 @@ def successful_report(
         "request_declarations": {
             "source": request["source"],
             "checkpoint": request["checkpoint"],
+            "reference": request["reference"],
             "representative_profiles": request["representative_profiles"],
             "requested_targets": request["requested_targets"],
             "correctness_thresholds": request["correctness_thresholds"],
@@ -213,6 +260,7 @@ def successful_report(
         "target_precisions": tuple_states(request["requested_targets"]),
         "issues": [],
         "warnings": warnings,
+        "artifacts": {},
     }
 
 
@@ -227,7 +275,11 @@ def failed_report(
         "request_schema_version": (
             request_schema_version if isinstance(request_schema_version, str) else None
         ),
-        "stages": {"intake": "failed", "preflight": "not_started"},
+        "stages": {
+            "intake": "failed",
+            "inspection": "not_started",
+            "preflight": "not_started",
+        },
         "exit": {
             "code": outcome.code,
             "category": outcome.category,
@@ -237,6 +289,7 @@ def failed_report(
             {
                 "source": request.get("source"),
                 "checkpoint": request.get("checkpoint"),
+                "reference": request.get("reference"),
                 "representative_profiles": request.get("representative_profiles"),
                 "requested_targets": request.get("requested_targets"),
                 "correctness_thresholds": request.get("correctness_thresholds"),
@@ -248,6 +301,7 @@ def failed_report(
         "target_precisions": tuple_states(request.get("requested_targets", [])),
         "issues": issues,
         "warnings": [],
+        "artifacts": {},
     }
 
 
@@ -306,6 +360,7 @@ def schema_issues(request: Any) -> list[dict[str, str]]:
         "port_id",
         "source",
         "checkpoint",
+        "reference",
         "representative_profiles",
         "requested_targets",
         "correctness_thresholds",
@@ -334,7 +389,7 @@ def schema_issues(request: Any) -> list[dict[str, str]]:
     for field in ("port_id",):
         if field in request and not isinstance(request[field], str):
             issues.append({"path": field, "message": "must be a string"})
-    for field in ("source", "checkpoint", "correctness_thresholds"):
+    for field in ("source", "checkpoint", "reference", "correctness_thresholds"):
         if field in request and not isinstance(request[field], dict):
             issues.append({"path": field, "message": "must be an object"})
     source = request.get("source")
@@ -363,6 +418,63 @@ def schema_issues(request: Any) -> list[dict[str, str]]:
     )
     add_unknown_field_issues(
         issues, request.get("checkpoint"), {"path", "sha256"}, "checkpoint"
+    )
+    reference = request.get("reference")
+    if isinstance(reference, dict):
+        entrypoint = reference.get("entrypoint")
+        dependency_lock = reference.get("dependency_lock")
+        for field, value in (
+            ("entrypoint", entrypoint),
+            ("dependency_lock", dependency_lock),
+        ):
+            if value is not None and (
+                not isinstance(value, str)
+                or not value
+                or Path(value).is_absolute()
+                or ".." in Path(value).parts
+            ):
+                issues.append(
+                    {
+                        "path": f"reference.{field}",
+                        "message": "must be a source-relative path",
+                    }
+                )
+        if (entrypoint is None) != (dependency_lock is None):
+            issues.append(
+                {
+                    "path": "reference",
+                    "message": "entrypoint and dependency_lock must be provided together",
+                }
+            )
+        if reference.get("network_access") is not False:
+            issues.append(
+                {
+                    "path": "reference.network_access",
+                    "message": "must be false for trusted source execution",
+                }
+            )
+        if entrypoint is not None:
+            source_values = source if isinstance(source, dict) else {}
+            checkpoint_values = checkpoint if isinstance(checkpoint, dict) else {}
+            for path, value in (
+                ("source.path", source_values.get("path")),
+                ("source.revision", source_values.get("revision")),
+                ("source.sha256", source_values.get("sha256")),
+                ("checkpoint.path", checkpoint_values.get("path")),
+                ("checkpoint.sha256", checkpoint_values.get("sha256")),
+            ):
+                if not value:
+                    issues.append(
+                        {
+                            "path": path,
+                            "message": "is required for reference inspection",
+                        }
+                    )
+    add_unknown_field_issues(
+        issues,
+        reference,
+        {"entrypoint", "dependency_lock", "network_access"},
+        "reference",
     )
     add_unknown_field_issues(
         issues,
@@ -505,6 +617,10 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(request)
     normalized.setdefault("source", {})
     normalized.setdefault("checkpoint", {})
+    normalized.setdefault(
+        "reference",
+        {"entrypoint": None, "dependency_lock": None, "network_access": False},
+    )
     normalized.setdefault("representative_profiles", [])
     normalized.setdefault("requested_targets", [])
     normalized.setdefault("correctness_thresholds", {})
@@ -658,6 +774,238 @@ def provenance_issues(
     return missing, invalid
 
 
+def artifact_record(port_dir: Path, path: Path) -> dict[str, str]:
+    return {
+        "path": path.relative_to(port_dir).as_posix(),
+        "sha256": file_sha256(path),
+    }
+
+
+def offline_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    for name in (
+        "ALL_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "all_proxy",
+        "https_proxy",
+        "http_proxy",
+        "PIP_CONFIG_FILE",
+        "PIP_EXTRA_INDEX_URL",
+        "PIP_FIND_LINKS",
+        "PIP_INDEX_URL",
+        "PIP_TRUSTED_HOST",
+    ):
+        environment.pop(name, None)
+    environment.update(
+        {
+            "APXINF_REFERENCE_NETWORK": "disabled",
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "WANDB_MODE": "offline",
+            "PIP_NO_INDEX": "1",
+            "PIP_CONFIG_FILE": os.devnull,
+            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    return environment
+
+
+def run_reference_inspection(
+    port_dir: Path, request: dict[str, Any]
+) -> tuple[IntakeOutcome, list[dict[str, str]], dict[str, dict[str, str]]]:
+    source = Path(request["source"]["path"])
+    checkpoint = Path(request["checkpoint"]["path"])
+    reference = request["reference"]
+    entrypoint = reference["entrypoint"]
+    dependency_lock = reference["dependency_lock"]
+    entrypoint_path = (source / entrypoint).resolve()
+    lock_path = (source / dependency_lock).resolve()
+    for issue_path, path in (
+        ("reference.entrypoint", entrypoint_path),
+        ("reference.dependency_lock", lock_path),
+    ):
+        if not path.is_relative_to(source.resolve()) or not path.is_file():
+            issue = {"path": issue_path, "message": "declared reference file is missing"}
+            return MISSING_INPUT, [issue], {}
+
+    private_dir = port_dir / "private"
+    adapter_path = private_dir / "reference_adapter.py"
+    if not adapter_path.is_file():
+        issue = {
+            "path": "artifacts.reference_adapter",
+            "message": "generated private Reference Adapter is missing; re-run init",
+        }
+        return MISSING_INPUT, [issue], {}
+
+    environment_dir = private_dir / "reference_environment"
+    virtual_environment = environment_dir / "venv"
+    environment_path = environment_dir / "environment.json"
+    try:
+        if not virtual_environment.is_dir():
+            venv.EnvBuilder(with_pip=True).create(virtual_environment)
+        python = virtual_environment / (
+            "Scripts/python.exe" if os.name == "nt" else "bin/python"
+        )
+        lock_text = lock_path.read_text(encoding="utf-8")
+        if "http://" in lock_text.lower() or "https://" in lock_text.lower():
+            raise RuntimeError("dependency lock contains a network URL")
+        requirements = [
+            line
+            for line in lock_text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        if requirements:
+            installed = subprocess.run(
+                [
+                    str(python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-index",
+                    "--require-hashes",
+                    "--disable-pip-version-check",
+                    "--no-input",
+                    "-r",
+                    str(lock_path),
+                ],
+                cwd=source,
+                env=offline_environment(),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=300,
+            )
+            if installed.returncode != 0:
+                message = installed.stderr.strip() or installed.stdout.strip()
+                raise RuntimeError(f"locked dependency installation failed: {message}")
+        environment = {
+            "schema_version": "1.0",
+            "python": platform.python_version(),
+            "dependency_lock": {
+                "path": dependency_lock,
+                "sha256": file_sha256(lock_path),
+            },
+            "runtime_network_access": False,
+            "network_enforcement": ["offline_environment", "python_socket_guard"],
+        }
+        write_json(environment_path, environment)
+    except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+        issue = {
+            "path": "reference.environment",
+            "message": f"could not prepare locked reference environment: {error}",
+        }
+        return ENVIRONMENT_FAILURE, [issue], {}
+
+    profiles_path = private_dir / "reference_profiles.json"
+    inventory_path = private_dir / "source_inventory.json"
+    capture_path = private_dir / "captures" / "inspection.json"
+    result_path = (
+        private_dir / "inspection_results" / f"{secrets.token_hex(12)}.json"
+    )
+    profiles_path.write_text(
+        json.dumps(request["representative_profiles"], indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    command = [
+        str(python),
+        "-I",
+        "-B",
+        str(adapter_path),
+        "--source-root",
+        str(source),
+        "--entrypoint",
+        entrypoint,
+        "--checkpoint",
+        str(checkpoint),
+        "--profiles",
+        str(profiles_path),
+        "--inventory",
+        str(inventory_path),
+        "--capture",
+        str(capture_path),
+        "--result",
+        str(result_path),
+        "--source-revision",
+        request["source"]["revision"],
+        "--source-sha256",
+        request["source"]["sha256"],
+        "--checkpoint-sha256",
+        request["checkpoint"]["sha256"],
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=source,
+            env=offline_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(f"reference process exited {completed.returncode}: {detail}")
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, subprocess.SubprocessError, RuntimeError) as error:
+        issue = {
+            "path": "reference.environment",
+            "message": f"could not execute Reference Adapter: {error}",
+        }
+        return ENVIRONMENT_FAILURE, [issue], {
+            "reference_adapter": artifact_record(port_dir, adapter_path),
+            "reference_environment": artifact_record(port_dir, environment_path),
+        }
+
+    status = result.get("status")
+    artifacts = {
+        "reference_adapter": artifact_record(port_dir, adapter_path),
+        "reference_environment": artifact_record(port_dir, environment_path),
+    }
+    if status == "load_failure":
+        issue = {
+            "path": "reference.load",
+            "message": f"trusted source could not be loaded: {result.get('message', 'unknown error')}",
+        }
+        return REFERENCE_LOAD_FAILURE, [issue], artifacts
+    if status == "trace_failure":
+        issue = {
+            "path": "reference.trace",
+            "message": f"trusted source could not be traced: {result.get('message', 'unknown error')}",
+        }
+        return REFERENCE_TRACE_FAILURE, [issue], artifacts
+    if status != "success" or not inventory_path.is_file() or not capture_path.is_file():
+        issue = {
+            "path": "reference.trace",
+            "message": "Reference Adapter did not produce complete inspection artifacts",
+        }
+        return REFERENCE_TRACE_FAILURE, [issue], artifacts
+
+    try:
+        current_source_sha256 = source_sha256(source)
+    except OSError as error:
+        issue = {
+            "path": "source.sha256",
+            "message": f"could not verify source after inspection: {error}",
+        }
+        return ENVIRONMENT_FAILURE, [issue], artifacts
+    if current_source_sha256 != request["source"]["sha256"]:
+        issue = {
+            "path": "source.sha256",
+            "message": "trusted source changed while reference inspection was running",
+        }
+        return INVALID_INPUT, [issue], artifacts
+
+    artifacts.update(
+        {
+            "source_inventory": artifact_record(port_dir, inventory_path),
+            "private_capture": artifact_record(port_dir, capture_path),
+        }
+    )
+    return SUCCESS, [], artifacts
+
+
 def run_intake(args: argparse.Namespace) -> int:
     port_dir = args.port_dir.resolve()
     if port_dir_is_unsafe(port_dir):
@@ -731,6 +1079,29 @@ def run_intake(args: argparse.Namespace) -> int:
         return INVALID_INPUT.code
 
     report = successful_report(request, warnings)
+    if request["reference"].get("entrypoint") is not None:
+        outcome, inspection_issues, artifacts = run_reference_inspection(
+            port_dir, request
+        )
+        report["artifacts"] = artifacts
+        if outcome == SUCCESS:
+            report["stages"]["inspection"] = "passed"
+            report["exit"]["message"] = (
+                "Intake and source inspection passed with warnings"
+                if warnings
+                else "Intake and source inspection passed"
+            )
+        else:
+            report["stages"]["inspection"] = "failed"
+            report["exit"] = {
+                "code": outcome.code,
+                "category": outcome.category,
+                "message": inspection_issues[0]["message"],
+            }
+            report["issues"] = inspection_issues
+            write_json(port_dir / "report.json", report)
+            print(inspection_issues[0]["message"], file=sys.stderr)
+            return outcome.code
     write_json(port_dir / "report.json", report)
     print(port_dir / "report.json")
     return SUCCESS.code
@@ -755,6 +1126,8 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--source", type=Path)
     init.add_argument("--source-revision")
     init.add_argument("--checkpoint", type=Path)
+    init.add_argument("--reference-entrypoint")
+    init.add_argument("--dependency-lock")
     init.add_argument("--port-dir", type=Path, required=True)
     init.set_defaults(handler=initialize)
 

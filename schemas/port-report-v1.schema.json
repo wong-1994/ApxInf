@@ -14,7 +14,8 @@
     "observed_environment",
     "target_precisions",
     "issues",
-    "warnings"
+    "warnings",
+    "artifacts"
   ],
   "properties": {
     "schema_version": {"const": "1.0"},
@@ -22,9 +23,11 @@
     "request_schema_version": {"type": ["string", "null"]},
     "stages": {
       "type": "object",
-      "required": ["intake", "preflight"],
+      "additionalProperties": false,
+      "required": ["intake", "inspection", "preflight"],
       "properties": {
         "intake": {"enum": ["not_started", "running", "passed", "failed", "blocked", "stale", "skipped"]},
+        "inspection": {"enum": ["not_started", "running", "passed", "failed", "blocked", "stale", "skipped"]},
         "preflight": {"enum": ["not_started", "running", "passed", "failed", "blocked", "stale", "skipped"]}
       }
     },
@@ -34,7 +37,7 @@
       "required": ["code", "category", "message"],
       "properties": {
         "code": {"type": "integer"},
-        "category": {"enum": ["success", "missing_input", "invalid_input", "unsupported_target", "environment_failure"]},
+        "category": {"enum": ["success", "missing_input", "invalid_input", "unsupported_target", "environment_failure", "reference_load_failure", "reference_trace_failure"]},
         "message": {"type": "string"}
       }
     },
@@ -74,6 +77,18 @@
         "properties": {
           "path": {"type": "string"},
           "message": {"type": "string"}
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         }
       }
     }

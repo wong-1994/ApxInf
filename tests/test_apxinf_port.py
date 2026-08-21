@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import json
 import math
 import shutil
@@ -70,6 +71,327 @@ class PortIntakeTest(unittest.TestCase):
         request["tuning_budgets"] = [{"target": target, "seconds": 300}]
         request["user_environment_declarations"] = {"power_mode": "MAXN"}
         request_path.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+
+    def initialize_inspectable_port(
+        self, root: Path, *, failure=None, lock_text: str = ""
+    ) -> tuple[Path, Path]:
+        source = root / "trusted-source"
+        checkpoint = root / "model.ckpt"
+        port = root / "private-port"
+        source.mkdir()
+        (source / "requirements.lock").write_text(lock_text, encoding="utf-8")
+        (source / "reference_impl.py").write_text(
+            """
+FAILURE = __FAILURE__
+
+import sys
+
+
+class Tensor:
+    def __init__(self, shape, value):
+        self.shape = shape
+        self.dtype = "float32"
+        self.value = value
+        self.requires_grad = False
+
+    def data_ptr(self):
+        return id(self)
+
+
+class Block:
+    pass
+
+
+class Model:
+    def __init__(self):
+        self.shared = Tensor((2, 2), 3.0)
+        self.position = Tensor((4,), 1.0)
+
+    def named_modules(self):
+        return [("", self), ("encoder", Block())]
+
+    def named_parameters(self, remove_duplicate=False):
+        return [("encoder.weight", self.shared), ("action_head.weight", self.shared)]
+
+    def named_buffers(self, remove_duplicate=False):
+        return [("position_ids", self.position)]
+
+
+def load(checkpoint_path):
+    assert sys.prefix != sys.base_prefix
+    if FAILURE == "load":
+        raise RuntimeError("synthetic load failed")
+    assert checkpoint_path.endswith("model.ckpt")
+    return Model()
+
+
+def preprocess(profile):
+    assert profile["name"] == "control-step"
+    return {"tokens": [[1, 2]], "noise": [[0.25, -0.25]]}
+
+
+def infer(model, inputs):
+    if FAILURE == "network":
+        import socket
+        socket.create_connection(("example.com", 443))
+    assert model.shared.value == 3.0
+    return {"actions": [[inputs["noise"][0][0], 2.0]]}
+
+
+def capture_intermediates(model, inputs):
+    if FAILURE == "trace":
+        raise RuntimeError("synthetic trace failed")
+    return {"encoder.output": [[model.shared.value, inputs["tokens"][0][0]]]}
+
+
+def postprocess(output):
+    return {"actions": [[output["actions"][0][0] * 2.0, 4.0]]}
+
+
+def describe():
+    if FAILURE == "invalid_inventory":
+        return {"preprocessing": []}
+    return {
+        "operator_traces": [{"name": "action_head", "operator": "aten.linear"}],
+        "preprocessing": {"images": "uint8_to_float32"},
+        "tokenization": {"kind": "synthetic_ids"},
+        "normalization": {"actions": "q01_q99"},
+        "stochastic_inputs": [{"name": "noise", "distribution": "normal"}],
+        "schedules": [{"name": "flow", "steps": 2}],
+        "custom_operators": [],
+        "dynamic_branches": [],
+    }
+""".replace("__FAILURE__", repr(failure)).lstrip(),
+            encoding="utf-8",
+        )
+        checkpoint.write_bytes(b"checkpoint bytes")
+        result = self.run_port(
+            "init",
+            "--source",
+            str(source),
+            "--source-revision",
+            "0123456789abcdef",
+            "--checkpoint",
+            str(checkpoint),
+            "--reference-entrypoint",
+            "reference_impl.py",
+            "--dependency-lock",
+            "requirements.lock",
+            "--port-dir",
+            str(port),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.complete_request(port)
+        return port, source
+
+    def test_run_inspects_trusted_source_through_private_reference_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            port, source = self.initialize_inspectable_port(root)
+            source_digest = hashlib.sha256(
+                (source / "reference_impl.py").read_bytes()
+            ).hexdigest()
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["stages"]["intake"], "passed")
+            self.assertEqual(report["stages"]["inspection"], "passed")
+            self.assertEqual(report["stages"]["preflight"], "not_started")
+            self.assertEqual(report["exit"]["category"], "success")
+
+            artifacts = report["artifacts"]
+            adapter_path = port / artifacts["reference_adapter"]["path"]
+            inventory_path = port / artifacts["source_inventory"]["path"]
+            environment_path = port / artifacts["reference_environment"]["path"]
+            capture_path = port / artifacts["private_capture"]["path"]
+            for artifact_path in (
+                adapter_path,
+                inventory_path,
+                environment_path,
+                capture_path,
+            ):
+                self.assertTrue(artifact_path.is_file(), artifact_path)
+
+            adapter_spec = importlib.util.spec_from_file_location(
+                "generated_reference_adapter", adapter_path
+            )
+            self.assertIsNotNone(adapter_spec)
+            self.assertIsNotNone(adapter_spec.loader)
+            adapter_module = importlib.util.module_from_spec(adapter_spec)
+            adapter_spec.loader.exec_module(adapter_module)
+            for method in (
+                "load",
+                "preprocess",
+                "infer",
+                "capture_intermediates",
+                "postprocess",
+            ):
+                self.assertTrue(hasattr(adapter_module.ReferenceAdapter, method))
+
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+            self.assertEqual(inventory["schema_version"], "1.0")
+            self.assertEqual(inventory["adapter_contract_version"], "1.0")
+            self.assertEqual(inventory["source"]["revision"], "0123456789abcdef")
+            self.assertEqual(
+                inventory["source"]["sha256"],
+                json.loads((port / "request.json").read_text())["source"]["sha256"],
+            )
+            self.assertNotEqual(inventory["source"]["sha256"], source_digest)
+            self.assertEqual(
+                inventory["checkpoint"]["sha256"],
+                hashlib.sha256(b"checkpoint bytes").hexdigest(),
+            )
+            self.assertEqual(
+                [module["name"] for module in inventory["modules"]],
+                ["", "encoder"],
+            )
+            self.assertEqual(len(inventory["parameters"]), 2)
+            self.assertEqual(len(inventory["buffers"]), 1)
+            self.assertEqual(
+                {parameter["name"] for parameter in inventory["parameters"]},
+                {"encoder.weight", "action_head.weight"},
+            )
+            self.assertTrue(
+                all(
+                    parameter["shape"] == [2, 2]
+                    and parameter["dtype"] == "float32"
+                    for parameter in inventory["parameters"]
+                )
+            )
+            self.assertEqual(inventory["buffers"][0]["shape"], [4])
+            self.assertEqual(inventory["buffers"][0]["dtype"], "float32")
+            self.assertEqual(
+                inventory["tied_weights"],
+                [["action_head.weight", "encoder.weight"]],
+            )
+            self.assertEqual(inventory["aliases"], inventory["tied_weights"])
+            self.assertEqual(
+                inventory["operator_traces"][0]["operator"], "aten.linear"
+            )
+            for field in (
+                "input_schema",
+                "output_schema",
+                "intermediate_schema",
+                "preprocessing",
+                "tokenization",
+                "normalization",
+                "stochastic_inputs",
+                "schedules",
+                "custom_operators",
+                "dynamic_branches",
+            ):
+                self.assertIn(field, inventory)
+
+            environment = json.loads(environment_path.read_text(encoding="utf-8"))
+            self.assertEqual(environment["schema_version"], "1.0")
+            self.assertFalse(environment["runtime_network_access"])
+            self.assertEqual(
+                environment["dependency_lock"]["sha256"],
+                hashlib.sha256(b"").hexdigest(),
+            )
+            self.assertIn("private", capture_path.relative_to(port).parts)
+            capture = json.loads(capture_path.read_text(encoding="utf-8"))
+            for schema_name, artifact in (
+                ("reference-inventory-v1.schema.json", inventory),
+                ("reference-environment-v1.schema.json", environment),
+                ("reference-capture-v1.schema.json", capture),
+            ):
+                schema = json.loads(
+                    (ROOT / "schemas" / schema_name).read_text(encoding="utf-8")
+                )
+                self.assertEqual(schema["properties"]["schema_version"]["const"], "1.0")
+                self.assertEqual(set(schema["required"]) - artifact.keys(), set())
+
+    def test_locked_environment_failure_is_reported_without_executing_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            port, source = self.initialize_inspectable_port(
+                root,
+                lock_text=(
+                    "package-that-does-not-exist==1.0 "
+                    "--hash=sha256:0000000000000000000000000000000000000000000000000000000000000000\n"
+                ),
+            )
+            source_before = {
+                path.relative_to(source): path.read_bytes()
+                for path in source.rglob("*")
+                if path.is_file()
+            }
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 5)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["stages"]["intake"], "passed")
+            self.assertEqual(report["stages"]["inspection"], "failed")
+            self.assertEqual(report["exit"]["category"], "environment_failure")
+            self.assertEqual(report["issues"][0]["path"], "reference.environment")
+            self.assertEqual(
+                source_before,
+                {
+                    path.relative_to(source): path.read_bytes()
+                    for path in source.rglob("*")
+                    if path.is_file()
+                },
+            )
+
+    def test_reference_load_failure_has_a_distinct_structured_category(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(
+                Path(temporary), failure="load"
+            )
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 6)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["exit"]["category"], "reference_load_failure")
+            self.assertEqual(report["issues"][0]["path"], "reference.load")
+            self.assertEqual(report["stages"]["inspection"], "failed")
+
+    def test_reference_trace_failure_has_a_distinct_structured_category(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(
+                Path(temporary), failure="trace"
+            )
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 7)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["exit"]["category"], "reference_trace_failure")
+            self.assertEqual(report["issues"][0]["path"], "reference.trace")
+            self.assertIn("synthetic trace failed", report["issues"][0]["message"])
+
+    def test_reference_runtime_network_is_disabled_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(
+                Path(temporary), failure="network"
+            )
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 7)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["exit"]["category"], "reference_trace_failure")
+            self.assertIn(
+                "network access is disabled", report["issues"][0]["message"]
+            )
+
+    def test_schema_invalid_source_inventory_is_a_trace_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(
+                Path(temporary), failure="invalid_inventory"
+            )
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 7)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["exit"]["category"], "reference_trace_failure")
+            self.assertIn("preprocessing", report["issues"][0]["message"])
 
     def test_valid_subset_marks_only_selected_tuple_as_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

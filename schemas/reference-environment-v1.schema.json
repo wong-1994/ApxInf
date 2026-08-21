@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apxinf.dev/schemas/reference-environment-v1.schema.json",
+  "title": "ApxInf Reference Adapter environment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "python",
+    "dependency_lock",
+    "runtime_network_access",
+    "network_enforcement"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "python": {"type": "string", "minLength": 1},
+    "dependency_lock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "runtime_network_access": {"const": false},
+    "network_enforcement": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    }
+  }
+}
