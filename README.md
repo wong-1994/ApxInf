@@ -8,6 +8,12 @@ target machine.
 The CUDA kernels, CUTLASS, and FlashAttention sources needed by PI0.5 are
 vendored in this repository, so no external source checkout is required.
 
+## VLA model porting
+
+Use the single-entry [`scripts/apxinf_port.py`](scripts/apxinf_port.py) command
+to initialize a private Port request, run the read-only Intake stage, and inspect
+its structured report. See the [Porting Workflow guide](doc/porting-workflow.md).
+
 ## PI0.5 Performance and Accuracy
 
 ApxInf provides native PI0.5 CUDA paths for Jetson AGX Thor (SM110) and Jetson AGX

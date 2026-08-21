@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apxinf.dev/schemas/port-report-v1.schema.json",
+  "title": "ApxInf Port report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "port_id",
+    "request_schema_version",
+    "stages",
+    "exit",
+    "request_declarations",
+    "observed_environment",
+    "target_precisions",
+    "issues"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "port_id": {"type": ["string", "null"]},
+    "request_schema_version": {"type": ["string", "null"]},
+    "stages": {
+      "type": "object",
+      "required": ["intake", "preflight"],
+      "properties": {
+        "intake": {"enum": ["not_started", "running", "passed", "failed", "blocked", "stale", "skipped"]},
+        "preflight": {"enum": ["not_started", "running", "passed", "failed", "blocked", "stale", "skipped"]}
+      }
+    },
+    "exit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "category", "message"],
+      "properties": {
+        "code": {"type": "integer"},
+        "category": {"enum": ["success", "missing_input", "invalid_input", "unsupported_target", "environment_failure"]},
+        "message": {"type": "string"}
+      }
+    },
+    "request_declarations": {"type": "object"},
+    "observed_environment": {"type": "object"},
+    "target_precisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target", "precision", "status"],
+        "properties": {
+          "target": {"enum": ["thor", "orin"]},
+          "precision": {"enum": ["bf16", "fp8", "int8_w8a8"]},
+          "status": {"enum": ["requested", "not_requested"]}
+        }
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "message"],
+        "properties": {
+          "path": {"type": "string"},
+          "message": {"type": "string"}
+        }
+      }
+    }
+  }
+}
