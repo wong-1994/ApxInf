@@ -24,10 +24,9 @@
     "stages": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["intake", "inspection", "preflight"],
+      "required": ["intake", "preflight"],
       "properties": {
         "intake": {"enum": ["not_started", "running", "passed", "failed", "blocked", "stale", "skipped"]},
-        "inspection": {"enum": ["not_started", "running", "passed", "failed", "blocked", "stale", "skipped"]},
         "preflight": {"enum": ["not_started", "running", "passed", "failed", "blocked", "stale", "skipped"]}
       }
     },
@@ -85,10 +84,33 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path", "sha256"],
+        "required": ["path", "status", "fingerprints"],
         "properties": {
           "path": {"type": "string", "minLength": 1},
-          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          "status": {"enum": ["fresh", "stale"]},
+          "fingerprints": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "content_sha256",
+              "tool_sha256",
+              "source_sha256",
+              "checkpoint_sha256",
+              "environment_sha256",
+              "upstream_sha256"
+            ],
+            "properties": {
+              "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "tool_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "checkpoint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "environment_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "upstream_sha256": {
+                "type": "object",
+                "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              }
+            }
+          }
         }
       }
     }

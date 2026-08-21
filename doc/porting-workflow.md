@@ -38,9 +38,10 @@ Orin `fp8` is rejected during Intake.
 The trusted source opts into the stable Reference Adapter contract by exposing
 five module-level callables: `load(checkpoint_path)`, `preprocess(profile)`,
 `infer(model, inputs)`, `capture_intermediates(model, inputs)`, and
-`postprocess(output)`. It may also expose `describe()` to report operator traces,
-preprocessing, tokenization, normalization, stochastic inputs, schedules, custom
-operators, and dynamic branches.
+`postprocess(output)`. It must also expose `describe()` and explicitly report
+operator traces, preprocessing, tokenization, normalization, stochastic inputs,
+schedules, custom operators, and dynamic branches; an empty list is the explicit
+declaration that a list-valued feature is absent.
 
 Both paths below are relative to the trusted source root:
 
@@ -83,7 +84,10 @@ Configured inspection generates only private Port artifacts:
 The inventory and report bind these artifacts to the declared source revision,
 source digest, and checkpoint digest. Port directories are rejected when they
 are inside either ApxInf or the trusted source checkout, so adapters and captured
-inputs cannot enter a proposed public commit.
+inputs cannot enter a proposed public commit. Tensor captures contain f32 data
+with explicit source dtype and shape metadata. Report artifact records carry
+content, workflow-tool, source, checkpoint, environment, and upstream-request
+fingerprints and a fresh/stale state for later resume processing.
 
 | Exit code | Category | Meaning |
 | ---: | --- | --- |

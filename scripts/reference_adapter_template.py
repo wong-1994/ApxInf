@@ -35,8 +35,9 @@ class ReferenceAdapter:
     """Stable private contract around a source-specific reference module."""
 
     def __init__(self, source_root: Path, entrypoint: str) -> None:
+        source_root = source_root.resolve()
         entrypoint_path = (source_root / entrypoint).resolve()
-        if not entrypoint_path.is_relative_to(source_root.resolve()):
+        if not entrypoint_path.is_relative_to(source_root):
             raise ValueError("reference entrypoint escapes the trusted source root")
         spec = importlib.util.spec_from_file_location(
             "apxinf_trusted_reference", entrypoint_path
@@ -44,6 +45,7 @@ class ReferenceAdapter:
         if spec is None or spec.loader is None:
             raise ImportError(f"cannot load reference entrypoint: {entrypoint}")
         module = importlib.util.module_from_spec(spec)
+        sys.path.insert(0, str(source_root))
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         self._module = module
@@ -64,10 +66,7 @@ class ReferenceAdapter:
         return self._call("postprocess", output)
 
     def describe(self) -> dict[str, Any]:
-        describe = getattr(self._module, "describe", None)
-        if describe is None:
-            return {}
-        description = describe()
+        description = self._call("describe")
         if not isinstance(description, dict):
             raise TypeError("describe() must return an object")
         return description
@@ -158,9 +157,31 @@ def json_capture(value: Any) -> Any:
         return {str(key): json_capture(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [json_capture(item) for item in value]
-    tolist = getattr(value, "tolist", None)
-    if callable(tolist):
-        return json_capture(tolist())
+    if hasattr(value, "shape") and hasattr(value, "dtype"):
+        source_dtype = str(value.dtype)
+        converted = value.detach() if callable(getattr(value, "detach", None)) else value
+        converted = (
+            converted.float()
+            if callable(getattr(converted, "float", None))
+            else converted
+        )
+        converted = (
+            converted.cpu() if callable(getattr(converted, "cpu", None)) else converted
+        )
+        converted_dtype = str(getattr(converted, "dtype", ""))
+        if converted_dtype not in {"f32", "float32", "torch.float32"}:
+            raise TypeError(
+                f"cannot capture {source_dtype} tensor as unambiguous f32 data"
+            )
+        tolist = getattr(converted, "tolist", None)
+        if not callable(tolist):
+            raise TypeError("tensor capture requires tolist() after f32 conversion")
+        return {
+            "dtype": "f32",
+            "source_dtype": source_dtype,
+            "shape": tensor_shape(converted) or [],
+            "data": json_capture(tolist()),
+        }
     return {"schema": value_schema(value), "repr": repr(value)}
 
 
@@ -223,9 +244,10 @@ def module_records(model: Any) -> list[dict[str, str]]:
 
 
 def validate_description(description: dict[str, Any]) -> None:
+    missing = sorted(set(SEMANTIC_FIELDS) - description.keys())
+    if missing:
+        raise ValueError(f"describe() is missing semantic fields: {', '.join(missing)}")
     for field in SEMANTIC_FIELDS:
-        if field not in description:
-            continue
         expected = dict if field in OBJECT_SEMANTIC_FIELDS else list
         if not isinstance(description[field], expected):
             raise TypeError(f"describe().{field} must be a {expected.__name__}")

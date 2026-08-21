@@ -238,7 +238,6 @@ def successful_report(
         "request_schema_version": request["schema_version"],
         "stages": {
             "intake": "passed",
-            "inspection": "not_started",
             "preflight": "not_started",
         },
         "exit": {
@@ -277,7 +276,6 @@ def failed_report(
         ),
         "stages": {
             "intake": "failed",
-            "inspection": "not_started",
             "preflight": "not_started",
         },
         "exit": {
@@ -774,10 +772,25 @@ def provenance_issues(
     return missing, invalid
 
 
-def artifact_record(port_dir: Path, path: Path) -> dict[str, str]:
+def artifact_record(
+    port_dir: Path,
+    path: Path,
+    request: dict[str, Any],
+    environment_path: Path,
+) -> dict[str, Any]:
     return {
         "path": path.relative_to(port_dir).as_posix(),
-        "sha256": file_sha256(path),
+        "status": "fresh",
+        "fingerprints": {
+            "content_sha256": file_sha256(path),
+            "tool_sha256": file_sha256(Path(__file__).resolve()),
+            "source_sha256": request["source"]["sha256"],
+            "checkpoint_sha256": request["checkpoint"]["sha256"],
+            "environment_sha256": file_sha256(environment_path),
+            "upstream_sha256": {
+                "request": file_sha256(port_dir / "request.json"),
+            },
+        },
     }
 
 
@@ -814,7 +827,7 @@ def offline_environment() -> dict[str, str]:
 
 def run_reference_inspection(
     port_dir: Path, request: dict[str, Any]
-) -> tuple[IntakeOutcome, list[dict[str, str]], dict[str, dict[str, str]]]:
+) -> tuple[IntakeOutcome, list[dict[str, str]], dict[str, dict[str, Any]]]:
     source = Path(request["source"]["path"])
     checkpoint = Path(request["checkpoint"]["path"])
     reference = request["reference"]
@@ -887,6 +900,10 @@ def run_reference_inspection(
                 "path": dependency_lock,
                 "sha256": file_sha256(lock_path),
             },
+            "isolation": {
+                "kind": "venv",
+                "system_site_packages": False,
+            },
             "runtime_network_access": False,
             "network_enforcement": ["offline_environment", "python_socket_guard"],
         }
@@ -954,14 +971,21 @@ def run_reference_inspection(
             "message": f"could not execute Reference Adapter: {error}",
         }
         return ENVIRONMENT_FAILURE, [issue], {
-            "reference_adapter": artifact_record(port_dir, adapter_path),
-            "reference_environment": artifact_record(port_dir, environment_path),
+            "reference_adapter": artifact_record(
+                port_dir, adapter_path, request, environment_path
+            ),
+            "reference_environment": artifact_record(
+                port_dir, environment_path, request, environment_path
+            ),
         }
 
     status = result.get("status")
+    def record(path: Path) -> dict[str, Any]:
+        return artifact_record(port_dir, path, request, environment_path)
+
     artifacts = {
-        "reference_adapter": artifact_record(port_dir, adapter_path),
-        "reference_environment": artifact_record(port_dir, environment_path),
+        "reference_adapter": record(adapter_path),
+        "reference_environment": record(environment_path),
     }
     if status == "load_failure":
         issue = {
@@ -999,8 +1023,8 @@ def run_reference_inspection(
 
     artifacts.update(
         {
-            "source_inventory": artifact_record(port_dir, inventory_path),
-            "private_capture": artifact_record(port_dir, capture_path),
+            "source_inventory": record(inventory_path),
+            "private_capture": record(capture_path),
         }
     )
     return SUCCESS, [], artifacts
@@ -1085,14 +1109,14 @@ def run_intake(args: argparse.Namespace) -> int:
         )
         report["artifacts"] = artifacts
         if outcome == SUCCESS:
-            report["stages"]["inspection"] = "passed"
+            report["stages"]["preflight"] = "passed"
             report["exit"]["message"] = (
                 "Intake and source inspection passed with warnings"
                 if warnings
                 else "Intake and source inspection passed"
             )
         else:
-            report["stages"]["inspection"] = "failed"
+            report["stages"]["preflight"] = "failed"
             report["exit"] = {
                 "code": outcome.code,
                 "category": outcome.category,

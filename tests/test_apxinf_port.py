@@ -80,11 +80,15 @@ class PortIntakeTest(unittest.TestCase):
         port = root / "private-port"
         source.mkdir()
         (source / "requirements.lock").write_text(lock_text, encoding="utf-8")
+        (source / "model_support.py").write_text(
+            "MODEL_VALUE = 3.0\n", encoding="utf-8"
+        )
         (source / "reference_impl.py").write_text(
             """
 FAILURE = __FAILURE__
 
 import sys
+from model_support import MODEL_VALUE
 
 
 class Tensor:
@@ -97,6 +101,19 @@ class Tensor:
     def data_ptr(self):
         return id(self)
 
+    def detach(self):
+        return self
+
+    def float(self):
+        self.dtype = "float32"
+        return self
+
+    def cpu(self):
+        return self
+
+    def tolist(self):
+        return self.value
+
 
 class Block:
     pass
@@ -104,7 +121,7 @@ class Block:
 
 class Model:
     def __init__(self):
-        self.shared = Tensor((2, 2), 3.0)
+        self.shared = Tensor((2, 2), MODEL_VALUE)
         self.position = Tensor((4,), 1.0)
 
     def named_modules(self):
@@ -127,7 +144,10 @@ def load(checkpoint_path):
 
 def preprocess(profile):
     assert profile["name"] == "control-step"
-    return {"tokens": [[1, 2]], "noise": [[0.25, -0.25]]}
+    return {
+        "tokens": Tensor((1, 2), [[1.0, 2.0]]),
+        "noise": Tensor((1, 2), [[0.25, -0.25]]),
+    }
 
 
 def infer(model, inputs):
@@ -135,23 +155,29 @@ def infer(model, inputs):
         import socket
         socket.create_connection(("example.com", 443))
     assert model.shared.value == 3.0
-    return {"actions": [[inputs["noise"][0][0], 2.0]]}
+    return {"actions": Tensor((1, 2), [[inputs["noise"].value[0][0], 2.0]])}
 
 
 def capture_intermediates(model, inputs):
     if FAILURE == "trace":
         raise RuntimeError("synthetic trace failed")
-    return {"encoder.output": [[model.shared.value, inputs["tokens"][0][0]]]}
+    return {
+        "encoder.output": Tensor(
+            (1, 2), [[model.shared.value, inputs["tokens"].value[0][0]]]
+        )
+    }
 
 
 def postprocess(output):
-    return {"actions": [[output["actions"][0][0] * 2.0, 4.0]]}
+    return {
+        "actions": Tensor(
+            (1, 2), [[output["actions"].value[0][0] * 2.0, 4.0]]
+        )
+    }
 
 
 def describe():
-    if FAILURE == "invalid_inventory":
-        return {"preprocessing": []}
-    return {
+    description = {
         "operator_traces": [{"name": "action_head", "operator": "aten.linear"}],
         "preprocessing": {"images": "uint8_to_float32"},
         "tokenization": {"kind": "synthetic_ids"},
@@ -161,6 +187,13 @@ def describe():
         "custom_operators": [],
         "dynamic_branches": [],
     }
+    if FAILURE == "invalid_inventory":
+        description["preprocessing"] = []
+    return description
+
+
+if FAILURE == "missing_description":
+    del describe
 """.replace("__FAILURE__", repr(failure)).lstrip(),
             encoding="utf-8",
         )
@@ -197,8 +230,7 @@ def describe():
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["stages"]["intake"], "passed")
-            self.assertEqual(report["stages"]["inspection"], "passed")
-            self.assertEqual(report["stages"]["preflight"], "not_started")
+            self.assertEqual(report["stages"]["preflight"], "passed")
             self.assertEqual(report["exit"]["category"], "success")
 
             artifacts = report["artifacts"]
@@ -213,6 +245,20 @@ def describe():
                 capture_path,
             ):
                 self.assertTrue(artifact_path.is_file(), artifact_path)
+            for artifact in artifacts.values():
+                self.assertEqual(artifact["status"], "fresh")
+                self.assertEqual(
+                    set(artifact["fingerprints"]),
+                    {
+                        "content_sha256",
+                        "tool_sha256",
+                        "source_sha256",
+                        "checkpoint_sha256",
+                        "environment_sha256",
+                        "upstream_sha256",
+                    },
+                )
+                self.assertEqual(len(artifact["fingerprints"]["content_sha256"]), 64)
 
             adapter_spec = importlib.util.spec_from_file_location(
                 "generated_reference_adapter", adapter_path
@@ -288,11 +334,20 @@ def describe():
             self.assertEqual(environment["schema_version"], "1.0")
             self.assertFalse(environment["runtime_network_access"])
             self.assertEqual(
+                environment["isolation"],
+                {"kind": "venv", "system_site_packages": False},
+            )
+            self.assertEqual(
                 environment["dependency_lock"]["sha256"],
                 hashlib.sha256(b"").hexdigest(),
             )
             self.assertIn("private", capture_path.relative_to(port).parts)
             capture = json.loads(capture_path.read_text(encoding="utf-8"))
+            captured_actions = capture["profiles"][0]["postprocessed"]["actions"]
+            self.assertEqual(captured_actions["dtype"], "f32")
+            self.assertEqual(captured_actions["source_dtype"], "float32")
+            self.assertEqual(captured_actions["shape"], [1, 2])
+            self.assertEqual(captured_actions["data"], [[0.5, 4.0]])
             for schema_name, artifact in (
                 ("reference-inventory-v1.schema.json", inventory),
                 ("reference-environment-v1.schema.json", environment),
@@ -325,7 +380,7 @@ def describe():
             self.assertEqual(result.returncode, 5)
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["stages"]["intake"], "passed")
-            self.assertEqual(report["stages"]["inspection"], "failed")
+            self.assertEqual(report["stages"]["preflight"], "failed")
             self.assertEqual(report["exit"]["category"], "environment_failure")
             self.assertEqual(report["issues"][0]["path"], "reference.environment")
             self.assertEqual(
@@ -349,7 +404,7 @@ def describe():
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["exit"]["category"], "reference_load_failure")
             self.assertEqual(report["issues"][0]["path"], "reference.load")
-            self.assertEqual(report["stages"]["inspection"], "failed")
+            self.assertEqual(report["stages"]["preflight"], "failed")
 
     def test_reference_trace_failure_has_a_distinct_structured_category(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -392,6 +447,19 @@ def describe():
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["exit"]["category"], "reference_trace_failure")
             self.assertIn("preprocessing", report["issues"][0]["message"])
+
+    def test_missing_semantic_inventory_is_a_trace_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(
+                Path(temporary), failure="missing_description"
+            )
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 7)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["exit"]["category"], "reference_trace_failure")
+            self.assertIn("describe", report["issues"][0]["message"])
 
     def test_valid_subset_marks_only_selected_tuple_as_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
