@@ -144,6 +144,9 @@ class Model:
         self.shared_view = Tensor(
             (1, 2), [[MODEL_VALUE, MODEL_VALUE]], self.shared._storage, offset=2
         )
+        self.shared_alias = Tensor(
+            (2, 2), MODEL_VALUE, self.shared._storage, offset=0
+        )
         self.position = Tensor((4,), 1.0)
 
     def named_modules(self):
@@ -153,6 +156,7 @@ class Model:
         return [
             ("encoder.weight", self.shared),
             ("action_head.weight", self.shared),
+            ("decoder.weight_alias", self.shared_alias),
             ("encoder.weight_view", self.shared_view),
         ]
 
@@ -323,11 +327,16 @@ if FAILURE == "missing_description":
                 [module["name"] for module in inventory["modules"]],
                 ["", "encoder"],
             )
-            self.assertEqual(len(inventory["parameters"]), 3)
+            self.assertEqual(len(inventory["parameters"]), 4)
             self.assertEqual(len(inventory["buffers"]), 1)
             self.assertEqual(
                 {parameter["name"] for parameter in inventory["parameters"]},
-                {"encoder.weight", "action_head.weight", "encoder.weight_view"},
+                {
+                    "encoder.weight",
+                    "action_head.weight",
+                    "decoder.weight_alias",
+                    "encoder.weight_view",
+                },
             )
             parameter_shapes = {
                 parameter["name"]: parameter["shape"]
@@ -349,7 +358,12 @@ if FAILURE == "missing_description":
             )
             self.assertEqual(
                 inventory["aliases"],
-                [["action_head.weight", "encoder.weight", "encoder.weight_view"]],
+                [[
+                    "action_head.weight",
+                    "decoder.weight_alias",
+                    "encoder.weight",
+                    "encoder.weight_view",
+                ]],
             )
             self.assertEqual(
                 inventory["operator_traces"][0]["operator"], "aten.linear"

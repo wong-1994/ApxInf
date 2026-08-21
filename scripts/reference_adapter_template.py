@@ -211,18 +211,6 @@ def storage_key(value: Any) -> tuple[str, int]:
     return ("object", id(value))
 
 
-def tensor_layout_key(value: Any) -> tuple[Any, ...]:
-    storage_offset = getattr(value, "storage_offset", None)
-    offset = int(storage_offset()) if callable(storage_offset) else 0
-    stride_method = getattr(value, "stride", None)
-    stride = (
-        tuple(int(item) for item in stride_method())
-        if callable(stride_method)
-        else None
-    )
-    return (storage_key(value), offset, tuple(tensor_shape(value) or []), stride)
-
-
 def tensor_record(name: str, value: Any) -> dict[str, Any]:
     return {
         "name": name,
@@ -243,9 +231,9 @@ def alias_groups(values: list[tuple[str, Any]]) -> list[list[str]]:
 
 
 def tied_weight_groups(parameters: list[tuple[str, Any]]) -> list[list[str]]:
-    groups: dict[tuple[Any, ...], list[str]] = {}
+    groups: dict[int, list[str]] = {}
     for name, value in parameters:
-        groups.setdefault(tensor_layout_key(value), []).append(name)
+        groups.setdefault(id(value), []).append(name)
     return sorted(
         [sorted(names) for names in groups.values() if len(names) > 1],
         key=lambda names: names[0],
