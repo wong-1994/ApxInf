@@ -14,7 +14,7 @@ import socket
 import sys
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 ADAPTER_CONTRACT_VERSION = "1.0"
@@ -220,24 +220,24 @@ def tensor_record(name: str, value: Any) -> dict[str, Any]:
     }
 
 
-def alias_groups(values: list[tuple[str, Any]]) -> list[list[str]]:
-    groups: dict[tuple[str, int], list[str]] = {}
+def grouped_names(
+    values: list[tuple[str, Any]], key: Callable[[Any], Any]
+) -> list[list[str]]:
+    groups: dict[Any, list[str]] = {}
     for name, value in values:
-        groups.setdefault(storage_key(value), []).append(name)
+        groups.setdefault(key(value), []).append(name)
     return sorted(
         [sorted(names) for names in groups.values() if len(names) > 1],
         key=lambda names: names[0],
     )
+
+
+def alias_groups(values: list[tuple[str, Any]]) -> list[list[str]]:
+    return grouped_names(values, storage_key)
 
 
 def tied_weight_groups(parameters: list[tuple[str, Any]]) -> list[list[str]]:
-    groups: dict[int, list[str]] = {}
-    for name, value in parameters:
-        groups.setdefault(id(value), []).append(name)
-    return sorted(
-        [sorted(names) for names in groups.values() if len(names) > 1],
-        key=lambda names: names[0],
-    )
+    return grouped_names(parameters, id)
 
 
 def module_records(model: Any) -> list[dict[str, str]]:
