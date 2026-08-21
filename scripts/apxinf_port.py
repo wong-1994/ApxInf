@@ -88,28 +88,35 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def initialize(args: argparse.Namespace) -> int:
-    source = args.source.resolve()
-    checkpoint = args.checkpoint.resolve()
     port_dir = args.port_dir.resolve()
-    if not source.is_dir():
+    source = args.source.resolve() if args.source is not None else None
+    checkpoint = args.checkpoint.resolve() if args.checkpoint is not None else None
+    if source is not None and not source.is_dir():
         print(f"source directory does not exist: {source}", file=sys.stderr)
-        return 2
-    if not checkpoint.is_file():
+        return MISSING_INPUT.code
+    if checkpoint is not None and not checkpoint.is_file():
         print(f"checkpoint does not exist: {checkpoint}", file=sys.stderr)
-        return 2
+        return MISSING_INPUT.code
     if port_dir_is_unsafe(port_dir, source):
         print("port directory must be outside source checkouts", file=sys.stderr)
-        return 3
+        return INVALID_INPUT.code
+
+    source_revision = args.source_revision
+    source_name = source.name if source is not None else port_dir.name
+    revision_suffix = source_revision[:8] if source_revision else "draft"
 
     request = {
         "schema_version": REQUEST_SCHEMA_VERSION,
-        "port_id": f"{source.name}-{args.source_revision[:8]}",
+        "port_id": f"{source_name}-{revision_suffix}",
         "source": {
-            "path": str(source),
-            "revision": args.source_revision,
-            "sha256": source_sha256(source),
+            "path": str(source) if source is not None else None,
+            "revision": source_revision,
+            "sha256": source_sha256(source) if source is not None else None,
         },
-        "checkpoint": {"path": str(checkpoint), "sha256": file_sha256(checkpoint)},
+        "checkpoint": {
+            "path": str(checkpoint) if checkpoint is not None else None,
+            "sha256": file_sha256(checkpoint) if checkpoint is not None else None,
+        },
         "representative_profiles": [{"name": None, "inputs": {}}],
         "requested_targets": [
             {
@@ -180,7 +187,9 @@ def tuple_states(requested: Any) -> list[dict[str, str]]:
     ]
 
 
-def successful_report(request: dict[str, Any]) -> dict[str, Any]:
+def successful_report(
+    request: dict[str, Any], warnings: list[dict[str, str]]
+) -> dict[str, Any]:
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "port_id": request["port_id"],
@@ -189,7 +198,7 @@ def successful_report(request: dict[str, Any]) -> dict[str, Any]:
         "exit": {
             "code": SUCCESS.code,
             "category": SUCCESS.category,
-            "message": "Intake passed",
+            "message": "Intake passed with warnings" if warnings else "Intake passed",
         },
         "request_declarations": {
             "source": request["source"],
@@ -203,6 +212,7 @@ def successful_report(request: dict[str, Any]) -> dict[str, Any]:
         "observed_environment": environment_facts(),
         "target_precisions": tuple_states(request["requested_targets"]),
         "issues": [],
+        "warnings": warnings,
     }
 
 
@@ -237,6 +247,7 @@ def failed_report(
         "observed_environment": environment_facts(),
         "target_precisions": tuple_states(request.get("requested_targets", [])),
         "issues": issues,
+        "warnings": [],
     }
 
 
@@ -244,6 +255,8 @@ def unsupported_target_issues(request: dict[str, Any]) -> list[dict[str, str]]:
     issues = []
     for index, item in enumerate(request.get("requested_targets", [])):
         pair = (item.get("target"), item.get("precision"))
+        if None in pair:
+            continue
         if pair not in SUPPORTED_TUPLES:
             if pair == ("orin", "fp8"):
                 message = "orin does not support fp8; use bf16 or int8_w8a8"
@@ -288,7 +301,7 @@ def schema_issues(request: Any) -> list[dict[str, str]]:
         return [{"path": "$", "message": "request must be a JSON object"}]
 
     issues = []
-    required_fields = {
+    allowed_fields = {
         "schema_version",
         "port_id",
         "source",
@@ -299,12 +312,13 @@ def schema_issues(request: Any) -> list[dict[str, str]]:
         "tuning_budgets",
         "user_environment_declarations",
     }
+    required_fields = {"schema_version", "port_id"}
     for field in sorted(required_fields - request.keys()):
         issues.append({"path": field, "message": "field is required by the request schema"})
     add_unknown_field_issues(
         issues,
         request,
-        required_fields,
+        allowed_fields,
         "$",
     )
     if (
@@ -418,9 +432,9 @@ def schema_issues(request: Any) -> list[dict[str, str]]:
                     }
                 )
             goal = item.get("latency_goal")
-            if not isinstance(goal, dict):
+            if goal is not None and not isinstance(goal, dict):
                 issues.append({"path": f"{path}.latency_goal", "message": "must be an object"})
-            else:
+            elif isinstance(goal, dict):
                 add_unknown_field_issues(
                     issues, goal, {"p50_ms", "p95_ms"}, f"{path}.latency_goal"
                 )
@@ -487,10 +501,21 @@ def schema_issues(request: Any) -> list[dict[str, str]]:
     return issues
 
 
-def missing_input_issues(request: dict[str, Any]) -> list[dict[str, str]]:
-    issues = []
+def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(request)
+    normalized.setdefault("source", {})
+    normalized.setdefault("checkpoint", {})
+    normalized.setdefault("representative_profiles", [])
+    normalized.setdefault("requested_targets", [])
+    normalized.setdefault("correctness_thresholds", {})
+    normalized.setdefault("tuning_budgets", [])
+    normalized.setdefault("user_environment_declarations", {})
+    return normalized
+
+
+def missing_fact_warnings(request: dict[str, Any]) -> list[dict[str, str]]:
+    warnings = []
     required_values = (
-        ("port_id", request.get("port_id")),
         ("source.path", request.get("source", {}).get("path")),
         ("source.revision", request.get("source", {}).get("revision")),
         ("source.sha256", request.get("source", {}).get("sha256")),
@@ -507,54 +532,74 @@ def missing_input_issues(request: dict[str, Any]) -> list[dict[str, str]]:
     )
     for path, value in required_values:
         if value is None or value == "" or value == []:
-            issues.append({"path": path, "message": "required fact is missing"})
+            warnings.append(
+                {
+                    "path": path,
+                    "message": "not provided; related guarantees are unavailable",
+                }
+            )
 
     profiles = request.get("representative_profiles", [])
     if not profiles:
-        issues.append({"path": "representative_profiles", "message": "required fact is missing"})
+        warnings.append(
+            {
+                "path": "representative_profiles",
+                "message": "not provided; correctness coverage is unavailable",
+            }
+        )
     for index, profile in enumerate(profiles):
         for field in ("name", "inputs"):
             value = profile.get(field)
             if value is None or value == "" or value == {}:
-                issues.append(
+                warnings.append(
                     {
                         "path": f"representative_profiles[{index}].{field}",
-                        "message": "required fact is missing",
+                        "message": "not provided; correctness coverage is unavailable",
                     }
                 )
 
     requested = request.get("requested_targets", [])
     if not requested:
-        issues.append({"path": "requested_targets", "message": "required fact is missing"})
+        warnings.append(
+            {
+                "path": "requested_targets",
+                "message": "not provided; no target/precision work is guaranteed",
+            }
+        )
     for index, item in enumerate(requested):
         for field in ("target", "precision"):
             if not item.get(field):
-                issues.append(
+                warnings.append(
                     {
                         "path": f"requested_targets[{index}].{field}",
-                        "message": "required fact is missing",
+                        "message": "not provided; target qualification is unavailable",
                     }
                 )
         goal = item.get("latency_goal", {})
         for field in ("p50_ms", "p95_ms"):
             if goal.get(field) is None:
-                issues.append(
+                warnings.append(
                     {
                         "path": f"requested_targets[{index}].latency_goal.{field}",
-                        "message": "required fact is missing",
+                        "message": "not provided; performance is not guaranteed",
                     }
                 )
 
     budgets = request.get("tuning_budgets", [])
     if not budgets:
-        issues.append({"path": "tuning_budgets", "message": "required fact is missing"})
+        warnings.append(
+            {
+                "path": "tuning_budgets",
+                "message": "not provided; tuning is not guaranteed",
+            }
+        )
     for index, budget in enumerate(budgets):
         for field in ("target", "seconds"):
             if budget.get(field) is None:
-                issues.append(
+                warnings.append(
                     {
                         "path": f"tuning_budgets[{index}].{field}",
-                        "message": "required fact is missing",
+                        "message": "not provided; tuning is not guaranteed",
                     }
                 )
     requested_targets = {
@@ -564,13 +609,13 @@ def missing_input_issues(request: dict[str, Any]) -> list[dict[str, str]]:
         budget.get("target") for budget in budgets if budget.get("target") is not None
     }
     for target in sorted(requested_targets - budget_targets):
-        issues.append(
+        warnings.append(
             {
                 "path": f"tuning_budgets[{target}]",
                 "message": f"a tuning budget is required for requested target {target}",
             }
         )
-    return issues
+    return warnings
 
 
 def provenance_issues(
@@ -578,24 +623,32 @@ def provenance_issues(
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     missing = []
     invalid = []
-    source = Path(request["source"]["path"])
-    checkpoint = Path(request["checkpoint"]["path"])
-    if not source.is_dir():
+    source_path = request["source"].get("path")
+    source_digest = request["source"].get("sha256")
+    checkpoint_path = request["checkpoint"].get("path")
+    checkpoint_digest = request["checkpoint"].get("sha256")
+    source = Path(source_path) if source_path else None
+    checkpoint = Path(checkpoint_path) if checkpoint_path else None
+    if source is not None and not source.is_dir():
         missing.append(
             {"path": "source.path", "message": "source directory no longer exists"}
         )
-    elif source_sha256(source) != request["source"]["sha256"]:
+    elif source is not None and source_digest and source_sha256(source) != source_digest:
         invalid.append(
             {
                 "path": "source.sha256",
                 "message": "source content no longer matches its pinned SHA-256",
             }
         )
-    if not checkpoint.is_file():
+    if checkpoint is not None and not checkpoint.is_file():
         missing.append(
             {"path": "checkpoint.path", "message": "checkpoint no longer exists"}
         )
-    elif file_sha256(checkpoint) != request["checkpoint"]["sha256"]:
+    elif (
+        checkpoint is not None
+        and checkpoint_digest
+        and file_sha256(checkpoint) != checkpoint_digest
+    ):
         invalid.append(
             {
                 "path": "checkpoint.sha256",
@@ -637,18 +690,14 @@ def run_intake(args: argparse.Namespace) -> int:
         print(issues[0]["message"], file=sys.stderr)
         return INVALID_INPUT.code
 
+    request = normalize_request(request)
     source_path = request.get("source", {}).get("path")
     source = Path(source_path) if isinstance(source_path, str) and source_path else None
     if port_dir_is_unsafe(port_dir, source):
         print("port directory must be outside source checkouts", file=sys.stderr)
-        return 3
+        return INVALID_INPUT.code
 
-    issues = missing_input_issues(request)
-    if issues:
-        report = failed_report(request, MISSING_INPUT, issues)
-        write_json(port_dir / "report.json", report)
-        print(issues[0]["message"], file=sys.stderr)
-        return MISSING_INPUT.code
+    warnings = missing_fact_warnings(request)
 
     issues = unsupported_target_issues(request)
     if issues:
@@ -681,7 +730,7 @@ def run_intake(args: argparse.Namespace) -> int:
         print(invalid_provenance[0]["message"], file=sys.stderr)
         return INVALID_INPUT.code
 
-    report = successful_report(request)
+    report = successful_report(request, warnings)
     write_json(port_dir / "report.json", report)
     print(port_dir / "report.json")
     return SUCCESS.code
@@ -703,9 +752,9 @@ def parser() -> argparse.ArgumentParser:
     subcommands = command.add_subparsers(dest="command", required=True)
 
     init = subcommands.add_parser("init", help="create a private Port request draft")
-    init.add_argument("--source", type=Path, required=True)
-    init.add_argument("--source-revision", required=True)
-    init.add_argument("--checkpoint", type=Path, required=True)
+    init.add_argument("--source", type=Path)
+    init.add_argument("--source-revision")
+    init.add_argument("--checkpoint", type=Path)
     init.add_argument("--port-dir", type=Path, required=True)
     init.set_defaults(handler=initialize)
 

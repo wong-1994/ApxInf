@@ -230,7 +230,7 @@ class PortIntakeTest(unittest.TestCase):
             self.assertEqual(report["exit"]["category"], "missing_input")
             self.assertEqual(report["issues"][0]["path"], "source.path")
 
-    def test_intake_requires_a_tuning_budget_for_each_requested_target(self) -> None:
+    def test_missing_tuning_budget_warns_without_blocking_intake(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             port = self.initialize_port(Path(temporary))
             self.complete_request(port, target="orin", precision="bf16")
@@ -241,13 +241,39 @@ class PortIntakeTest(unittest.TestCase):
 
             result = self.run_port("run", "--port-dir", str(port))
 
-            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.returncode, 0)
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["exit"]["category"], "missing_input")
+            self.assertEqual(report["exit"]["category"], "success")
             self.assertIn(
                 "tuning_budgets[orin]",
-                {issue["path"] for issue in report["issues"]},
+                {warning["path"] for warning in report["warnings"]},
             )
+
+    def test_missing_performance_goals_do_not_block_requested_port(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port = self.initialize_port(Path(temporary))
+            self.complete_request(port)
+            request_path = port / "request.json"
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            request["requested_targets"][0]["latency_goal"] = {
+                "p50_ms": None,
+                "p95_ms": None,
+            }
+            request["tuning_budgets"] = []
+            request_path.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["stages"]["intake"], "passed")
+            self.assertEqual(report["exit"]["category"], "success")
+            self.assertIn("warnings", report)
+            warning_paths = {warning["path"] for warning in report["warnings"]}
+            self.assertIn("requested_targets[0].latency_goal.p50_ms", warning_paths)
+            self.assertIn("requested_targets[0].latency_goal.p95_ms", warning_paths)
+            self.assertIn("tuning_budgets", warning_paths)
+            self.assertEqual(report["target_precisions"][0]["status"], "requested")
 
     def test_intake_rejects_non_finite_numbers_and_keeps_report_valid_json(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -357,18 +383,19 @@ class PortIntakeTest(unittest.TestCase):
                 ],
             )
 
-    def test_missing_required_facts_are_categorized_and_reported(self) -> None:
+    def test_missing_facts_pass_intake_with_warnings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             port = self.initialize_port(Path(temporary))
 
             result = self.run_port("run", "--port-dir", str(port))
 
-            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.returncode, 0)
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["stages"]["intake"], "failed")
-            self.assertEqual(report["exit"]["category"], "missing_input")
+            self.assertEqual(report["stages"]["intake"], "passed")
+            self.assertEqual(report["exit"]["category"], "success")
+            self.assertEqual(report["issues"], [])
             self.assertEqual(
-                {issue["path"] for issue in report["issues"]},
+                {warning["path"] for warning in report["warnings"]},
                 {
                     "representative_profiles[0].name",
                     "representative_profiles[0].inputs",
@@ -382,6 +409,27 @@ class PortIntakeTest(unittest.TestCase):
                     "tuning_budgets[0].seconds",
                 },
             )
+
+    def test_initialization_allows_source_checkpoint_and_revision_to_be_omitted(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port = Path(temporary) / "private-port"
+
+            result = self.run_port("init", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            request = json.loads((port / "request.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                request["source"],
+                {"path": None, "revision": None, "sha256": None},
+            )
+            self.assertEqual(
+                request["checkpoint"],
+                {"path": None, "sha256": None},
+            )
+            run = self.run_port("run", "--port-dir", str(port))
+            self.assertEqual(run.returncode, 0, run.stderr)
 
     def test_malformed_request_still_writes_invalid_input_report(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

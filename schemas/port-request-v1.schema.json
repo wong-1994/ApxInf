@@ -6,14 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema_version",
-    "port_id",
-    "source",
-    "checkpoint",
-    "representative_profiles",
-    "requested_targets",
-    "correctness_thresholds",
-    "tuning_budgets",
-    "user_environment_declarations"
+    "port_id"
   ],
   "properties": {
     "schema_version": {"const": "1.0"},
@@ -21,20 +14,18 @@
     "source": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "revision", "sha256"],
       "properties": {
-        "path": {"type": "string", "minLength": 1},
-        "revision": {"type": "string", "minLength": 1},
-        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "path": {"type": ["string", "null"], "minLength": 1},
+        "revision": {"type": ["string", "null"], "minLength": 1},
+        "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
       }
     },
     "checkpoint": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "sha256"],
       "properties": {
-        "path": {"type": "string", "minLength": 1},
-        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "path": {"type": ["string", "null"], "minLength": 1},
+        "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
       }
     },
     "representative_profiles": {
@@ -42,7 +33,6 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "inputs"],
         "properties": {
           "name": {"type": ["string", "null"], "minLength": 1},
           "inputs": {
@@ -61,14 +51,12 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["target", "precision", "latency_goal"],
         "properties": {
           "target": {"enum": ["thor", "orin", null]},
           "precision": {"enum": ["bf16", "fp8", "int8_w8a8", null]},
           "latency_goal": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["p50_ms", "p95_ms"],
             "properties": {
               "p50_ms": {"type": ["number", "null"], "exclusiveMinimum": 0},
               "p95_ms": {"type": ["number", "null"], "exclusiveMinimum": 0}
@@ -80,7 +68,6 @@
     "correctness_thresholds": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["absolute", "relative"],
       "properties": {
         "absolute": {"type": ["number", "null"], "minimum": 0},
         "relative": {"type": ["number", "null"], "minimum": 0}
@@ -91,7 +78,6 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["target", "seconds"],
         "properties": {
           "target": {"enum": ["thor", "orin", null]},
           "seconds": {"type": ["number", "null"], "exclusiveMinimum": 0}

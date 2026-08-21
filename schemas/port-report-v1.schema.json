@@ -13,7 +13,8 @@
     "request_declarations",
     "observed_environment",
     "target_precisions",
-    "issues"
+    "issues",
+    "warnings"
   ],
   "properties": {
     "schema_version": {"const": "1.0"},
@@ -53,6 +54,18 @@
       }
     },
     "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "message"],
+        "properties": {
+          "path": {"type": "string"},
+          "message": {"type": "string"}
+        }
+      }
+    },
+    "warnings": {
       "type": "array",
       "items": {
         "type": "object",
