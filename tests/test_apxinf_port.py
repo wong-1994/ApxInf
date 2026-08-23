@@ -56,7 +56,11 @@ class PortIntakeTest(unittest.TestCase):
             {
                 "name": "control-step",
                 "inputs": {"camera": [1, 224, 224, 3], "tokens": [1, 32]},
-            }
+            },
+            {
+                "name": "control-step-alt",
+                "inputs": {"camera": [1, 256, 256, 3], "tokens": [1, 16]},
+            },
         ]
         request["requested_targets"] = [
             {
@@ -93,6 +97,9 @@ SCENARIO = __SCENARIO__
 
 import sys
 from .model_support import MODEL_VALUE
+
+
+CURRENT_SEED = 0
 
 
 class Storage:
@@ -173,11 +180,17 @@ def load(checkpoint_path):
     return Model()
 
 
+def set_seed(seed):
+    global CURRENT_SEED
+    CURRENT_SEED = seed
+
+
 def preprocess(profile):
-    assert profile["name"] == "control-step"
+    assert profile["name"] in {"control-step", "control-step-alt"}
+    token = 1.0 if profile["name"] == "control-step" else 5.0
     return {
-        "tokens": Tensor((1, 2), [[1.0, 2.0]]),
-        "noise": Tensor((1, 2), [[0.25, -0.25]]),
+        "tokens": Tensor((1, 2), [[token, 2.0]]),
+        "noise": Tensor((1, 2), [[0.25 + CURRENT_SEED, -0.25]]),
     }
 
 
@@ -234,7 +247,15 @@ def describe():
     }
     if SCENARIO == "invalid_inventory":
         description["preprocessing"] = []
-    elif SCENARIO == "canonicalizable_attention":
+    elif SCENARIO in {
+        "canonicalizable_attention",
+        "canonical_mismatch",
+        "canonical_intermediate_mismatch",
+        "canonical_unmapped_parameter",
+        "canonical_missing_assumption",
+        "canonical_state_gap",
+        "canonical_unexplained_branch",
+    }:
         description["capability_facts"]["attention"] = [
             "separate_qkv_scaled_dot_product"
         ]
@@ -264,7 +285,116 @@ def describe():
         ]
     elif SCENARIO == "unexplained_control_flow":
         description["dynamic_branches"] = [{"name": "data_dependent_router"}]
+    if SCENARIO == "canonical_unexplained_branch":
+        description["capability_facts"]["control_flow"] = ["bounded_unrolled_loop"]
+        description["dynamic_branches"] = [
+            {"name": "training_loop", "kind": "bounded_unrolled_loop"}
+        ]
     return description
+
+
+def canonicalize(model):
+    return model
+
+
+def canonical_infer(model, inputs):
+    if SCENARIO == "canonical_mismatch":
+        return {"actions": Tensor((1, 2), [[9.0, 2.0]])}
+    return infer(model, inputs)
+
+
+def canonical_capture_intermediates(model, inputs):
+    if SCENARIO == "canonical_intermediate_mismatch":
+        return {"encoder.output": Tensor((1, 2), [[99.0, 1.0]])}
+    return capture_intermediates(model, inputs)
+
+
+def canonical_postprocess(output):
+    return postprocess(output)
+
+
+def canonicalization_manifest():
+    categories = (
+        "transpose",
+        "split",
+        "concatenation",
+        "packing",
+        "mask",
+        "conditioning",
+        "cache",
+        "schedule",
+    )
+    transformations = [
+        {
+            "id": f"rewrite-{category}",
+            "category": category,
+            "rewrite": "algebraic" if category != "cache" else "numerical_equivalence",
+            "assumptions": [f"{category} preserves the declared inference semantics"]
+            if category != "cache"
+            else [],
+            "source_paths": [category],
+            "target_paths": [f"canonical.{category}"],
+            "description": f"canonical {category} rewrite",
+        }
+        for category in categories
+    ]
+    manifest = {
+        "parameter_mapping": [
+            {
+                "source": name,
+                "targets": [f"canonical.{name}"],
+                "transformation_ids": ["rewrite-transpose"],
+            }
+            for name in (
+                "encoder.weight",
+                "action_head.weight",
+                "decoder.weight_alias",
+                "encoder.weight_view",
+            )
+        ],
+        "transformations": transformations,
+        "semantic_rewrites": [
+            {
+                "capability": "attention",
+                "source": "separate_qkv_scaled_dot_product",
+                "canonical": "scaled_dot_product",
+                "transformation_ids": [
+                    "rewrite-transpose",
+                    "rewrite-concatenation",
+                    "rewrite-packing",
+                ],
+            }
+        ],
+        "state_semantics": [
+            {
+                "category": category,
+                "source": category,
+                "canonical": f"canonical.{category}",
+                "transformation_ids": [f"rewrite-{category}"],
+            }
+            for category in ("mask", "conditioning", "cache", "schedule")
+        ],
+        "branches": [],
+        "intermediate_mapping": [
+            {"source": "encoder.output", "canonical": "encoder.output"}
+        ],
+    }
+    if SCENARIO == "canonical_unmapped_parameter":
+        manifest["parameter_mapping"] = manifest["parameter_mapping"][1:]
+    elif SCENARIO == "canonical_missing_assumption":
+        manifest["transformations"][0]["assumptions"] = []
+    elif SCENARIO == "canonical_state_gap":
+        manifest["state_semantics"] = manifest["state_semantics"][:-1]
+    elif SCENARIO == "canonical_unexplained_branch":
+        manifest["semantic_rewrites"].append(
+            {
+                "capability": "control_flow",
+                "source": "bounded_unrolled_loop",
+                "canonical": "static",
+                "transformation_ids": ["rewrite-schedule"],
+            }
+        )
+    return manifest
 
 
 if SCENARIO == "missing_description":
@@ -489,6 +619,94 @@ if SCENARIO == "missing_description":
                 self.assertEqual(schema["properties"]["schema_version"]["const"], "1.0")
                 self.assertEqual(set(schema["required"]) - artifact.keys(), set())
 
+    def test_direct_source_emits_the_canonical_trace_contract_without_an_adapter(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            port, source = self.initialize_inspectable_port(root)
+            source_before = {
+                path.relative_to(source): path.read_bytes()
+                for path in source.rglob("*")
+                if path.is_file()
+            }
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                report["canonicalization"],
+                {
+                    "status": "passed",
+                    "mode": "direct",
+                    "cases": 4,
+                    "comparisons": 12,
+                    "failures": 0,
+                },
+            )
+            self.assertNotIn("canonical_adapter", report["artifacts"])
+            trace_path = port / report["artifacts"]["canonical_trace"]["path"]
+            evidence_path = (
+                port / report["artifacts"]["canonical_equivalence"]["path"]
+            )
+            trace = json.loads(trace_path.read_text(encoding="utf-8"))
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            for schema_name, artifact in (
+                ("canonical-trace-v1.schema.json", trace),
+                ("canonical-equivalence-v1.schema.json", evidence),
+            ):
+                schema = json.loads(
+                    (ROOT / "schemas" / schema_name).read_text(encoding="utf-8")
+                )
+                self.assertEqual(set(schema["required"]) - artifact.keys(), set())
+            self.assertEqual(trace["schema_version"], "1.0")
+            self.assertEqual(trace["mode"], "direct")
+            self.assertEqual(
+                [(case["profile"], case["seed"]) for case in trace["cases"]],
+                [
+                    ("control-step", 0),
+                    ("control-step", 1),
+                    ("control-step-alt", 0),
+                    ("control-step-alt", 1),
+                ],
+            )
+            self.assertNotEqual(
+                trace["cases"][0]["inputs"]["noise"]["data"],
+                trace["cases"][1]["inputs"]["noise"]["data"],
+            )
+            self.assertEqual(
+                {mapping["source"] for mapping in evidence["parameter_mapping"]},
+                {
+                    "encoder.weight",
+                    "action_head.weight",
+                    "decoder.weight_alias",
+                    "encoder.weight_view",
+                },
+            )
+            self.assertTrue(
+                all(
+                    comparison["passed"]
+                    for case in evidence["cases"]
+                    for comparison in case["comparisons"]
+                )
+            )
+            self.assertEqual(
+                {
+                    comparison["scope"]
+                    for comparison in evidence["cases"][0]["comparisons"]
+                },
+                {"intermediates", "normalized_actions", "postprocessed_actions"},
+            )
+            self.assertEqual(
+                source_before,
+                {
+                    path.relative_to(source): path.read_bytes()
+                    for path in source.rglob("*")
+                    if path.is_file()
+                },
+            )
+
     def test_locked_environment_failure_is_reported_without_executing_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -650,6 +868,191 @@ if SCENARIO == "missing_description":
             )
             self.assertEqual(attention["classification"], "canonicalizable")
             self.assertEqual(attention["canonical"], "scaled_dot_product")
+
+    def test_valid_rewrite_proves_private_canonical_equivalence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(
+                Path(temporary), scenario="canonicalizable_attention"
+            )
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                report["canonicalization"],
+                {
+                    "status": "passed",
+                    "mode": "canonicalized",
+                    "cases": 4,
+                    "comparisons": 12,
+                    "failures": 0,
+                },
+            )
+            adapter_path = port / report["artifacts"]["canonical_adapter"]["path"]
+            trace_path = port / report["artifacts"]["canonical_trace"]["path"]
+            evidence_path = (
+                port / report["artifacts"]["canonical_equivalence"]["path"]
+            )
+            self.assertIn(
+                "canonical_adapter",
+                report["artifacts"]["canonical_equivalence"]["fingerprints"][
+                    "upstream_sha256"
+                ],
+            )
+            self.assertTrue(adapter_path.is_relative_to(port / "private"))
+            trace = json.loads(trace_path.read_text(encoding="utf-8"))
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            self.assertEqual(trace["mode"], "canonicalized")
+            self.assertEqual(
+                {(case["profile"], case["seed"]) for case in trace["cases"]},
+                {
+                    ("control-step", 0),
+                    ("control-step", 1),
+                    ("control-step-alt", 0),
+                    ("control-step-alt", 1),
+                },
+            )
+            self.assertEqual(
+                {item["category"] for item in evidence["transformations"]},
+                {
+                    "transpose",
+                    "split",
+                    "concatenation",
+                    "packing",
+                    "mask",
+                    "conditioning",
+                    "cache",
+                    "schedule",
+                },
+            )
+            self.assertTrue(
+                all(
+                    item["assumptions"]
+                    for item in evidence["transformations"]
+                    if item["rewrite"] == "algebraic"
+                )
+            )
+            self.assertIn(
+                "numerical_equivalence",
+                {item["rewrite"] for item in evidence["transformations"]},
+            )
+            self.assertTrue(
+                all(
+                    comparison["passed"]
+                    for case in evidence["cases"]
+                    for comparison in case["comparisons"]
+                )
+            )
+
+    def test_incomplete_canonical_semantics_stop_with_a_gap_report(self) -> None:
+        cases = {
+            "canonical_unmapped_parameter": "unmapped",
+            "canonical_missing_assumption": "algebraic assumptions",
+            "canonical_state_gap": "state semantics",
+            "canonical_unexplained_branch": "source branch",
+        }
+        for scenario, message in cases.items():
+            with self.subTest(scenario=scenario):
+                with tempfile.TemporaryDirectory() as temporary:
+                    port, _ = self.initialize_inspectable_port(
+                        Path(temporary), scenario=scenario
+                    )
+
+                    result = self.run_port("run", "--port-dir", str(port))
+
+                    self.assertEqual(result.returncode, 9)
+                    report = json.loads(
+                        (port / "report.json").read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(report["stages"]["preflight"], "blocked")
+                    self.assertEqual(report["exit"]["category"], "correctness_failure")
+                    self.assertEqual(report["canonicalization"]["status"], "failed")
+                    gap_path = port / report["artifacts"]["gap_report"]["path"]
+                    gap = json.loads(gap_path.read_text(encoding="utf-8"))
+                    gap_schema = json.loads(
+                        (
+                            ROOT
+                            / "schemas/canonicalization-gap-report-v1.schema.json"
+                        ).read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(
+                        set(gap_schema["required"]) - gap.keys(), set()
+                    )
+                    self.assertEqual(gap["category"], "correctness_failure")
+                    self.assertEqual(
+                        gap["gaps"][0]["kind"], "incomplete_canonicalization"
+                    )
+                    self.assertIn(message, gap["gaps"][0]["message"])
+
+    def test_numerical_canonical_mismatch_stops_with_comparison_evidence(self) -> None:
+        cases = {
+            "canonical_mismatch": {
+                "normalized_actions",
+                "postprocessed_actions",
+            },
+            "canonical_intermediate_mismatch": {"intermediates"},
+        }
+        for scenario, expected_scopes in cases.items():
+            with self.subTest(scenario=scenario):
+                with tempfile.TemporaryDirectory() as temporary:
+                    port, _ = self.initialize_inspectable_port(
+                        Path(temporary), scenario=scenario
+                    )
+
+                    result = self.run_port("run", "--port-dir", str(port))
+
+                    self.assertEqual(result.returncode, 9)
+                    report = json.loads(
+                        (port / "report.json").read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(report["stages"]["preflight"], "blocked")
+                    self.assertEqual(
+                        report["exit"]["category"], "correctness_failure"
+                    )
+                    self.assertGreater(report["canonicalization"]["failures"], 0)
+                    evidence_path = (
+                        port
+                        / report["artifacts"]["canonical_equivalence"]["path"]
+                    )
+                    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+                    failures = [
+                        comparison
+                        for case in evidence["cases"]
+                        for comparison in case["comparisons"]
+                        if not comparison["passed"]
+                    ]
+                    self.assertEqual(
+                        {comparison["scope"] for comparison in failures},
+                        expected_scopes,
+                    )
+                    gap_path = port / report["artifacts"]["gap_report"]["path"]
+                    gap = json.loads(gap_path.read_text(encoding="utf-8"))
+                    self.assertTrue(
+                        all(
+                            item["kind"] == "numerical_mismatch"
+                            for item in gap["gaps"]
+                        )
+                    )
+
+    def test_canonical_gate_requires_multiple_representative_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(
+                Path(temporary), scenario="canonicalizable_attention"
+            )
+            request_path = port / "request.json"
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            request["representative_profiles"] = request[
+                "representative_profiles"
+            ][:1]
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 9)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["exit"]["category"], "correctness_failure")
+            self.assertIn("at least two", report["issues"][0]["message"])
 
     def test_explained_inventory_semantics_are_supported(self) -> None:
         cases = {

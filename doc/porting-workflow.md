@@ -1,10 +1,10 @@
 # VLA Porting Workflow
 
-Intake, trusted-source inspection, and Capability Contract classification are
-available through one command surface: `scripts/apxinf_port.py`. It creates and
-validates private Port artifacts without modifying the ApxInf source tree.
-Source-model code runs only when a Reference Adapter entrypoint and dependency
-lock are explicitly configured.
+Intake, trusted-source inspection, Capability Contract classification, and
+Canonical VLA equivalence are available through one command surface:
+`scripts/apxinf_port.py`. It creates and validates private Port artifacts
+without modifying the ApxInf source tree. Source-model code runs only when a
+Reference Adapter entrypoint and dependency lock are explicitly configured.
 
 ## Initialize a request
 
@@ -73,6 +73,33 @@ use only the Python standard library. Runtime source execution receives offline
 library settings and a Python socket guard; this protects against accidental
 access by trusted code and is not a sandbox for malicious code.
 
+## Prove canonical equivalence
+
+Every source that passes capability classification emits the same versioned
+Canonical VLA trace contract. A source whose semantics are already canonical
+uses direct mode and does not create a Canonical Adapter. A source with one or
+more `canonicalizable` capabilities must additionally expose
+`canonicalize(model)`, `canonical_infer(model, inputs)`,
+`canonical_capture_intermediates(model, inputs)`,
+`canonical_postprocess(output)`, and `canonicalization_manifest()` from its
+trusted entrypoint. The generic Canonical Adapter wrapper is copied into the
+private Port directory only for that case.
+
+The manifest consumes every named source parameter exactly once and declares
+all transpose, split, concatenation, packing, mask, conditioning, cache, and
+schedule transformations that apply. Each transformation is labeled
+`algebraic` or `numerical_equivalence`; algebraic transformations must list
+their assumptions. The manifest also maps selected intermediate checkpoints,
+accounts for source branches, and covers mask, conditioning, cache, and
+schedule state semantics.
+
+The gate requires at least two distinct representative profiles and explicit
+absolute and relative thresholds. It resets Python, NumPy, PyTorch, and an
+optional source `set_seed(seed)` hook for seeds 0 and 1. It compares selected
+intermediates, normalized actions, and deployable postprocessed actions for
+every profile/seed case. An incomplete manifest or failed comparison blocks
+Preflight with a private Canonical VLA Gap Report.
+
 ## Run Intake and Preflight
 
 ```bash
@@ -95,8 +122,8 @@ changed or removed semantics require a new major version. The prior contract is
 loaded and compared rather than trusting revision labels. Per-capability hashes
 and `invalidated_capabilities` identify only dependencies affected by an update;
 generic stale-artifact propagation and retention are added by the later resume
-stage. Passing this gate leaves overall Preflight `running` until canonical and
-kernel-coverage gates are implemented.
+stage. Passing capability classification advances to the canonical-equivalence
+gate; overall Preflight remains `running` until the later kernel-coverage gate.
 
 Configured inspection generates only private Port artifacts:
 
@@ -106,6 +133,10 @@ Configured inspection generates only private Port artifacts:
 - `private/captures/inspection.json`: private inputs, outputs, and intermediates
 - `private/capability_classification.json`: classification and dependency hashes
 - `private/capability_gap_report.json`: unsupported semantics when Preflight blocks
+- `private/canonical_adapter.py`: generated only for a canonicalized source
+- `private/canonical_trace.json`: downstream trace for direct or canonicalized sources
+- `private/canonical_equivalence.json`: parameter, rewrite, and comparison evidence
+- `private/canonicalization_gap_report.json`: incomplete or failed equivalence evidence
 
 The inventory and report bind these artifacts to the declared source revision,
 source digest, and checkpoint digest. Port directories are rejected when they
@@ -126,6 +157,7 @@ workflow-resume stage.
 | 6 | `reference_load_failure` | The trusted source or checkpoint could not load |
 | 7 | `reference_trace_failure` | Preprocessing, inference, capture, postprocessing, or inventory failed |
 | 8 | `unsupported_semantics` | Source semantics are unknown, contradictory, unexplained, or outside the pinned contract |
+| 9 | `correctness_failure` | Canonicalization evidence is incomplete or a differential comparison failed |
 
 The versioned contracts are
 [`schemas/port-request-v1.schema.json`](../schemas/port-request-v1.schema.json)
@@ -142,3 +174,8 @@ Its result and terminal gap formats are
 [`schemas/capability-classification-v1.schema.json`](../schemas/capability-classification-v1.schema.json)
 and
 [`schemas/capability-gap-report-v1.schema.json`](../schemas/capability-gap-report-v1.schema.json).
+Canonical evidence uses
+[`schemas/canonical-trace-v1.schema.json`](../schemas/canonical-trace-v1.schema.json),
+[`schemas/canonical-equivalence-v1.schema.json`](../schemas/canonical-equivalence-v1.schema.json),
+and
+[`schemas/canonicalization-gap-report-v1.schema.json`](../schemas/canonicalization-gap-report-v1.schema.json).

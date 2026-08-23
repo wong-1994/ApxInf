@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apxinf.dev/schemas/canonical-trace-v1.schema.json",
+  "title": "ApxInf private Canonical VLA trace",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "port_id", "mode", "contract", "canonical_semantics", "cases"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "port_id": {"type": "string", "minLength": 1},
+    "mode": {"enum": ["direct", "canonicalized"]},
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "sha256"],
+      "properties": {
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "canonical_semantics": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["profile", "seed", "inputs", "output", "intermediates", "postprocessed"],
+        "properties": {
+          "profile": {"type": ["string", "null"]},
+          "seed": {"type": "integer", "minimum": 0},
+          "inputs": {},
+          "output": {},
+          "intermediates": {},
+          "postprocessed": {}
+        }
+      }
+    }
+  }
+}

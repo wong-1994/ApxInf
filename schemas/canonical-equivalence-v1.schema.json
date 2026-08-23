@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apxinf.dev/schemas/canonical-equivalence-v1.schema.json",
+  "title": "ApxInf private Canonical VLA equivalence evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "port_id",
+    "mode",
+    "contract",
+    "source_inventory_sha256",
+    "canonical_trace_sha256",
+    "thresholds",
+    "parameter_mapping",
+    "transformations",
+    "cases",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "port_id": {"type": "string", "minLength": 1},
+    "mode": {"enum": ["direct", "canonicalized"]},
+    "contract": {"$ref": "#/$defs/contract"},
+    "source_inventory_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "canonical_trace_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["absolute", "relative"],
+      "properties": {
+        "absolute": {"type": "number", "minimum": 0},
+        "relative": {"type": "number", "minimum": 0}
+      }
+    },
+    "parameter_mapping": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/parameterMapping"}
+    },
+    "transformations": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/transformation"}
+    },
+    "semantic_rewrites": {"type": "array"},
+    "state_semantics": {"type": "array"},
+    "branches": {"type": "array"},
+    "intermediate_mapping": {"type": "array"},
+    "cases": {
+      "type": "array",
+      "minItems": 4,
+      "items": {"$ref": "#/$defs/case"}
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cases", "comparisons", "failures"],
+      "properties": {
+        "cases": {"type": "integer", "minimum": 4},
+        "comparisons": {"type": "integer", "minimum": 1},
+        "failures": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "canonicalized"}}},
+      "then": {
+        "required": [
+          "semantic_rewrites",
+          "state_semantics",
+          "branches",
+          "intermediate_mapping"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "sha256"],
+      "properties": {
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "stringArray": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "parameterMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "targets", "transformation_ids"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "transformation_ids": {"$ref": "#/$defs/stringArray"}
+      }
+    },
+    "transformation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "category",
+        "rewrite",
+        "assumptions",
+        "source_paths",
+        "target_paths",
+        "description"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "category": {
+          "enum": [
+            "transpose",
+            "split",
+            "concatenation",
+            "packing",
+            "mask",
+            "conditioning",
+            "cache",
+            "schedule"
+          ]
+        },
+        "rewrite": {"enum": ["algebraic", "numerical_equivalence"]},
+        "assumptions": {"$ref": "#/$defs/stringArray"},
+        "source_paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "target_paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "description": {"type": "string", "minLength": 1}
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "source_path",
+        "canonical_path",
+        "passed",
+        "max_absolute_error",
+        "max_relative_error"
+      ],
+      "properties": {
+        "scope": {
+          "enum": ["intermediates", "normalized_actions", "postprocessed_actions"]
+        },
+        "source_path": {"type": "string", "minLength": 1},
+        "canonical_path": {"type": "string", "minLength": 1},
+        "passed": {"type": "boolean"},
+        "max_absolute_error": {"type": "number", "minimum": 0},
+        "max_relative_error": {"type": "number", "minimum": 0}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "seed", "comparisons", "passed"],
+      "properties": {
+        "profile": {"type": ["string", "null"]},
+        "seed": {"enum": [0, 1]},
+        "comparisons": {
+          "type": "array",
+          "minItems": 3,
+          "items": {"$ref": "#/$defs/comparison"}
+        },
+        "passed": {"type": "boolean"}
+      }
+    }
+  }
+}

@@ -14,6 +14,7 @@
     "observed_environment",
     "reference_inspection",
     "capability_assessment",
+    "canonicalization",
     "target_precisions",
     "issues",
     "warnings",
@@ -38,7 +39,7 @@
       "required": ["code", "category", "message"],
       "properties": {
         "code": {"type": "integer"},
-        "category": {"enum": ["success", "missing_input", "invalid_input", "unsupported_target", "environment_failure", "reference_load_failure", "reference_trace_failure", "unsupported_semantics"]},
+        "category": {"enum": ["success", "missing_input", "invalid_input", "unsupported_target", "environment_failure", "reference_load_failure", "reference_trace_failure", "unsupported_semantics", "correctness_failure"]},
         "message": {"type": "string"}
       }
     },
@@ -63,6 +64,18 @@
         "supported": {"type": "integer", "minimum": 0},
         "canonicalizable": {"type": "integer", "minimum": 0},
         "unsupported": {"type": "integer", "minimum": 0}
+      }
+    },
+    "canonicalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "mode", "cases", "comparisons", "failures"],
+      "properties": {
+        "status": {"enum": ["not_started", "passed", "failed"]},
+        "mode": {"enum": [null, "direct", "canonicalized"]},
+        "cases": {"type": "integer", "minimum": 0},
+        "comparisons": {"type": "integer", "minimum": 0},
+        "failures": {"type": "integer", "minimum": 0}
       }
     },
     "target_precisions": {

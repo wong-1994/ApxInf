@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Intake and Capability Contract Preflight for an ApxInf VLA Port."""
+"""Run Intake and canonical-equivalence Preflight for an ApxInf VLA Port."""
 
 from __future__ import annotations
 
@@ -73,6 +73,7 @@ ENVIRONMENT_FAILURE = IntakeOutcome(5, "environment_failure")
 REFERENCE_LOAD_FAILURE = IntakeOutcome(6, "reference_load_failure")
 REFERENCE_TRACE_FAILURE = IntakeOutcome(7, "reference_trace_failure")
 UNSUPPORTED_SEMANTICS = IntakeOutcome(8, "unsupported_semantics")
+CORRECTNESS_FAILURE = IntakeOutcome(9, "correctness_failure")
 
 
 def repository_root() -> Path:
@@ -81,6 +82,10 @@ def repository_root() -> Path:
 
 def reference_adapter_template() -> Path:
     return repository_root() / "scripts" / "reference_adapter_template.py"
+
+
+def canonical_adapter_template() -> Path:
+    return repository_root() / "scripts" / "canonical_adapter_template.py"
 
 
 def default_capability_contract(version: str) -> Path:
@@ -302,6 +307,13 @@ def successful_report(
             "canonicalizable": 0,
             "unsupported": 0,
         },
+        "canonicalization": {
+            "status": "not_started",
+            "mode": None,
+            "cases": 0,
+            "comparisons": 0,
+            "failures": 0,
+        },
         "target_precisions": tuple_states(request["requested_targets"]),
         "issues": [],
         "warnings": warnings,
@@ -355,6 +367,13 @@ def failed_report(
             "supported": 0,
             "canonicalizable": 0,
             "unsupported": 0,
+        },
+        "canonicalization": {
+            "status": "not_started",
+            "mode": None,
+            "cases": 0,
+            "comparisons": 0,
+            "failures": 0,
         },
         "target_precisions": tuple_states(request.get("requested_targets", [])),
         "issues": issues,
@@ -881,6 +900,96 @@ def value_sha256(value: Any) -> str:
         value, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def write_direct_canonical_evidence(
+    port_dir: Path,
+    request: dict[str, Any],
+    inventory: dict[str, Any],
+    capture: dict[str, Any],
+    classification: dict[str, Any],
+    environment_path: Path,
+    upstream_paths: dict[str, Path],
+) -> tuple[dict[str, int], dict[str, dict[str, Any]]]:
+    canonical_semantics = {
+        item["capability"]: item["canonical"]
+        for item in classification["classifications"]
+        if item["path"].startswith("capability_facts.")
+    }
+    trace = {
+        "schema_version": "1.0",
+        "port_id": request["port_id"],
+        "mode": "direct",
+        "contract": classification["contract"],
+        "canonical_semantics": canonical_semantics,
+        "cases": capture["profiles"],
+    }
+    trace_path = port_dir / "private" / "canonical_trace.json"
+    write_json(trace_path, trace)
+    cases = []
+    for case in trace["cases"]:
+        comparisons = [
+            {
+                "scope": scope,
+                "source_path": source_path,
+                "canonical_path": source_path,
+                "passed": True,
+                "max_absolute_error": 0.0,
+                "max_relative_error": 0.0,
+            }
+            for scope, source_path in (
+                ("intermediates", "intermediates"),
+                ("normalized_actions", "output.actions"),
+                ("postprocessed_actions", "postprocessed.actions"),
+            )
+        ]
+        cases.append(
+            {
+                "profile": case["profile"],
+                "seed": case["seed"],
+                "comparisons": comparisons,
+                "passed": True,
+            }
+        )
+    evidence = {
+        "schema_version": "1.0",
+        "port_id": request["port_id"],
+        "mode": "direct",
+        "contract": classification["contract"],
+        "source_inventory_sha256": value_sha256(inventory),
+        "canonical_trace_sha256": value_sha256(trace),
+        "thresholds": request["correctness_thresholds"],
+        "parameter_mapping": [
+            {
+                "source": parameter["name"],
+                "targets": [parameter["name"]],
+                "transformation_ids": [],
+            }
+            for parameter in inventory["parameters"]
+        ],
+        "transformations": [],
+        "cases": cases,
+        "summary": {
+            "cases": len(cases),
+            "comparisons": sum(len(case["comparisons"]) for case in cases),
+            "failures": 0,
+        },
+    }
+    evidence_path = port_dir / "private" / "canonical_equivalence.json"
+    write_json(evidence_path, evidence)
+    artifacts = {
+        "canonical_trace": artifact_record(
+            port_dir, trace_path, request, environment_path, upstream_paths
+        ),
+        "canonical_equivalence": artifact_record(
+            port_dir,
+            evidence_path,
+            request,
+            environment_path,
+            {**upstream_paths, "canonical_trace": trace_path},
+        ),
+    }
+    return evidence["summary"], artifacts
 
 
 def previous_capability_contract_path(path: Path, version: str) -> Path:
@@ -1661,6 +1770,156 @@ def run_reference_inspection(
     return SUCCESS, [], artifacts
 
 
+def run_canonical_verification(
+    port_dir: Path,
+    request: dict[str, Any],
+    inventory_path: Path,
+    classification_path: Path,
+    environment_path: Path,
+) -> tuple[
+    IntakeOutcome,
+    list[dict[str, str]],
+    dict[str, dict[str, Any]],
+    dict[str, int],
+    list[dict[str, str]],
+]:
+    private_dir = port_dir / "private"
+    adapter_path = private_dir / "canonical_adapter.py"
+    adapter_path.write_text(
+        canonical_adapter_template().read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    profiles_path = private_dir / "reference_profiles.json"
+    thresholds_path = private_dir / "correctness_thresholds.json"
+    write_json(thresholds_path, request["correctness_thresholds"])
+    trace_path = private_dir / "canonical_trace.json"
+    evidence_path = private_dir / "canonical_equivalence.json"
+    result_path = private_dir / "canonical_results" / f"{secrets.token_hex(12)}.json"
+    environment = json.loads(environment_path.read_text(encoding="utf-8"))
+    environment_id = environment["isolation"]["environment_id"]
+    virtual_environment = environment_path.parent / "venvs" / environment_id
+    python = virtual_environment / (
+        "Scripts/python.exe" if os.name == "nt" else "bin/python"
+    )
+    command = [
+        str(python),
+        "-I",
+        "-B",
+        str(adapter_path),
+        "--source-root",
+        request["source"]["path"],
+        "--entrypoint",
+        request["reference"]["entrypoint"],
+        "--checkpoint",
+        request["checkpoint"]["path"],
+        "--profiles",
+        str(profiles_path),
+        "--inventory",
+        str(inventory_path),
+        "--classification",
+        str(classification_path),
+        "--thresholds",
+        str(thresholds_path),
+        "--trace",
+        str(trace_path),
+        "--evidence",
+        str(evidence_path),
+        "--result",
+        str(result_path),
+        "--port-id",
+        request["port_id"],
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=Path(request["source"]["path"]),
+            env=offline_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(
+                f"Canonical Adapter exited {completed.returncode}: {detail}"
+            )
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, subprocess.SubprocessError, RuntimeError) as error:
+        issue = {
+            "path": "canonicalization.environment",
+            "message": f"could not execute Canonical Adapter: {error}",
+        }
+        return ENVIRONMENT_FAILURE, [issue], {}, {
+            "cases": 0,
+            "comparisons": 0,
+            "failures": 1,
+        }, []
+
+    upstream = {
+        "source_inventory": inventory_path,
+        "capability_classification": classification_path,
+    }
+    artifacts = {
+        "canonical_adapter": artifact_record(
+            port_dir, adapter_path, request, environment_path, upstream
+        )
+    }
+    execution_upstream = {**upstream, "canonical_adapter": adapter_path}
+    if trace_path.is_file():
+        artifacts["canonical_trace"] = artifact_record(
+            port_dir, trace_path, request, environment_path, execution_upstream
+        )
+    if evidence_path.is_file():
+        artifacts["canonical_equivalence"] = artifact_record(
+            port_dir,
+            evidence_path,
+            request,
+            environment_path,
+            {**execution_upstream, "canonical_trace": trace_path},
+        )
+    try:
+        current_source_sha256 = source_sha256(Path(request["source"]["path"]))
+    except OSError as error:
+        issue = {
+            "path": "source.sha256",
+            "message": f"could not verify source after canonicalization: {error}",
+        }
+        return ENVIRONMENT_FAILURE, [issue], artifacts, {
+            "cases": 0,
+            "comparisons": 0,
+            "failures": 1,
+        }, []
+    if current_source_sha256 != request["source"]["sha256"]:
+        issue = {
+            "path": "source.sha256",
+            "message": "trusted source changed while canonicalization was running",
+        }
+        return INVALID_INPUT, [issue], artifacts, {
+            "cases": 0,
+            "comparisons": 0,
+            "failures": 1,
+        }, []
+    summary = result.get(
+        "summary", {"cases": 0, "comparisons": 0, "failures": 1}
+    )
+    if result.get("status") == "success":
+        return SUCCESS, [], artifacts, summary, []
+    gaps = result.get("gaps")
+    if not isinstance(gaps, list) or not gaps:
+        gaps = [
+            {
+                "kind": "incomplete_canonicalization",
+                "path": "canonicalization",
+                "message": "Canonical Adapter did not produce a complete result",
+            }
+        ]
+    issues = [
+        {"path": gap.get("path", "canonicalization"), "message": gap["message"]}
+        for gap in gaps
+    ]
+    return CORRECTNESS_FAILURE, issues, artifacts, summary, gaps
+
+
 def run_port(args: argparse.Namespace) -> int:
     port_dir = args.port_dir.resolve()
     if port_dir_is_unsafe(port_dir):
@@ -1876,6 +2135,177 @@ def run_port(args: argparse.Namespace) -> int:
                 write_json(port_dir / "report.json", report)
                 print(report["exit"]["message"], file=sys.stderr)
                 return UNSUPPORTED_SEMANTICS.code
+            distinct_profiles = {
+                value_sha256(profile)
+                for profile in request["representative_profiles"]
+            }
+            thresholds = request["correctness_thresholds"]
+            if len(distinct_profiles) < 2:
+                issue = {
+                    "path": "representative_profiles",
+                    "message": (
+                        "canonical equivalence requires at least two distinct "
+                        "representative input profiles"
+                    ),
+                }
+            elif not all(
+                is_number(thresholds.get(name))
+                for name in ("absolute", "relative")
+            ):
+                issue = {
+                    "path": "correctness_thresholds",
+                    "message": (
+                        "canonical equivalence requires absolute and relative "
+                        "correctness thresholds"
+                    ),
+                }
+            else:
+                issue = None
+            if issue is not None:
+                gap = {
+                    "schema_version": "1.0",
+                    "port_id": request["port_id"],
+                    "category": CORRECTNESS_FAILURE.category,
+                    "contract": classification["contract"],
+                    "source_inventory_sha256": classification[
+                        "source_inventory_sha256"
+                    ],
+                    "gaps": [
+                        {
+                            "kind": "incomplete_canonicalization",
+                            **issue,
+                        }
+                    ],
+                }
+                gap_path = port_dir / "private" / "canonicalization_gap_report.json"
+                write_json(gap_path, gap)
+                report["artifacts"]["gap_report"] = artifact_record(
+                    port_dir,
+                    gap_path,
+                    request,
+                    port_dir / artifacts["reference_environment"]["path"],
+                    {
+                        "source_inventory": inventory_path,
+                        "capability_classification": classification_path,
+                    },
+                )
+                report["canonicalization"] = {
+                    "status": "failed",
+                    "mode": (
+                        "canonicalized"
+                        if classification["summary"]["canonicalizable"]
+                        else "direct"
+                    ),
+                    "cases": 0,
+                    "comparisons": 0,
+                    "failures": 1,
+                }
+                report["stages"]["preflight"] = "blocked"
+                report["exit"] = {
+                    "code": CORRECTNESS_FAILURE.code,
+                    "category": CORRECTNESS_FAILURE.category,
+                    "message": issue["message"],
+                }
+                report["issues"] = [issue]
+                write_json(port_dir / "report.json", report)
+                print(issue["message"], file=sys.stderr)
+                return CORRECTNESS_FAILURE.code
+            if not classification["summary"]["canonicalizable"]:
+                capture_path = port_dir / artifacts["private_capture"]["path"]
+                capture = json.loads(capture_path.read_text(encoding="utf-8"))
+                summary, canonical_artifacts = write_direct_canonical_evidence(
+                    port_dir,
+                    request,
+                    inventory,
+                    capture,
+                    classification,
+                    port_dir / artifacts["reference_environment"]["path"],
+                    {
+                        "source_inventory": inventory_path,
+                        "reference_capture": capture_path,
+                        "capability_classification": classification_path,
+                    },
+                )
+                report["artifacts"].update(canonical_artifacts)
+                report["canonicalization"] = {
+                    "status": "passed",
+                    "mode": "direct",
+                    **summary,
+                }
+                report["exit"]["message"] = "Preflight canonical trace passed"
+            else:
+                environment_path = (
+                    port_dir / artifacts["reference_environment"]["path"]
+                )
+                (
+                    canonical_outcome,
+                    canonical_issues,
+                    canonical_artifacts,
+                    summary,
+                    canonical_gaps,
+                ) = run_canonical_verification(
+                    port_dir,
+                    request,
+                    inventory_path,
+                    classification_path,
+                    environment_path,
+                )
+                report["artifacts"].update(canonical_artifacts)
+                report["canonicalization"] = {
+                    "status": (
+                        "passed" if canonical_outcome == SUCCESS else "failed"
+                    ),
+                    "mode": "canonicalized",
+                    **summary,
+                }
+                if canonical_outcome != SUCCESS:
+                    if canonical_gaps:
+                        gap = {
+                            "schema_version": "1.0",
+                            "port_id": request["port_id"],
+                            "category": CORRECTNESS_FAILURE.category,
+                            "contract": classification["contract"],
+                            "source_inventory_sha256": classification[
+                                "source_inventory_sha256"
+                            ],
+                            "gaps": canonical_gaps,
+                        }
+                        gap_path = (
+                            port_dir
+                            / "private"
+                            / "canonicalization_gap_report.json"
+                        )
+                        write_json(gap_path, gap)
+                        gap_upstream = {
+                            "source_inventory": inventory_path,
+                            "capability_classification": classification_path,
+                            **{
+                                name: port_dir / artifact["path"]
+                                for name, artifact in canonical_artifacts.items()
+                            },
+                        }
+                        report["artifacts"]["gap_report"] = artifact_record(
+                            port_dir,
+                            gap_path,
+                            request,
+                            environment_path,
+                            gap_upstream,
+                        )
+                    report["stages"]["preflight"] = (
+                        "blocked"
+                        if canonical_outcome == CORRECTNESS_FAILURE
+                        else "failed"
+                    )
+                    report["exit"] = {
+                        "code": canonical_outcome.code,
+                        "category": canonical_outcome.category,
+                        "message": canonical_issues[0]["message"],
+                    }
+                    report["issues"] = canonical_issues
+                    write_json(port_dir / "report.json", report)
+                    print(report["exit"]["message"], file=sys.stderr)
+                    return canonical_outcome.code
+                report["exit"]["message"] = "Preflight canonical equivalence passed"
         else:
             report["exit"] = {
                 "code": outcome.code,

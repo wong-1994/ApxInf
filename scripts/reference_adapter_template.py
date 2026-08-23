@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import random
 import socket
 import sys
 import traceback
@@ -106,6 +107,24 @@ def disable_runtime_network() -> None:
     socket.gethostbyaddr = offline
     socket.gethostbyname = offline
     socket.gethostbyname_ex = offline
+
+
+def set_deterministic_seed(module: Any, seed: int) -> None:
+    """Reset common RNGs plus an optional source-specific seed hook."""
+
+    random.seed(seed)
+    for module_name in ("numpy", "torch"):
+        try:
+            dependency = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        if module_name == "numpy":
+            dependency.random.seed(seed)
+        else:
+            dependency.manual_seed(seed)
+    set_seed = getattr(module, "set_seed", None)
+    if callable(set_seed):
+        set_seed(seed)
 
 
 def tensor_shape(value: Any) -> list[int] | None:
@@ -302,32 +321,38 @@ def inspect_source(args: argparse.Namespace) -> None:
         output_schemas = []
         intermediate_schemas = []
         for profile in profiles:
-            inputs = adapter.preprocess(profile)
-            output = adapter.infer(model, inputs)
-            intermediates = adapter.capture_intermediates(model, inputs)
-            postprocessed = adapter.postprocess(output)
-            captures.append(
-                {
-                    "profile": profile.get("name"),
-                    "inputs": json_capture(inputs),
-                    "output": json_capture(output),
-                    "intermediates": json_capture(intermediates),
-                    "postprocessed": json_capture(postprocessed),
-                }
-            )
-            input_schemas.append(
-                {"profile": profile.get("name"), "schema": value_schema(inputs)}
-            )
-            output_schemas.append(
-                {
-                    "profile": profile.get("name"),
-                    "raw": value_schema(output),
-                    "postprocessed": value_schema(postprocessed),
-                }
-            )
-            intermediate_schemas.append(
-                {"profile": profile.get("name"), "schema": value_schema(intermediates)}
-            )
+            for seed in (0, 1):
+                set_deterministic_seed(adapter._module, seed)
+                inputs = adapter.preprocess(profile)
+                output = adapter.infer(model, inputs)
+                intermediates = adapter.capture_intermediates(model, inputs)
+                postprocessed = adapter.postprocess(output)
+                captures.append(
+                    {
+                        "profile": profile.get("name"),
+                        "seed": seed,
+                        "inputs": json_capture(inputs),
+                        "output": json_capture(output),
+                        "intermediates": json_capture(intermediates),
+                        "postprocessed": json_capture(postprocessed),
+                    }
+                )
+                input_schemas.append(
+                    {"profile": profile.get("name"), "schema": value_schema(inputs)}
+                )
+                output_schemas.append(
+                    {
+                        "profile": profile.get("name"),
+                        "raw": value_schema(output),
+                        "postprocessed": value_schema(postprocessed),
+                    }
+                )
+                intermediate_schemas.append(
+                    {
+                        "profile": profile.get("name"),
+                        "schema": value_schema(intermediates),
+                    }
+                )
 
         parameters = named_values(model, "named_parameters")
         buffers = named_values(model, "named_buffers")

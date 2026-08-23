@@ -11,9 +11,10 @@ vendored in this repository, so no external source checkout is required.
 ## VLA model porting
 
 Use the single-entry [`scripts/apxinf_port.py`](scripts/apxinf_port.py) command
-to initialize a private Port request, inspect trusted source semantics, and
-classify them against the versioned VLA Capability Contract during read-only
-Preflight. See the [Porting Workflow guide](doc/porting-workflow.md).
+to initialize a private Port request, inspect trusted source semantics, classify
+them against the versioned VLA Capability Contract, and prove a direct or
+canonicalized inference trace during read-only Preflight. See the
+[Porting Workflow guide](doc/porting-workflow.md).
 
 ## PI0.5 Performance and Accuracy
 
