@@ -13,6 +13,7 @@
     "request_declarations",
     "observed_environment",
     "reference_inspection",
+    "capability_assessment",
     "target_precisions",
     "issues",
     "warnings",
@@ -37,7 +38,7 @@
       "required": ["code", "category", "message"],
       "properties": {
         "code": {"type": "integer"},
-        "category": {"enum": ["success", "missing_input", "invalid_input", "unsupported_target", "environment_failure", "reference_load_failure", "reference_trace_failure"]},
+        "category": {"enum": ["success", "missing_input", "invalid_input", "unsupported_target", "environment_failure", "reference_load_failure", "reference_trace_failure", "unsupported_semantics"]},
         "message": {"type": "string"}
       }
     },
@@ -50,6 +51,18 @@
       "properties": {
         "status": {"enum": ["not_configured", "passed", "failed"]},
         "adapter_contract_version": {"type": ["string", "null"]}
+      }
+    },
+    "capability_assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "contract_version", "supported", "canonicalizable", "unsupported"],
+      "properties": {
+        "status": {"enum": ["not_configured", "passed", "blocked"]},
+        "contract_version": {"type": ["string", "null"]},
+        "supported": {"type": "integer", "minimum": 0},
+        "canonicalizable": {"type": "integer", "minimum": 0},
+        "unsupported": {"type": "integer", "minimum": 0}
       }
     },
     "target_precisions": {

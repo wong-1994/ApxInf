@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apxinf.dev/schemas/capability-classification-v1.schema.json",
+  "title": "ApxInf Capability Contract classification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract",
+    "source_inventory_sha256",
+    "classifications",
+    "summary",
+    "dependency_fingerprints"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "sha256"],
+      "properties": {
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "source_inventory_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "classifications": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/classification"}
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["supported", "canonicalizable", "unsupported"],
+      "properties": {
+        "supported": {"type": "integer", "minimum": 0},
+        "canonicalizable": {"type": "integer", "minimum": 0},
+        "unsupported": {"type": "integer", "minimum": 0}
+      }
+    },
+    "dependency_fingerprints": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    }
+  },
+  "$defs": {
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "capability",
+        "observed",
+        "classification",
+        "canonical",
+        "reason"
+      ],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "capability": {"type": "string", "minLength": 1},
+        "observed": {},
+        "classification": {"enum": ["supported", "canonicalizable", "unsupported"]},
+        "canonical": {"type": ["string", "null"]},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

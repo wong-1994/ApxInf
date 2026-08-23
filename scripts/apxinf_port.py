@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Initialize Intake and inspect trusted source code for an ApxInf VLA Port."""
+"""Run Intake and Capability Contract Preflight for an ApxInf VLA Port."""
 
 from __future__ import annotations
 
@@ -21,6 +21,19 @@ from typing import Any
 REQUEST_SCHEMA_VERSION = "1.0"
 REPORT_SCHEMA_VERSION = "1.0"
 REFERENCE_ADAPTER_CONTRACT_VERSION = "1.0"
+DEFAULT_CAPABILITY_CONTRACT_VERSION = "1.0"
+REQUIRED_CAPABILITIES = {
+    "shape_profiles",
+    "attention",
+    "masks",
+    "position_encodings",
+    "normalization",
+    "activations",
+    "conditioning",
+    "action_heads",
+    "schedules",
+    "control_flow",
+}
 SUPPORTED_TUPLES = (
     ("thor", "bf16"),
     ("thor", "fp8"),
@@ -44,6 +57,7 @@ UNSUPPORTED_TARGET = IntakeOutcome(4, "unsupported_target")
 ENVIRONMENT_FAILURE = IntakeOutcome(5, "environment_failure")
 REFERENCE_LOAD_FAILURE = IntakeOutcome(6, "reference_load_failure")
 REFERENCE_TRACE_FAILURE = IntakeOutcome(7, "reference_trace_failure")
+UNSUPPORTED_SEMANTICS = IntakeOutcome(8, "unsupported_semantics")
 
 
 def repository_root() -> Path:
@@ -52,6 +66,10 @@ def repository_root() -> Path:
 
 def reference_adapter_template() -> Path:
     return repository_root() / "scripts" / "reference_adapter_template.py"
+
+
+def default_capability_contract(version: str) -> Path:
+    return repository_root() / "contracts" / f"vla-capability-contract-{version}.json"
 
 
 def port_dir_is_unsafe(port_dir: Path, source: Path | None = None) -> bool:
@@ -153,6 +171,7 @@ def initialize(args: argparse.Namespace) -> int:
             "dependency_lock": args.dependency_lock,
             "network_access": False,
         },
+        "capability_contract_version": DEFAULT_CAPABILITY_CONTRACT_VERSION,
         "representative_profiles": [{"name": None, "inputs": {}}],
         "requested_targets": [
             {
@@ -249,6 +268,7 @@ def successful_report(
             "source": request["source"],
             "checkpoint": request["checkpoint"],
             "reference": request["reference"],
+            "capability_contract_version": request["capability_contract_version"],
             "representative_profiles": request["representative_profiles"],
             "requested_targets": request["requested_targets"],
             "correctness_thresholds": request["correctness_thresholds"],
@@ -259,6 +279,13 @@ def successful_report(
         "reference_inspection": {
             "status": "not_configured",
             "adapter_contract_version": None,
+        },
+        "capability_assessment": {
+            "status": "not_configured",
+            "contract_version": request["capability_contract_version"],
+            "supported": 0,
+            "canonicalizable": 0,
+            "unsupported": 0,
         },
         "target_precisions": tuple_states(request["requested_targets"]),
         "issues": [],
@@ -292,6 +319,9 @@ def failed_report(
                 "source": request.get("source"),
                 "checkpoint": request.get("checkpoint"),
                 "reference": request.get("reference"),
+                "capability_contract_version": request.get(
+                    "capability_contract_version"
+                ),
                 "representative_profiles": request.get("representative_profiles"),
                 "requested_targets": request.get("requested_targets"),
                 "correctness_thresholds": request.get("correctness_thresholds"),
@@ -303,6 +333,13 @@ def failed_report(
         "reference_inspection": {
             "status": "not_configured",
             "adapter_contract_version": None,
+        },
+        "capability_assessment": {
+            "status": "not_configured",
+            "contract_version": request.get("capability_contract_version"),
+            "supported": 0,
+            "canonicalizable": 0,
+            "unsupported": 0,
         },
         "target_precisions": tuple_states(request.get("requested_targets", [])),
         "issues": issues,
@@ -367,13 +404,14 @@ def schema_issues(request: Any) -> list[dict[str, str]]:
         "source",
         "checkpoint",
         "reference",
+        "capability_contract_version",
         "representative_profiles",
         "requested_targets",
         "correctness_thresholds",
         "tuning_budgets",
         "user_environment_declarations",
     }
-    required_fields = {"schema_version", "port_id"}
+    required_fields = {"schema_version", "port_id", "capability_contract_version"}
     for field in sorted(required_fields - request.keys()):
         issues.append({"path": field, "message": "field is required by the request schema"})
     add_unknown_field_issues(
@@ -395,6 +433,18 @@ def schema_issues(request: Any) -> list[dict[str, str]]:
     for field in ("port_id",):
         if field in request and not isinstance(request[field], str):
             issues.append({"path": field, "message": "must be a string"})
+    contract_version = request.get("capability_contract_version")
+    if "capability_contract_version" in request and (
+        not isinstance(contract_version, str)
+        or len(contract_version.split(".")) != 2
+        or not all(part.isdigit() for part in contract_version.split("."))
+    ):
+        issues.append(
+            {
+                "path": "capability_contract_version",
+                "message": "must be an exact major.minor version",
+            }
+        )
     for field in ("source", "checkpoint", "reference", "correctness_thresholds"):
         if field in request and not isinstance(request[field], dict):
             issues.append({"path": field, "message": "must be an object"})
@@ -632,6 +682,9 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("correctness_thresholds", {})
     normalized.setdefault("tuning_budgets", [])
     normalized.setdefault("user_environment_declarations", {})
+    normalized.setdefault(
+        "capability_contract_version", DEFAULT_CAPABILITY_CONTRACT_VERSION
+    )
     return normalized
 
 
@@ -785,7 +838,13 @@ def artifact_record(
     path: Path,
     request: dict[str, Any],
     environment_path: Path,
+    extra_upstream: dict[str, Path] | None = None,
 ) -> dict[str, Any]:
+    upstream = {"request": file_sha256(port_dir / "request.json")}
+    if extra_upstream:
+        upstream.update(
+            {name: file_sha256(path) for name, path in extra_upstream.items()}
+        )
     return {
         "path": path.relative_to(port_dir).as_posix(),
         "fingerprints": {
@@ -799,9 +858,300 @@ def artifact_record(
             "source_sha256": request["source"]["sha256"],
             "checkpoint_sha256": request["checkpoint"]["sha256"],
             "environment_sha256": file_sha256(environment_path),
-            "upstream_sha256": {
-                "request": file_sha256(port_dir / "request.json"),
-            },
+            "upstream_sha256": upstream,
+        },
+    }
+
+
+def value_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def load_capability_contract(path: Path, expected_version: str) -> dict[str, Any]:
+    contract = json.loads(
+        path.read_text(encoding="utf-8"),
+        parse_constant=reject_non_json_number,
+        parse_float=parse_finite_float,
+    )
+    if not isinstance(contract, dict):
+        raise ValueError("capability contract must be a JSON object")
+    expected_fields = {
+        "schema_version",
+        "contract_version",
+        "family",
+        "revision",
+        "capabilities",
+    }
+    if set(contract) != expected_fields:
+        raise ValueError("capability contract has missing or unknown top-level fields")
+    if contract.get("schema_version") != "1.0":
+        raise ValueError("capability contract schema_version must equal 1.0")
+    if contract.get("family") != "canonical_transformer_vla":
+        raise ValueError("capability contract family must be canonical_transformer_vla")
+    if contract.get("contract_version") != expected_version:
+        raise ValueError(
+            "capability contract version does not match the exact request pin"
+        )
+    version = tuple(int(part) for part in expected_version.split("."))
+    revision = contract.get("revision")
+    if not isinstance(revision, dict):
+        raise ValueError("capability contract must declare revision metadata")
+    if set(revision) != {"kind", "previous_version", "changes"}:
+        raise ValueError("capability contract revision has missing or unknown fields")
+    kind = revision.get("kind")
+    previous_version = revision.get("previous_version")
+    changes = revision.get("changes")
+    if not isinstance(changes, list):
+        raise ValueError("capability contract revision changes must be an array")
+    if kind == "initial":
+        if previous_version is not None or changes:
+            raise ValueError("an initial contract cannot declare previous changes")
+    elif kind in {"additive", "breaking"}:
+        if (
+            not isinstance(previous_version, str)
+            or len(previous_version.split(".")) != 2
+            or not all(part.isdigit() for part in previous_version.split("."))
+        ):
+            raise ValueError("updated contracts require a previous major.minor version")
+        previous = tuple(int(part) for part in previous_version.split("."))
+        if any(
+            not isinstance(change, dict)
+            or set(change) != {"capability", "kind"}
+            or not isinstance(change.get("capability"), str)
+            or not change.get("capability")
+            for change in changes
+        ):
+            raise ValueError("contract changes must declare capability and kind")
+        change_kinds = {change.get("kind") for change in changes}
+        if not change_kinds <= {"additive", "changed", "removed"}:
+            raise ValueError("contract change kind is invalid")
+        if kind == "additive":
+            if version[0] != previous[0] or version[1] <= previous[1]:
+                raise ValueError("additive contracts must increment the minor version")
+            if not changes or change_kinds != {"additive"}:
+                raise ValueError("additive contracts may declare only additive changes")
+        elif version[0] <= previous[0]:
+            raise ValueError("breaking contracts must increment the major version")
+        elif not change_kinds.intersection({"changed", "removed"}):
+            raise ValueError(
+                "breaking contracts must declare changed or removed semantics"
+            )
+    else:
+        raise ValueError("capability contract revision kind is invalid")
+    capabilities = contract.get("capabilities")
+    if not isinstance(capabilities, dict) or not capabilities:
+        raise ValueError("capability contract must declare capabilities")
+    missing_capabilities = sorted(REQUIRED_CAPABILITIES - capabilities.keys())
+    if missing_capabilities:
+        raise ValueError(
+            "capability contract is missing required capabilities: "
+            + ", ".join(missing_capabilities)
+        )
+    for name, rule in capabilities.items():
+        if not isinstance(name, str) or not isinstance(rule, dict):
+            raise ValueError("capability rules must be named JSON objects")
+        if set(rule) != {
+            "required",
+            "cardinality",
+            "supported",
+            "canonicalizable",
+        }:
+            raise ValueError(f"capability {name} has missing or unknown fields")
+        supported = rule.get("supported")
+        if not isinstance(supported, list) or any(
+            not isinstance(value, str) or not value for value in supported
+        ):
+            raise ValueError(f"capability {name} must declare supported values")
+        canonicalizable = rule.get("canonicalizable")
+        if not isinstance(canonicalizable, dict) or any(
+            not isinstance(source, str)
+            or not source
+            or not isinstance(target, str)
+            or not target
+            for source, target in canonicalizable.items()
+        ):
+            raise ValueError(
+                f"capability {name} must declare canonicalizable mappings"
+            )
+        if not isinstance(rule.get("required"), bool):
+            raise ValueError(f"capability {name} required must be boolean")
+        if rule.get("cardinality") != "exactly_one":
+            raise ValueError(f"capability {name} cardinality must be exactly_one")
+        if name in REQUIRED_CAPABILITIES and not rule["required"]:
+            raise ValueError(f"core capability {name} must remain required")
+    for change in changes:
+        capability = change["capability"]
+        change_kind = change["kind"]
+        if change_kind in {"additive", "changed"} and capability not in capabilities:
+            raise ValueError(
+                f"contract change for {capability} has no capability declaration"
+            )
+        if change_kind == "removed" and capability in capabilities:
+            raise ValueError(
+                f"removed capability {capability} must not remain declared"
+            )
+    return contract
+
+
+def classify_capabilities(
+    inventory: dict[str, Any], contract: dict[str, Any]
+) -> dict[str, Any]:
+    raw_facts = inventory.get("capability_facts", {})
+    facts = raw_facts if isinstance(raw_facts, dict) else {}
+    rules = contract["capabilities"]
+    classifications = []
+    if not isinstance(raw_facts, dict):
+        classifications.append(
+            {
+                "path": "capability_facts",
+                "capability": "capability_facts",
+                "observed": raw_facts,
+                "classification": "unsupported",
+                "canonical": None,
+                "reason": "capability facts must be a JSON object",
+            }
+        )
+    for capability in sorted(set(rules) | set(facts)):
+        observed_values = facts.get(capability, [])
+        rule = rules.get(capability)
+        if not isinstance(observed_values, list):
+            classifications.append(
+                {
+                    "path": f"capability_facts.{capability}",
+                    "capability": capability,
+                    "observed": observed_values,
+                    "classification": "unsupported",
+                    "canonical": None,
+                    "reason": "capability observations must be an array",
+                }
+            )
+            continue
+        if rule is None:
+            if not observed_values:
+                classifications.append(
+                    {
+                        "path": f"capability_facts.{capability}",
+                        "capability": capability,
+                        "observed": [],
+                        "classification": "unsupported",
+                        "canonical": None,
+                        "reason": "capability is not declared by the contract",
+                    }
+                )
+            for index, observed in enumerate(observed_values):
+                classifications.append(
+                    {
+                        "path": f"capability_facts.{capability}[{index}]",
+                        "capability": capability,
+                        "observed": observed,
+                        "classification": "unsupported",
+                        "canonical": None,
+                        "reason": "capability is not declared by the contract",
+                    }
+                )
+            continue
+        if not observed_values and not rule.get("required", True):
+            continue
+        if not observed_values:
+            classifications.append(
+                {
+                    "path": f"capability_facts.{capability}",
+                    "capability": capability,
+                    "observed": None,
+                    "classification": "unsupported",
+                    "canonical": None,
+                    "reason": "required capability fact is unknown",
+                }
+            )
+            continue
+        string_values = [
+            observed for observed in observed_values if isinstance(observed, str)
+        ]
+        if len(string_values) != len(observed_values):
+            classifications.append(
+                {
+                    "path": f"capability_facts.{capability}",
+                    "capability": capability,
+                    "observed": observed_values,
+                    "classification": "unsupported",
+                    "canonical": None,
+                    "reason": "capability observations must be non-empty strings",
+                }
+            )
+        if rule.get("cardinality") == "exactly_one" and len(set(string_values)) != 1:
+            classifications.append(
+                {
+                    "path": f"capability_facts.{capability}",
+                    "capability": capability,
+                    "observed": observed_values,
+                    "classification": "unsupported",
+                    "canonical": None,
+                    "reason": "capability observations are contradictory",
+                }
+            )
+        for index, observed in enumerate(observed_values):
+            if not isinstance(observed, str) or not observed:
+                classification = "unsupported"
+                canonical = None
+                reason = "capability observation must be a non-empty string"
+            elif observed in rule["supported"]:
+                classification = "supported"
+                canonical = observed
+                reason = "declared supported semantic"
+            elif observed in rule["canonicalizable"]:
+                classification = "canonicalizable"
+                canonical = rule["canonicalizable"][observed]
+                reason = "declared canonicalizable semantic"
+            else:
+                classification = "unsupported"
+                canonical = None
+                reason = "semantic is not declared supported or canonicalizable"
+            classifications.append(
+                {
+                    "path": f"capability_facts.{capability}[{index}]",
+                    "capability": capability,
+                    "observed": observed,
+                    "classification": classification,
+                    "canonical": canonical,
+                    "reason": reason,
+                }
+            )
+    for field in ("custom_operators", "dynamic_branches"):
+        for index, observed in enumerate(inventory.get(field, [])):
+            classifications.append(
+                {
+                    "path": f"{field}[{index}]",
+                    "capability": (
+                        "control_flow" if field == "dynamic_branches" else field
+                    ),
+                    "observed": observed,
+                    "classification": "unsupported",
+                    "canonical": None,
+                    "reason": (
+                        f"unexplained {field.replace('_', ' ')} is outside the contract"
+                    ),
+                }
+            )
+    counts = {
+        kind: sum(item["classification"] == kind for item in classifications)
+        for kind in ("supported", "canonicalizable", "unsupported")
+    }
+    return {
+        "schema_version": "1.0",
+        "contract": {
+            "version": contract["contract_version"],
+            "sha256": value_sha256(contract),
+        },
+        "source_inventory_sha256": value_sha256(inventory),
+        "classifications": classifications,
+        "summary": counts,
+        "dependency_fingerprints": {
+            capability: value_sha256(rule)
+            for capability, rule in sorted(rules.items())
+            if capability in facts
         },
     }
 
@@ -1160,6 +1510,99 @@ def run_intake(args: argparse.Namespace) -> int:
                 if warnings
                 else "Intake and source inspection passed"
             )
+            inventory_path = port_dir / artifacts["source_inventory"]["path"]
+            contract_path = (
+                args.capability_contract.resolve()
+                if args.capability_contract is not None
+                else default_capability_contract(
+                    request["capability_contract_version"]
+                )
+            )
+            try:
+                inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+                contract = load_capability_contract(
+                    contract_path, request["capability_contract_version"]
+                )
+                classification = classify_capabilities(inventory, contract)
+            except (OSError, json.JSONDecodeError, ValueError) as error:
+                issue = {
+                    "path": "capability_contract",
+                    "message": f"could not evaluate capability contract: {error}",
+                }
+                report["exit"] = {
+                    "code": INVALID_INPUT.code,
+                    "category": INVALID_INPUT.category,
+                    "message": issue["message"],
+                }
+                report["stages"]["preflight"] = "failed"
+                report["issues"] = [issue]
+                write_json(port_dir / "report.json", report)
+                print(issue["message"], file=sys.stderr)
+                return INVALID_INPUT.code
+            classification_path = (
+                port_dir / "private" / "capability_classification.json"
+            )
+            write_json(classification_path, classification)
+            report["artifacts"]["capability_classification"] = artifact_record(
+                port_dir,
+                classification_path,
+                request,
+                port_dir / artifacts["reference_environment"]["path"],
+                {
+                    "source_inventory": inventory_path,
+                    "capability_contract": contract_path,
+                },
+            )
+            report["stages"]["preflight"] = "passed"
+            report["capability_assessment"] = {
+                "status": "passed",
+                "contract_version": contract["contract_version"],
+                **classification["summary"],
+            }
+            report["exit"]["message"] = "Preflight capability assessment passed"
+            if classification["summary"]["unsupported"]:
+                gaps = [
+                    item
+                    for item in classification["classifications"]
+                    if item["classification"] == "unsupported"
+                ]
+                gap = {
+                    "schema_version": "1.0",
+                    "port_id": request["port_id"],
+                    "category": UNSUPPORTED_SEMANTICS.category,
+                    "contract": classification["contract"],
+                    "source_inventory_sha256": classification[
+                        "source_inventory_sha256"
+                    ],
+                    "gaps": gaps,
+                }
+                gap_path = port_dir / "private" / "capability_gap_report.json"
+                write_json(gap_path, gap)
+                report["artifacts"]["gap_report"] = artifact_record(
+                    port_dir,
+                    gap_path,
+                    request,
+                    port_dir / artifacts["reference_environment"]["path"],
+                    {
+                        "source_inventory": inventory_path,
+                        "capability_contract": contract_path,
+                        "capability_classification": classification_path,
+                    },
+                )
+                report["stages"]["preflight"] = "blocked"
+                report["capability_assessment"]["status"] = "blocked"
+                report["exit"] = {
+                    "code": UNSUPPORTED_SEMANTICS.code,
+                    "category": UNSUPPORTED_SEMANTICS.category,
+                    "message": "source semantics fall outside the Capability Contract",
+                }
+                report["issues"] = [
+                    {"path": item["path"], "message": item["reason"]}
+                    for item in gaps
+                ]
+                write_json(port_dir / "report.json", report)
+                print(report["exit"]["message"], file=sys.stderr)
+                return UNSUPPORTED_SEMANTICS.code
         else:
             report["exit"] = {
                 "code": outcome.code,
@@ -1199,8 +1642,11 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--port-dir", type=Path, required=True)
     init.set_defaults(handler=initialize)
 
-    run = subcommands.add_parser("run", help="validate a request and run Intake")
+    run = subcommands.add_parser(
+        "run", help="validate a request and run Intake and Preflight"
+    )
     run.add_argument("--port-dir", type=Path, required=True)
+    run.add_argument("--capability-contract", type=Path)
     run.set_defaults(handler=run_intake)
 
     report = subcommands.add_parser("report", help="print the structured Port report")

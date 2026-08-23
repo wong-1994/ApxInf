@@ -28,7 +28,11 @@ SEMANTIC_FIELDS = (
     "custom_operators",
     "dynamic_branches",
 )
-OBJECT_SEMANTIC_FIELDS = {"preprocessing", "tokenization", "normalization"}
+OBJECT_SEMANTIC_FIELDS = {
+    "preprocessing",
+    "tokenization",
+    "normalization",
+}
 
 
 class ReferenceAdapter:
@@ -261,6 +265,10 @@ def validate_description(description: dict[str, Any]) -> None:
         expected = dict if field in OBJECT_SEMANTIC_FIELDS else list
         if not isinstance(description[field], expected):
             raise TypeError(f"describe().{field} must be a {expected.__name__}")
+    if "capability_facts" in description and not isinstance(
+        description["capability_facts"], dict
+    ):
+        raise TypeError("describe().capability_facts must be a dict")
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
@@ -348,6 +356,7 @@ def inspect_source(args: argparse.Namespace) -> None:
                 field,
                 {} if field in OBJECT_SEMANTIC_FIELDS else [],
             )
+        inventory["capability_facts"] = description.get("capability_facts", {})
         write_json(args.capture, {"schema_version": "1.0", "profiles": captures})
         write_json(args.inventory, inventory)
         write_json(args.result, {"status": "success"})

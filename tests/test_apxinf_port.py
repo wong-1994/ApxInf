@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import importlib.util
 import json
@@ -216,9 +217,38 @@ def describe():
         "schedules": [{"name": "flow", "steps": 2}],
         "custom_operators": [],
         "dynamic_branches": [],
+        "capability_facts": {
+            "shape_profiles": ["finite"],
+            "attention": ["scaled_dot_product"],
+            "masks": ["causal_and_padding"],
+            "position_encodings": ["rotary"],
+            "normalization": ["rms_norm"],
+            "activations": ["gelu"],
+            "conditioning": ["vision_language_state"],
+            "action_heads": ["flow_matching"],
+            "schedules": ["euler_flow_matching"],
+            "control_flow": ["static"],
+        },
     }
     if FAILURE == "invalid_inventory":
         description["preprocessing"] = []
+    elif FAILURE == "canonicalizable_attention":
+        description["capability_facts"]["attention"] = [
+            "separate_qkv_scaled_dot_product"
+        ]
+    elif FAILURE == "unsupported_attention":
+        description["capability_facts"]["attention"] = ["linear_attention"]
+    elif FAILURE == "unknown_masks":
+        del description["capability_facts"]["masks"]
+    elif FAILURE == "missing_capability_facts":
+        del description["capability_facts"]
+    elif FAILURE == "contradictory_normalization":
+        description["capability_facts"]["normalization"] = [
+            "rms_norm",
+            "layer_norm",
+        ]
+    elif FAILURE == "unexplained_control_flow":
+        description["dynamic_branches"] = [{"name": "data_dependent_router"}]
     return description
 
 
@@ -260,8 +290,18 @@ if FAILURE == "missing_description":
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["stages"]["intake"], "passed")
-            self.assertEqual(report["stages"]["preflight"], "not_started")
+            self.assertEqual(report["stages"]["preflight"], "passed")
             self.assertEqual(report["reference_inspection"]["status"], "passed")
+            self.assertEqual(
+                report["capability_assessment"],
+                {
+                    "status": "passed",
+                    "contract_version": "1.0",
+                    "supported": 10,
+                    "canonicalizable": 0,
+                    "unsupported": 0,
+                },
+            )
             self.assertEqual(report["exit"]["category"], "success")
 
             artifacts = report["artifacts"]
@@ -269,11 +309,13 @@ if FAILURE == "missing_description":
             inventory_path = port / artifacts["source_inventory"]["path"]
             environment_path = port / artifacts["reference_environment"]["path"]
             capture_path = port / artifacts["private_capture"]["path"]
+            classification_path = port / artifacts["capability_classification"]["path"]
             for artifact_path in (
                 adapter_path,
                 inventory_path,
                 environment_path,
                 capture_path,
+                classification_path,
             ):
                 self.assertTrue(artifact_path.is_file(), artifact_path)
             for artifact in artifacts.values():
@@ -379,8 +421,24 @@ if FAILURE == "missing_description":
                 "schedules",
                 "custom_operators",
                 "dynamic_branches",
+                "capability_facts",
             ):
                 self.assertIn(field, inventory)
+
+            classification = json.loads(
+                classification_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(classification["schema_version"], "1.0")
+            self.assertEqual(classification["contract"]["version"], "1.0")
+            self.assertEqual(
+                {item["classification"] for item in classification["classifications"]},
+                {"supported"},
+            )
+            self.assertEqual(len(classification["classifications"]), 10)
+            self.assertEqual(
+                set(classification["dependency_fingerprints"]),
+                set(inventory["capability_facts"]),
+            )
 
             environment = json.loads(environment_path.read_text(encoding="utf-8"))
             self.assertEqual(environment["schema_version"], "1.0")
@@ -553,6 +611,65 @@ if FAILURE == "missing_description":
             self.assertEqual(report["exit"]["category"], "reference_trace_failure")
             self.assertIn("describe", report["issues"][0]["message"])
 
+    def test_preflight_reports_declared_canonicalization(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(
+                Path(temporary), failure="canonicalizable_attention"
+            )
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["stages"]["preflight"], "passed")
+            self.assertEqual(report["capability_assessment"]["canonicalizable"], 1)
+            classification_path = (
+                port / report["artifacts"]["capability_classification"]["path"]
+            )
+            classifications = json.loads(
+                classification_path.read_text(encoding="utf-8")
+            )["classifications"]
+            attention = next(
+                item for item in classifications if item["capability"] == "attention"
+            )
+            self.assertEqual(attention["classification"], "canonicalizable")
+            self.assertEqual(attention["canonical"], "scaled_dot_product")
+
+    def test_unsupported_semantics_block_preflight_with_a_gap_report(self) -> None:
+        cases = {
+            "unsupported_attention": "capability_facts.attention[0]",
+            "unknown_masks": "capability_facts.masks",
+            "missing_capability_facts": "capability_facts.attention",
+            "contradictory_normalization": "capability_facts.normalization",
+            "unexplained_control_flow": "dynamic_branches[0]",
+        }
+        for failure, expected_path in cases.items():
+            with self.subTest(failure=failure):
+                with tempfile.TemporaryDirectory() as temporary:
+                    port, _ = self.initialize_inspectable_port(
+                        Path(temporary), failure=failure
+                    )
+
+                    result = self.run_port("run", "--port-dir", str(port))
+
+                    self.assertEqual(result.returncode, 8)
+                    report = json.loads(
+                        (port / "report.json").read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(report["stages"]["intake"], "passed")
+                    self.assertEqual(report["stages"]["preflight"], "blocked")
+                    self.assertEqual(
+                        report["exit"]["category"], "unsupported_semantics"
+                    )
+                    self.assertEqual(
+                        report["capability_assessment"]["status"], "blocked"
+                    )
+                    gap_path = port / report["artifacts"]["gap_report"]["path"]
+                    gap = json.loads(gap_path.read_text(encoding="utf-8"))
+                    self.assertEqual(gap["schema_version"], "1.0")
+                    self.assertEqual(gap["category"], "unsupported_semantics")
+                    self.assertIn(expected_path, {item["path"] for item in gap["gaps"]})
+
     def test_valid_subset_marks_only_selected_tuple_as_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -596,6 +713,7 @@ if FAILURE == "missing_description":
             request = json.loads((port / "request.json").read_text(encoding="utf-8"))
 
             self.assertEqual(request["schema_version"], "1.0")
+            self.assertEqual(request["capability_contract_version"], "1.0")
             self.assertEqual(request["source"]["revision"], "0123456789abcdef")
             self.assertEqual(len(request["source"]["sha256"]), 64)
             self.assertEqual(
@@ -624,6 +742,201 @@ if FAILURE == "missing_description":
                 request["tuning_budgets"],
                 [{"target": None, "seconds": None}],
             )
+
+    def test_published_contract_declares_model_neutral_vla_semantics(self) -> None:
+        contract = json.loads(
+            (ROOT / "contracts/vla-capability-contract-1.0.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(contract["contract_version"], "1.0")
+        self.assertEqual(contract["family"], "canonical_transformer_vla")
+        self.assertEqual(
+            set(contract["capabilities"]),
+            {
+                "shape_profiles",
+                "attention",
+                "masks",
+                "position_encodings",
+                "normalization",
+                "activations",
+                "conditioning",
+                "action_heads",
+                "schedules",
+                "control_flow",
+            },
+        )
+        self.assertNotIn("models", contract)
+        serialized = json.dumps(contract).lower()
+        for model_name in ("pi0", "pi05", "openvla", "deepseek"):
+            self.assertNotIn(model_name, serialized)
+
+        schema = json.loads(
+            (ROOT / "schemas/vla-capability-contract-v1.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(set(schema["required"]) - contract.keys(), set())
+
+    def test_additive_contract_update_preserves_unaffected_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            port, _ = self.initialize_inspectable_port(root)
+            initial = self.run_port("run", "--port-dir", str(port))
+            self.assertEqual(initial.returncode, 0, initial.stderr)
+            initial_report = json.loads(
+                (port / "report.json").read_text(encoding="utf-8")
+            )
+            initial_classification = json.loads(
+                (
+                    port
+                    / initial_report["artifacts"]["capability_classification"]["path"]
+                ).read_text(encoding="utf-8")
+            )
+
+            contract = json.loads(
+                (ROOT / "contracts/vla-capability-contract-1.0.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            contract["contract_version"] = "1.1"
+            contract["revision"] = {
+                "kind": "additive",
+                "previous_version": "1.0",
+                "changes": [
+                    {"capability": "attention", "kind": "additive"},
+                    {"capability": "gripper_control", "kind": "additive"}
+                ],
+            }
+            contract["capabilities"]["attention"]["supported"].append(
+                "flash_equivalent_scaled_dot_product"
+            )
+            contract["capabilities"]["gripper_control"] = {
+                "required": False,
+                "cardinality": "exactly_one",
+                "supported": ["parallel_jaw"],
+                "canonicalizable": {},
+            }
+            contract_path = root / "capability-contract-1.1.json"
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            request_path = port / "request.json"
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            request["capability_contract_version"] = "1.1"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+
+            updated = self.run_port(
+                "run",
+                "--port-dir",
+                str(port),
+                "--capability-contract",
+                str(contract_path),
+            )
+
+            self.assertEqual(updated.returncode, 0, updated.stderr)
+            updated_report = json.loads(
+                (port / "report.json").read_text(encoding="utf-8")
+            )
+            updated_classification = json.loads(
+                (
+                    port
+                    / updated_report["artifacts"]["capability_classification"]["path"]
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                updated_report["capability_assessment"]["contract_version"], "1.1"
+            )
+            initial_fingerprints = initial_classification["dependency_fingerprints"]
+            updated_fingerprints = updated_classification["dependency_fingerprints"]
+            self.assertEqual(set(initial_fingerprints), set(updated_fingerprints))
+            self.assertEqual(
+                {
+                    capability
+                    for capability in initial_fingerprints
+                    if initial_fingerprints[capability]
+                    != updated_fingerprints[capability]
+                },
+                {"attention"},
+            )
+            self.assertNotIn(
+                "gripper_control", updated_classification["dependency_fingerprints"]
+            )
+
+    def test_breaking_contract_update_requires_a_new_major_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            port, _ = self.initialize_inspectable_port(root)
+            contract = json.loads(
+                (ROOT / "contracts/vla-capability-contract-1.0.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            contract["contract_version"] = "2.0"
+            contract["revision"] = {
+                "kind": "breaking",
+                "previous_version": "1.0",
+                "changes": [{"capability": "attention", "kind": "changed"}],
+            }
+            contract["capabilities"]["attention"]["supported"] = [
+                "linear_attention"
+            ]
+            contract["capabilities"]["attention"]["canonicalizable"] = {}
+            contract_path = root / "capability-contract-2.0.json"
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            request_path = port / "request.json"
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            request["capability_contract_version"] = "2.0"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+
+            result = self.run_port(
+                "run",
+                "--port-dir",
+                str(port),
+                "--capability-contract",
+                str(contract_path),
+            )
+
+            self.assertEqual(result.returncode, 8)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["capability_assessment"]["contract_version"], "2.0")
+            self.assertEqual(report["exit"]["category"], "unsupported_semantics")
+
+            request["capability_contract_version"] = "1.0"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            mismatched = self.run_port(
+                "run",
+                "--port-dir",
+                str(port),
+                "--capability-contract",
+                str(contract_path),
+            )
+            self.assertEqual(mismatched.returncode, 3)
+            mismatched_report = json.loads(
+                (port / "report.json").read_text(encoding="utf-8")
+            )
+            self.assertIn(
+                "exact request pin", mismatched_report["issues"][0]["message"]
+            )
+
+            invalid_minor = copy.deepcopy(contract)
+            invalid_minor["contract_version"] = "1.1"
+            invalid_minor["revision"]["kind"] = "additive"
+            invalid_path = root / "invalid-capability-contract-1.1.json"
+            invalid_path.write_text(json.dumps(invalid_minor), encoding="utf-8")
+            request["capability_contract_version"] = "1.1"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+
+            invalid = self.run_port(
+                "run",
+                "--port-dir",
+                str(port),
+                "--capability-contract",
+                str(invalid_path),
+            )
+            self.assertEqual(invalid.returncode, 3)
+            invalid_report = json.loads(
+                (port / "report.json").read_text(encoding="utf-8")
+            )
+            self.assertIn("additive", invalid_report["issues"][0]["message"])
 
     def test_initialization_refuses_to_write_into_the_source_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apxinf.dev/schemas/vla-capability-contract-v1.schema.json",
+  "title": "ApxInf VLA Capability Contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract_version",
+    "family",
+    "revision",
+    "capabilities"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "contract_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
+    "family": {"const": "canonical_transformer_vla"},
+    "revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "previous_version", "changes"],
+      "properties": {
+        "kind": {"enum": ["initial", "additive", "breaking"]},
+        "previous_version": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9]+\\.[0-9]+$"
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["capability", "kind"],
+            "properties": {
+              "capability": {"type": "string", "minLength": 1},
+              "kind": {"enum": ["additive", "changed", "removed"]}
+            }
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/capability"}
+    }
+  },
+  "$defs": {
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "cardinality",
+        "supported",
+        "canonicalizable"
+      ],
+      "properties": {
+        "required": {"type": "boolean"},
+        "cardinality": {"const": "exactly_one"},
+        "supported": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "canonicalizable": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}
