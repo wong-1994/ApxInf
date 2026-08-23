@@ -8,6 +8,7 @@ an explicitly declared path; it never copies that source into ApxInf.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
 import random
@@ -69,6 +70,30 @@ class ReferenceAdapter:
 
     def postprocess(self, output: Any) -> Any:
         return self._call("postprocess", output)
+
+    def set_seed(self, seed: int) -> None:
+        set_deterministic_seed(self._module, seed)
+
+    def canonicalize(self, model: Any) -> Any:
+        return self._call("canonicalize", model)
+
+    def canonical_preprocess(self, profile: dict[str, Any]) -> Any:
+        return self._call("canonical_preprocess", profile)
+
+    def canonical_infer(self, model: Any, inputs: Any) -> Any:
+        return self._call("canonical_infer", model, inputs)
+
+    def canonical_capture_intermediates(self, model: Any, inputs: Any) -> Any:
+        return self._call("canonical_capture_intermediates", model, inputs)
+
+    def canonical_postprocess(self, output: Any) -> Any:
+        return self._call("canonical_postprocess", output)
+
+    def canonicalization_manifest(self) -> dict[str, Any]:
+        manifest = self._call("canonicalization_manifest")
+        if not isinstance(manifest, dict):
+            raise TypeError("canonicalization_manifest() must return an object")
+        return manifest
 
     def describe(self) -> dict[str, Any]:
         description = self._call("describe")
@@ -208,6 +233,80 @@ def json_capture(value: Any) -> Any:
     return {"schema": value_schema(value), "repr": repr(value)}
 
 
+def canonical_trace_document(
+    port_id: str,
+    mode: str,
+    classification: dict[str, Any],
+    cases: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "port_id": port_id,
+        "mode": mode,
+        "contract": classification["contract"],
+        "canonical_semantics": {
+            item["capability"]: item["canonical"]
+            for item in classification["classifications"]
+            if item["path"].startswith("capability_facts.")
+        },
+        "cases": cases,
+    }
+
+
+def canonical_evidence_document(
+    *,
+    port_id: str,
+    mode: str,
+    classification: dict[str, Any],
+    inventory: dict[str, Any],
+    trace: dict[str, Any],
+    thresholds: dict[str, Any],
+    parameter_mapping: list[dict[str, Any]],
+    canonical_parameters: list[dict[str, Any]],
+    canonical_aliases: list[list[str]],
+    canonical_tied_weights: list[list[str]],
+    transformations: list[dict[str, Any]],
+    cases: list[dict[str, Any]],
+    manifest_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    encoded_trace = json.dumps(
+        trace, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    encoded_inventory = json.dumps(
+        inventory, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    evidence = {
+        "schema_version": "1.0",
+        "port_id": port_id,
+        "mode": mode,
+        "contract": classification["contract"],
+        "source_inventory_sha256": hashlib.sha256(encoded_inventory).hexdigest(),
+        "canonical_trace_sha256": hashlib.sha256(encoded_trace).hexdigest(),
+        "thresholds": thresholds,
+        "parameter_mapping": parameter_mapping,
+        "source_parameters": inventory["parameters"],
+        "canonical_parameters": canonical_parameters,
+        "source_aliases": inventory["aliases"],
+        "canonical_aliases": canonical_aliases,
+        "source_tied_weights": inventory["tied_weights"],
+        "canonical_tied_weights": canonical_tied_weights,
+        "transformations": transformations,
+        "cases": cases,
+        "summary": {
+            "cases": len(cases),
+            "comparisons": sum(len(case["comparisons"]) for case in cases),
+            "failures": sum(
+                not comparison["passed"]
+                for case in cases
+                for comparison in case["comparisons"]
+            ),
+        },
+    }
+    if manifest_evidence:
+        evidence.update(manifest_evidence)
+    return evidence
+
+
 def named_values(model: Any, method_name: str) -> list[tuple[str, Any]]:
     method = getattr(model, method_name, None)
     if not callable(method):
@@ -322,7 +421,7 @@ def inspect_source(args: argparse.Namespace) -> None:
         intermediate_schemas = []
         for profile in profiles:
             for seed in (0, 1):
-                set_deterministic_seed(adapter._module, seed)
+                adapter.set_seed(seed)
                 inputs = adapter.preprocess(profile)
                 output = adapter.infer(model, inputs)
                 intermediates = adapter.capture_intermediates(model, inputs)

@@ -14,7 +14,6 @@
     "observed_environment",
     "reference_inspection",
     "capability_assessment",
-    "canonicalization",
     "target_precisions",
     "issues",
     "warnings",

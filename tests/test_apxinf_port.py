@@ -149,6 +149,7 @@ class Block:
 class Model:
     def __init__(self):
         self.shared = Tensor((2, 2), MODEL_VALUE)
+        self.action_weight = self.shared
         self.shared_view = Tensor(
             (1, 2), [[MODEL_VALUE, MODEL_VALUE]], self.shared._storage, offset=2
         )
@@ -163,7 +164,7 @@ class Model:
     def named_parameters(self, remove_duplicate=False):
         return [
             ("encoder.weight", self.shared),
-            ("action_head.weight", self.shared),
+            ("action_head.weight", self.action_weight),
             ("decoder.weight_alias", self.shared_alias),
             ("encoder.weight_view", self.shared_view),
         ]
@@ -187,7 +188,11 @@ def set_seed(seed):
 
 def preprocess(profile):
     assert profile["name"] in {"control-step", "control-step-alt"}
-    token = 1.0 if profile["name"] == "control-step" else 5.0
+    token = (
+        1.0
+        if profile["name"] == "control-step" or SCENARIO == "canonical_duplicate_inputs"
+        else 5.0
+    )
     return {
         "tokens": Tensor((1, 2), [[token, 2.0]]),
         "noise": Tensor((1, 2), [[0.25 + CURRENT_SEED, -0.25]]),
@@ -251,9 +256,15 @@ def describe():
         "canonicalizable_attention",
         "canonical_mismatch",
         "canonical_intermediate_mismatch",
+        "canonical_preprocess_mismatch",
+        "canonical_shape_mismatch",
         "canonical_unmapped_parameter",
+        "canonical_unknown_target",
+        "canonical_broken_tie",
         "canonical_missing_assumption",
         "canonical_state_gap",
+        "canonical_no_cache",
+        "canonical_duplicate_inputs",
         "canonical_unexplained_branch",
     }:
         description["capability_facts"]["attention"] = [
@@ -294,12 +305,25 @@ def describe():
 
 
 def canonicalize(model):
+    if SCENARIO == "canonical_broken_tie":
+        model.action_weight = Tensor(
+            (2, 2), MODEL_VALUE, model.shared._storage, offset=0
+        )
     return model
+
+
+def canonical_preprocess(profile):
+    inputs = preprocess(profile)
+    if SCENARIO == "canonical_preprocess_mismatch":
+        inputs["tokens"] = Tensor((1, 2), [[77.0, 2.0]])
+    return inputs
 
 
 def canonical_infer(model, inputs):
     if SCENARIO == "canonical_mismatch":
         return {"actions": Tensor((1, 2), [[9.0, 2.0]])}
+    if SCENARIO == "canonical_shape_mismatch":
+        return {"actions": Tensor((1,), [inputs["noise"].value[0][0]])}
     return infer(model, inputs)
 
 
@@ -310,6 +334,8 @@ def canonical_capture_intermediates(model, inputs):
 
 
 def canonical_postprocess(output):
+    if SCENARIO == "canonical_shape_mismatch":
+        return {"actions": Tensor((1,), [output["actions"].value[0]])}
     return postprocess(output)
 
 
@@ -341,8 +367,8 @@ def canonicalization_manifest():
     manifest = {
         "parameter_mapping": [
             {
-                "source": name,
-                "targets": [f"canonical.{name}"],
+                "sources": [name],
+                "targets": [name],
                 "transformation_ids": ["rewrite-transpose"],
             }
             for name in (
@@ -381,10 +407,23 @@ def canonicalization_manifest():
     }
     if SCENARIO == "canonical_unmapped_parameter":
         manifest["parameter_mapping"] = manifest["parameter_mapping"][1:]
+    elif SCENARIO == "canonical_unknown_target":
+        manifest["parameter_mapping"][0]["targets"] = ["missing.weight"]
     elif SCENARIO == "canonical_missing_assumption":
         manifest["transformations"][0]["assumptions"] = []
     elif SCENARIO == "canonical_state_gap":
         manifest["state_semantics"] = manifest["state_semantics"][:-1]
+    elif SCENARIO == "canonical_no_cache":
+        manifest["transformations"] = [
+            item
+            for item in manifest["transformations"]
+            if item["category"] != "cache"
+        ]
+        manifest["state_semantics"] = [
+            item
+            for item in manifest["state_semantics"]
+            if item["category"] != "cache"
+        ]
     elif SCENARIO == "canonical_unexplained_branch":
         manifest["semantic_rewrites"].append(
             {
@@ -641,7 +680,7 @@ if SCENARIO == "missing_description":
                     "status": "passed",
                     "mode": "direct",
                     "cases": 4,
-                    "comparisons": 12,
+                    "comparisons": 16,
                     "failures": 0,
                 },
             )
@@ -676,7 +715,11 @@ if SCENARIO == "missing_description":
                 trace["cases"][1]["inputs"]["noise"]["data"],
             )
             self.assertEqual(
-                {mapping["source"] for mapping in evidence["parameter_mapping"]},
+                {
+                    source
+                    for mapping in evidence["parameter_mapping"]
+                    for source in mapping["sources"]
+                },
                 {
                     "encoder.weight",
                     "action_head.weight",
@@ -696,7 +739,12 @@ if SCENARIO == "missing_description":
                     comparison["scope"]
                     for comparison in evidence["cases"][0]["comparisons"]
                 },
-                {"intermediates", "normalized_actions", "postprocessed_actions"},
+                {
+                    "preprocessed_inputs",
+                    "intermediates",
+                    "normalized_actions",
+                    "postprocessed_actions",
+                },
             )
             self.assertEqual(
                 source_before,
@@ -885,7 +933,7 @@ if SCENARIO == "missing_description":
                     "status": "passed",
                     "mode": "canonicalized",
                     "cases": 4,
-                    "comparisons": 12,
+                    "comparisons": 16,
                     "failures": 0,
                 },
             )
@@ -937,6 +985,18 @@ if SCENARIO == "missing_description":
                 "numerical_equivalence",
                 {item["rewrite"] for item in evidence["transformations"]},
             )
+            self.assertEqual(
+                evidence["source_tied_weights"], evidence["canonical_tied_weights"]
+            )
+            self.assertEqual(
+                {item["name"] for item in evidence["canonical_parameters"]},
+                {
+                    "encoder.weight",
+                    "action_head.weight",
+                    "decoder.weight_alias",
+                    "encoder.weight_view",
+                },
+            )
             self.assertTrue(
                 all(
                     comparison["passed"]
@@ -945,9 +1005,29 @@ if SCENARIO == "missing_description":
                 )
             )
 
+    def test_cacheless_rewrite_does_not_require_fictional_state_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(
+                Path(temporary), scenario="canonical_no_cache"
+            )
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            evidence_path = (
+                port / report["artifacts"]["canonical_equivalence"]["path"]
+            )
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            self.assertNotIn(
+                "cache", {item["category"] for item in evidence["state_semantics"]}
+            )
+
     def test_incomplete_canonical_semantics_stop_with_a_gap_report(self) -> None:
         cases = {
             "canonical_unmapped_parameter": "unmapped",
+            "canonical_unknown_target": "canonical parameter",
+            "canonical_broken_tie": "tied",
             "canonical_missing_assumption": "algebraic assumptions",
             "canonical_state_gap": "state semantics",
             "canonical_unexplained_branch": "source branch",
@@ -992,6 +1072,14 @@ if SCENARIO == "missing_description":
                 "postprocessed_actions",
             },
             "canonical_intermediate_mismatch": {"intermediates"},
+            "canonical_preprocess_mismatch": {
+                "preprocessed_inputs",
+                "intermediates",
+            },
+            "canonical_shape_mismatch": {
+                "normalized_actions",
+                "postprocessed_actions",
+            },
         }
         for scenario, expected_scopes in cases.items():
             with self.subTest(scenario=scenario):
@@ -1026,6 +1114,15 @@ if SCENARIO == "missing_description":
                         {comparison["scope"] for comparison in failures},
                         expected_scopes,
                     )
+                    if scenario == "canonical_shape_mismatch":
+                        self.assertTrue(
+                            all(
+                                comparison["mismatch_reason"] == "array_length"
+                                and comparison["max_absolute_error"] is None
+                                and comparison["max_relative_error"] is None
+                                for comparison in failures
+                            )
+                        )
                     gap_path = port / report["artifacts"]["gap_report"]["path"]
                     gap = json.loads(gap_path.read_text(encoding="utf-8"))
                     self.assertTrue(
@@ -1053,6 +1150,19 @@ if SCENARIO == "missing_description":
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["exit"]["category"], "correctness_failure")
             self.assertIn("at least two", report["issues"][0]["message"])
+
+    def test_canonical_gate_rejects_nominally_distinct_duplicate_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(
+                Path(temporary), scenario="canonical_duplicate_inputs"
+            )
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 9)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["exit"]["category"], "correctness_failure")
+            self.assertIn("distinct preprocessed", report["issues"][0]["message"])
 
     def test_explained_inventory_semantics_are_supported(self) -> None:
         cases = {

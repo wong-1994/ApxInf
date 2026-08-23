@@ -79,19 +79,21 @@ Every source that passes capability classification emits the same versioned
 Canonical VLA trace contract. A source whose semantics are already canonical
 uses direct mode and does not create a Canonical Adapter. A source with one or
 more `canonicalizable` capabilities must additionally expose
-`canonicalize(model)`, `canonical_infer(model, inputs)`,
+`canonicalize(model)`, `canonical_preprocess(profile)`,
+`canonical_infer(model, inputs)`,
 `canonical_capture_intermediates(model, inputs)`,
 `canonical_postprocess(output)`, and `canonicalization_manifest()` from its
 trusted entrypoint. The generic Canonical Adapter wrapper is copied into the
 private Port directory only for that case.
 
-The manifest consumes every named source parameter exactly once and declares
-all transpose, split, concatenation, packing, mask, conditioning, cache, and
-schedule transformations that apply. Each transformation is labeled
+The manifest consumes every named source and canonical parameter exactly once,
+with shape, dtype, alias, and tied-weight checks, and declares all transpose,
+split, concatenation, packing, mask, conditioning, cache, and schedule
+transformations that apply. Each transformation is labeled
 `algebraic` or `numerical_equivalence`; algebraic transformations must list
 their assumptions. The manifest also maps selected intermediate checkpoints,
-accounts for source branches, and covers mask, conditioning, cache, and
-schedule state semantics.
+accounts for source branches, and covers each declared mask, conditioning,
+cache, or schedule state transformation without inventing absent state.
 
 The gate requires at least two distinct representative profiles and explicit
 absolute and relative thresholds. It resets Python, NumPy, PyTorch, and an

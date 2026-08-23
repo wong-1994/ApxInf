@@ -13,6 +13,12 @@
     "canonical_trace_sha256",
     "thresholds",
     "parameter_mapping",
+    "source_parameters",
+    "canonical_parameters",
+    "source_aliases",
+    "canonical_aliases",
+    "source_tied_weights",
+    "canonical_tied_weights",
     "transformations",
     "cases",
     "summary"
@@ -37,6 +43,18 @@
       "type": "array",
       "items": {"$ref": "#/$defs/parameterMapping"}
     },
+    "source_parameters": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/tensor"}
+    },
+    "canonical_parameters": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/tensor"}
+    },
+    "source_aliases": {"$ref": "#/$defs/nameGroups"},
+    "canonical_aliases": {"$ref": "#/$defs/nameGroups"},
+    "source_tied_weights": {"$ref": "#/$defs/nameGroups"},
+    "canonical_tied_weights": {"$ref": "#/$defs/nameGroups"},
     "transformations": {
       "type": "array",
       "items": {"$ref": "#/$defs/transformation"}
@@ -91,15 +109,41 @@
     "parameterMapping": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["source", "targets", "transformation_ids"],
+      "required": ["sources", "targets", "transformation_ids"],
       "properties": {
-        "source": {"type": "string", "minLength": 1},
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
         "targets": {
           "type": "array",
           "minItems": 1,
           "items": {"type": "string", "minLength": 1}
         },
         "transformation_ids": {"$ref": "#/$defs/stringArray"}
+      }
+    },
+    "tensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "shape", "dtype", "requires_grad"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "shape": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 0}
+        },
+        "dtype": {"type": "string", "minLength": 1},
+        "requires_grad": {"type": "boolean"}
+      }
+    },
+    "nameGroups": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "minItems": 2,
+        "items": {"type": "string", "minLength": 1}
       }
     },
     "transformation": {
@@ -152,17 +196,19 @@
         "canonical_path",
         "passed",
         "max_absolute_error",
-        "max_relative_error"
+        "max_relative_error",
+        "mismatch_reason"
       ],
       "properties": {
         "scope": {
-          "enum": ["intermediates", "normalized_actions", "postprocessed_actions"]
+          "enum": ["preprocessed_inputs", "intermediates", "normalized_actions", "postprocessed_actions"]
         },
         "source_path": {"type": "string", "minLength": 1},
         "canonical_path": {"type": "string", "minLength": 1},
         "passed": {"type": "boolean"},
-        "max_absolute_error": {"type": "number", "minimum": 0},
-        "max_relative_error": {"type": "number", "minimum": 0}
+        "max_absolute_error": {"type": ["number", "null"], "minimum": 0},
+        "max_relative_error": {"type": ["number", "null"], "minimum": 0},
+        "mismatch_reason": {"type": ["string", "null"]}
       }
     },
     "case": {
@@ -174,7 +220,7 @@
         "seed": {"enum": [0, 1]},
         "comparisons": {
           "type": "array",
-          "minItems": 3,
+          "minItems": 4,
           "items": {"$ref": "#/$defs/comparison"}
         },
         "passed": {"type": "boolean"}

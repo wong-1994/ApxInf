@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.util
 import json
+import math
 import traceback
 from pathlib import Path
 from typing import Any
@@ -43,13 +43,6 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
     )
 
 
-def value_sha256(value: Any) -> str:
-    encoded = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), allow_nan=False
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def require_string_list(value: Any, path: str, *, nonempty: bool = False) -> list[str]:
     if not isinstance(value, list) or (nonempty and not value) or any(
         not isinstance(item, str) or not item for item in value
@@ -63,6 +56,9 @@ def validate_manifest(
     manifest: Any,
     inventory: dict[str, Any],
     classification: dict[str, Any],
+    canonical_parameters: list[dict[str, Any]],
+    canonical_aliases: list[list[str]],
+    canonical_tied_weights: list[list[str]],
 ) -> None:
     required = {
         "parameter_mapping",
@@ -122,24 +118,54 @@ def validate_manifest(
     if not isinstance(mappings, list):
         raise ValueError("parameter_mapping must be an array")
     mapped_sources = []
+    mapped_targets = []
+    source_targets: dict[str, list[str]] = {}
+    source_parameters = {
+        parameter["name"]: parameter for parameter in inventory["parameters"]
+    }
+    target_parameters = {
+        parameter["name"]: parameter for parameter in canonical_parameters
+    }
     for index, mapping in enumerate(mappings):
         path = f"parameter_mapping[{index}]"
         if not isinstance(mapping, dict) or set(mapping) != {
-            "source",
+            "sources",
             "targets",
             "transformation_ids",
         }:
             raise ValueError(f"{path} has missing or unknown fields")
-        if not isinstance(mapping["source"], str) or not mapping["source"]:
-            raise ValueError(f"{path}.source must be a non-empty string")
-        mapped_sources.append(mapping["source"])
-        require_string_list(mapping["targets"], f"{path}.targets", nonempty=True)
+        sources = require_string_list(
+            mapping["sources"], f"{path}.sources", nonempty=True
+        )
+        targets = require_string_list(
+            mapping["targets"], f"{path}.targets", nonempty=True
+        )
+        mapped_sources.extend(sources)
+        mapped_targets.extend(targets)
+        for source in sources:
+            source_targets[source] = targets
         references = require_string_list(
             mapping["transformation_ids"], f"{path}.transformation_ids"
         )
         if not set(references) <= transformation_ids:
             raise ValueError(f"{path} references an unknown transformation")
-    expected_sources = [parameter["name"] for parameter in inventory["parameters"]]
+        if not set(sources) <= set(source_parameters):
+            raise ValueError(f"{path} references an unknown source parameter")
+        if not set(targets) <= set(target_parameters):
+            raise ValueError(f"{path} references an unknown canonical parameter")
+        source_elements = sum(
+            math.prod(source_parameters[name]["shape"]) for name in sources
+        )
+        target_elements = sum(
+            math.prod(target_parameters[name]["shape"]) for name in targets
+        )
+        if source_elements != target_elements:
+            raise ValueError(f"{path} does not preserve the mapped parameter size")
+        source_dtypes = {source_parameters[name]["dtype"] for name in sources}
+        target_dtypes = {target_parameters[name]["dtype"] for name in targets}
+        if source_dtypes != target_dtypes:
+            raise ValueError(f"{path} does not preserve the mapped parameter dtype")
+    expected_sources = list(source_parameters)
     if len(mapped_sources) != len(set(mapped_sources)) or set(mapped_sources) != set(
         expected_sources
     ):
@@ -149,6 +175,46 @@ def validate_manifest(
             "parameter mapping must consume every source parameter exactly once; "
             f"unmapped={missing}, unknown={unknown}"
         )
+    expected_targets = list(target_parameters)
+    if len(mapped_targets) != len(set(mapped_targets)) or set(mapped_targets) != set(
+        expected_targets
+    ):
+        missing = sorted(set(expected_targets) - set(mapped_targets))
+        unknown = sorted(set(mapped_targets) - set(expected_targets))
+        raise ValueError(
+            "parameter mapping must consume every canonical parameter exactly once; "
+            f"unmapped={missing}, unknown={unknown}"
+        )
+
+    def require_preserved_groups(
+        kind: str, source_groups: list[list[str]], canonical_groups: list[list[str]]
+    ) -> None:
+        canonical_sets = [set(group) for group in canonical_groups]
+        for source_group in source_groups:
+            projected = {
+                target
+                for source in source_group
+                if source in source_targets
+                for target in source_targets[source]
+            }
+            if len(projected) > 1 and not any(
+                projected <= canonical_group for canonical_group in canonical_sets
+            ):
+                raise ValueError(f"canonical parameters do not preserve source {kind}")
+
+    source_parameter_names = set(source_parameters)
+    source_aliases = [
+        [name for name in group if name in source_parameter_names]
+        for group in inventory["aliases"]
+    ]
+    require_preserved_groups(
+        "aliases",
+        [group for group in source_aliases if len(group) > 1],
+        canonical_aliases,
+    )
+    require_preserved_groups(
+        "tied weights", inventory["tied_weights"], canonical_tied_weights
+    )
 
     expected_rewrites = {
         (item["capability"], item["observed"], item["canonical"])
@@ -198,8 +264,15 @@ def validate_manifest(
         )
         if not set(references) <= transformation_ids:
             raise ValueError(f"{path} references an unknown transformation")
-    if categories != STATE_CATEGORIES or len(state_semantics) != len(STATE_CATEGORIES):
-        raise ValueError("state semantics must cover mask, conditioning, cache, and schedule")
+    transformed_state_categories = {
+        item["category"]
+        for item in transformations
+        if item["category"] in STATE_CATEGORIES
+    }
+    if categories != transformed_state_categories or len(state_semantics) != len(
+        transformed_state_categories
+    ):
+        raise ValueError("state semantics must cover every declared state transformation")
 
     branches = manifest["branches"]
     if not isinstance(branches, list):
@@ -242,17 +315,17 @@ def validate_manifest(
 
 def compare_values(
     source: Any, canonical: Any, absolute: float, relative: float
-) -> tuple[bool, float, float]:
+) -> tuple[bool, float | None, float | None, str | None]:
     if isinstance(source, dict) and isinstance(canonical, dict):
         if set(source) != set(canonical):
-            return False, 0.0, 0.0
+            return False, None, None, "object_keys"
         results = [
             compare_values(source[key], canonical[key], absolute, relative)
             for key in source
         ]
     elif isinstance(source, list) and isinstance(canonical, list):
         if len(source) != len(canonical):
-            return False, 0.0, 0.0
+            return False, None, None, "array_length"
         results = [
             compare_values(left, right, absolute, relative)
             for left, right in zip(source, canonical)
@@ -269,15 +342,26 @@ def compare_values(
             absolute_error <= absolute + relative * abs(float(source)),
             absolute_error,
             relative_error,
+            None,
         )
     else:
-        return source == canonical, 0.0, 0.0
+        if source == canonical:
+            return True, 0.0, 0.0, None
+        return False, None, None, "value_or_type"
     if not results:
-        return True, 0.0, 0.0
+        return True, 0.0, 0.0, None
+    mismatch_reason = next(
+        (result[3] for result in results if result[3] is not None), None
+    )
+    if mismatch_reason is not None:
+        return False, None, None, mismatch_reason
+    absolute_errors = [result[1] for result in results if result[1] is not None]
+    relative_errors = [result[2] for result in results if result[2] is not None]
     return (
         all(result[0] for result in results),
-        max(result[1] for result in results),
-        max(result[2] for result in results),
+        max(absolute_errors) if absolute_errors else None,
+        max(relative_errors) if relative_errors else None,
+        mismatch_reason,
     )
 
 
@@ -290,7 +374,7 @@ def comparison(
     absolute: float,
     relative: float,
 ) -> dict[str, Any]:
-    passed, max_absolute_error, max_relative_error = compare_values(
+    passed, max_absolute_error, max_relative_error, mismatch_reason = compare_values(
         source, canonical, absolute, relative
     )
     return {
@@ -300,6 +384,7 @@ def comparison(
         "passed": passed,
         "max_absolute_error": max_absolute_error,
         "max_relative_error": max_relative_error,
+        "mismatch_reason": mismatch_reason,
     }
 
 
@@ -308,15 +393,36 @@ def verify(args: argparse.Namespace) -> None:
     support.disable_runtime_network()
     try:
         adapter = support.ReferenceAdapter(args.source_root, args.entrypoint)
+        adapter.set_seed(0)
         source_model = adapter.load(str(args.checkpoint))
+        adapter.set_seed(0)
         canonical_source_model = adapter.load(str(args.checkpoint))
-        canonical_model = adapter._call("canonicalize", canonical_source_model)
-        manifest = adapter._call("canonicalization_manifest")
+        adapter.set_seed(0)
+        canonical_model = adapter.canonicalize(canonical_source_model)
+        manifest = adapter.canonicalization_manifest()
         inventory = json.loads(args.inventory.read_text(encoding="utf-8"))
         classification = json.loads(args.classification.read_text(encoding="utf-8"))
         profiles = json.loads(args.profiles.read_text(encoding="utf-8"))
         thresholds = json.loads(args.thresholds.read_text(encoding="utf-8"))
-        validate_manifest(manifest, inventory, classification)
+        canonical_parameter_values = support.named_values(
+            canonical_model, "named_parameters"
+        )
+        canonical_parameters = [
+            support.tensor_record(name, value)
+            for name, value in canonical_parameter_values
+        ]
+        canonical_aliases = support.alias_groups(canonical_parameter_values)
+        canonical_tied_weights = support.tied_weight_groups(
+            canonical_parameter_values
+        )
+        validate_manifest(
+            manifest,
+            inventory,
+            classification,
+            canonical_parameters,
+            canonical_aliases,
+            canonical_tied_weights,
+        )
         absolute = float(thresholds["absolute"])
         relative = float(thresholds["relative"])
 
@@ -324,7 +430,7 @@ def verify(args: argparse.Namespace) -> None:
         evidence_cases = []
         for profile in profiles:
             for seed in (0, 1):
-                support.set_deterministic_seed(adapter._module, seed)
+                adapter.set_seed(seed)
                 source_inputs = adapter.preprocess(profile)
                 source_output = adapter.infer(source_model, source_inputs)
                 source_intermediates = adapter.capture_intermediates(
@@ -332,20 +438,20 @@ def verify(args: argparse.Namespace) -> None:
                 )
                 source_postprocessed = adapter.postprocess(source_output)
 
-                support.set_deterministic_seed(adapter._module, seed)
-                canonical_inputs = adapter.preprocess(profile)
-                canonical_output = adapter._call(
-                    "canonical_infer", canonical_model, canonical_inputs
+                adapter.set_seed(seed)
+                canonical_inputs = adapter.canonical_preprocess(profile)
+                canonical_output = adapter.canonical_infer(
+                    canonical_model, canonical_inputs
                 )
-                canonical_intermediates = adapter._call(
-                    "canonical_capture_intermediates",
-                    canonical_model,
-                    canonical_inputs,
+                canonical_intermediates = adapter.canonical_capture_intermediates(
+                    canonical_model, canonical_inputs
                 )
-                canonical_postprocessed = adapter._call(
-                    "canonical_postprocess", canonical_output
+                canonical_postprocessed = adapter.canonical_postprocess(
+                    canonical_output
                 )
 
+                source_inputs_json = support.json_capture(source_inputs)
+                canonical_inputs_json = support.json_capture(canonical_inputs)
                 source_intermediates_json = support.json_capture(source_intermediates)
                 canonical_intermediates_json = support.json_capture(
                     canonical_intermediates
@@ -356,7 +462,17 @@ def verify(args: argparse.Namespace) -> None:
                 canonical_postprocessed_json = support.json_capture(
                     canonical_postprocessed
                 )
-                comparisons = []
+                comparisons = [
+                    comparison(
+                        "preprocessed_inputs",
+                        "inputs",
+                        "inputs",
+                        source_inputs_json,
+                        canonical_inputs_json,
+                        absolute,
+                        relative,
+                    )
+                ]
                 for mapping in manifest["intermediate_mapping"]:
                     comparisons.append(
                         comparison(
@@ -395,7 +511,7 @@ def verify(args: argparse.Namespace) -> None:
                     {
                         "profile": profile.get("name"),
                         "seed": seed,
-                        "inputs": support.json_capture(canonical_inputs),
+                        "inputs": canonical_inputs_json,
                         "output": canonical_output_json,
                         "intermediates": canonical_intermediates_json,
                         "postprocessed": canonical_postprocessed_json,
@@ -410,47 +526,30 @@ def verify(args: argparse.Namespace) -> None:
                     }
                 )
 
-        canonical_semantics = {
-            item["capability"]: item["canonical"]
-            for item in classification["classifications"]
-            if item["path"].startswith("capability_facts.")
-        }
-        trace = {
-            "schema_version": "1.0",
-            "port_id": args.port_id,
-            "mode": "canonicalized",
-            "contract": classification["contract"],
-            "canonical_semantics": canonical_semantics,
-            "cases": trace_cases,
-        }
-        failures = sum(
-            not item["passed"]
-            for case in evidence_cases
-            for item in case["comparisons"]
+        trace = support.canonical_trace_document(
+            args.port_id, "canonicalized", classification, trace_cases
         )
-        evidence = {
-            "schema_version": "1.0",
-            "port_id": args.port_id,
-            "mode": "canonicalized",
-            "contract": classification["contract"],
-            "source_inventory_sha256": value_sha256(inventory),
-            "canonical_trace_sha256": value_sha256(trace),
-            "thresholds": thresholds,
-            "parameter_mapping": manifest["parameter_mapping"],
-            "transformations": manifest["transformations"],
-            "semantic_rewrites": manifest["semantic_rewrites"],
-            "state_semantics": manifest["state_semantics"],
-            "branches": manifest["branches"],
-            "intermediate_mapping": manifest["intermediate_mapping"],
-            "cases": evidence_cases,
-            "summary": {
-                "cases": len(evidence_cases),
-                "comparisons": sum(
-                    len(case["comparisons"]) for case in evidence_cases
-                ),
-                "failures": failures,
+        evidence = support.canonical_evidence_document(
+            port_id=args.port_id,
+            mode="canonicalized",
+            classification=classification,
+            inventory=inventory,
+            trace=trace,
+            thresholds=thresholds,
+            parameter_mapping=manifest["parameter_mapping"],
+            canonical_parameters=canonical_parameters,
+            canonical_aliases=canonical_aliases,
+            canonical_tied_weights=canonical_tied_weights,
+            transformations=manifest["transformations"],
+            cases=evidence_cases,
+            manifest_evidence={
+                "semantic_rewrites": manifest["semantic_rewrites"],
+                "state_semantics": manifest["state_semantics"],
+                "branches": manifest["branches"],
+                "intermediate_mapping": manifest["intermediate_mapping"],
             },
-        }
+        )
+        failures = evidence["summary"]["failures"]
         write_json(args.trace, trace)
         write_json(args.evidence, evidence)
         if failures:

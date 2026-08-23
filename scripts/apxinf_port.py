@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from reference_adapter_template import (
+    canonical_evidence_document,
+    canonical_trace_document,
+)
+
 
 REQUEST_SCHEMA_VERSION = "1.0"
 REPORT_SCHEMA_VERSION = "1.0"
@@ -902,6 +907,36 @@ def value_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def canonical_input_issue(
+    inventory: dict[str, Any], capture: dict[str, Any]
+) -> dict[str, str] | None:
+    cases = capture.get("profiles", [])
+    seed_zero_inputs = [case.get("inputs") for case in cases if case.get("seed") == 0]
+    if len({value_sha256(value) for value in seed_zero_inputs}) < 2:
+        return {
+            "path": "representative_profiles",
+            "message": (
+                "canonical equivalence requires at least two distinct preprocessed "
+                "representative inputs"
+            ),
+        }
+    if inventory.get("stochastic_inputs"):
+        seeded_inputs_differ = any(
+            value_sha256(cases[index].get("inputs"))
+            != value_sha256(cases[index + 1].get("inputs"))
+            for index in range(0, len(cases) - 1, 2)
+            if cases[index].get("seed") == 0 and cases[index + 1].get("seed") == 1
+        )
+        if not seeded_inputs_differ:
+            return {
+                "path": "stochastic_inputs",
+                "message": (
+                    "declared stochastic inputs must exercise at least two random seeds"
+                ),
+            }
+    return None
+
+
 def write_direct_canonical_evidence(
     port_dir: Path,
     request: dict[str, Any],
@@ -911,19 +946,9 @@ def write_direct_canonical_evidence(
     environment_path: Path,
     upstream_paths: dict[str, Path],
 ) -> tuple[dict[str, int], dict[str, dict[str, Any]]]:
-    canonical_semantics = {
-        item["capability"]: item["canonical"]
-        for item in classification["classifications"]
-        if item["path"].startswith("capability_facts.")
-    }
-    trace = {
-        "schema_version": "1.0",
-        "port_id": request["port_id"],
-        "mode": "direct",
-        "contract": classification["contract"],
-        "canonical_semantics": canonical_semantics,
-        "cases": capture["profiles"],
-    }
+    trace = canonical_trace_document(
+        request["port_id"], "direct", classification, capture["profiles"]
+    )
     trace_path = port_dir / "private" / "canonical_trace.json"
     write_json(trace_path, trace)
     cases = []
@@ -936,8 +961,10 @@ def write_direct_canonical_evidence(
                 "passed": True,
                 "max_absolute_error": 0.0,
                 "max_relative_error": 0.0,
+                "mismatch_reason": None,
             }
             for scope, source_path in (
+                ("preprocessed_inputs", "inputs"),
                 ("intermediates", "intermediates"),
                 ("normalized_actions", "output.actions"),
                 ("postprocessed_actions", "postprocessed.actions"),
@@ -951,30 +978,28 @@ def write_direct_canonical_evidence(
                 "passed": True,
             }
         )
-    evidence = {
-        "schema_version": "1.0",
-        "port_id": request["port_id"],
-        "mode": "direct",
-        "contract": classification["contract"],
-        "source_inventory_sha256": value_sha256(inventory),
-        "canonical_trace_sha256": value_sha256(trace),
-        "thresholds": request["correctness_thresholds"],
-        "parameter_mapping": [
-            {
-                "source": parameter["name"],
-                "targets": [parameter["name"]],
-                "transformation_ids": [],
-            }
-            for parameter in inventory["parameters"]
-        ],
-        "transformations": [],
-        "cases": cases,
-        "summary": {
-            "cases": len(cases),
-            "comparisons": sum(len(case["comparisons"]) for case in cases),
-            "failures": 0,
-        },
-    }
+    parameter_mapping = [
+        {
+            "sources": [parameter["name"]],
+            "targets": [parameter["name"]],
+            "transformation_ids": [],
+        }
+        for parameter in inventory["parameters"]
+    ]
+    evidence = canonical_evidence_document(
+        port_id=request["port_id"],
+        mode="direct",
+        classification=classification,
+        inventory=inventory,
+        trace=trace,
+        thresholds=request["correctness_thresholds"],
+        parameter_mapping=parameter_mapping,
+        canonical_parameters=inventory["parameters"],
+        canonical_aliases=inventory["aliases"],
+        canonical_tied_weights=inventory["tied_weights"],
+        transformations=[],
+        cases=cases,
+    )
     evidence_path = port_dir / "private" / "canonical_equivalence.json"
     write_json(evidence_path, evidence)
     artifacts = {
@@ -2161,6 +2186,10 @@ def run_port(args: argparse.Namespace) -> int:
                 }
             else:
                 issue = None
+            capture_path = port_dir / artifacts["private_capture"]["path"]
+            capture = json.loads(capture_path.read_text(encoding="utf-8"))
+            if issue is None:
+                issue = canonical_input_issue(inventory, capture)
             if issue is not None:
                 gap = {
                     "schema_version": "1.0",
@@ -2211,8 +2240,6 @@ def run_port(args: argparse.Namespace) -> int:
                 print(issue["message"], file=sys.stderr)
                 return CORRECTNESS_FAILURE.code
             if not classification["summary"]["canonicalizable"]:
-                capture_path = port_dir / artifacts["private_capture"]["path"]
-                capture = json.loads(capture_path.read_text(encoding="utf-8"))
                 summary, canonical_artifacts = write_direct_canonical_evidence(
                     port_dir,
                     request,
