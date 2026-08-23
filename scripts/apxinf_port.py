@@ -50,6 +50,21 @@ class IntakeOutcome:
     category: str
 
 
+@dataclass(frozen=True, order=True)
+class ContractVersion:
+    major: int
+    minor: int
+
+    @classmethod
+    def parse(cls, value: Any) -> ContractVersion | None:
+        if not isinstance(value, str):
+            return None
+        parts = value.split(".")
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            return None
+        return cls(*(int(part) for part in parts))
+
+
 SUCCESS = IntakeOutcome(0, "success")
 MISSING_INPUT = IntakeOutcome(2, "missing_input")
 INVALID_INPUT = IntakeOutcome(3, "invalid_input")
@@ -435,9 +450,7 @@ def schema_issues(request: Any) -> list[dict[str, str]]:
             issues.append({"path": field, "message": "must be a string"})
     contract_version = request.get("capability_contract_version")
     if "capability_contract_version" in request and (
-        not isinstance(contract_version, str)
-        or len(contract_version.split(".")) != 2
-        or not all(part.isdigit() for part in contract_version.split("."))
+        ContractVersion.parse(contract_version) is None
     ):
         issues.append(
             {
@@ -870,6 +883,70 @@ def value_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def previous_capability_contract_path(path: Path, version: str) -> Path:
+    candidates = (
+        path.parent / f"vla-capability-contract-{version}.json",
+        path.parent / f"capability-contract-{version}.json",
+        default_capability_contract(version),
+    )
+    for candidate in candidates:
+        if candidate != path and candidate.is_file():
+            return candidate
+    raise ValueError(f"previous capability contract {version} is unavailable")
+
+
+def capability_change_is_additive(
+    before: dict[str, Any] | None, after: dict[str, Any] | None
+) -> bool:
+    if before is None:
+        return after is not None and not after["required"]
+    if after is None:
+        return False
+    return (
+        before["required"] == after["required"]
+        and before["cardinality"] == after["cardinality"]
+        and set(before["supported"]) <= set(after["supported"])
+        and set(before["canonicalizable"].items())
+        <= set(after["canonicalizable"].items())
+    )
+
+
+def validate_contract_delta(
+    previous: dict[str, Any], current: dict[str, Any]
+) -> None:
+    previous_rules = previous["capabilities"]
+    current_rules = current["capabilities"]
+    changes = current["revision"]["changes"]
+    declared = {change["capability"]: change["kind"] for change in changes}
+    if len(declared) != len(changes):
+        raise ValueError("contract changes must name each capability once")
+    changed = {
+        capability
+        for capability in set(previous_rules) | set(current_rules)
+        if previous_rules.get(capability) != current_rules.get(capability)
+    }
+    if set(declared) != changed:
+        raise ValueError(
+            "contract revision changes must exactly name changed capabilities"
+        )
+
+    additive_changes = {
+        capability: capability_change_is_additive(
+            previous_rules.get(capability), current_rules.get(capability)
+        )
+        for capability in changed
+    }
+    if current["revision"]["kind"] == "breaking":
+        if additive_changes and all(additive_changes.values()):
+            raise ValueError("additive-only contract changes must increment minor")
+        return
+    for capability in changed:
+        if not additive_changes[capability]:
+            raise ValueError(
+                "additive contracts may only add supported or canonicalizable values"
+            )
+
+
 def load_capability_contract(path: Path, expected_version: str) -> dict[str, Any]:
     contract = json.loads(
         path.read_text(encoding="utf-8"),
@@ -895,7 +972,20 @@ def load_capability_contract(path: Path, expected_version: str) -> dict[str, Any
         raise ValueError(
             "capability contract version does not match the exact request pin"
         )
-    version = tuple(int(part) for part in expected_version.split("."))
+    published_path = default_capability_contract(expected_version)
+    if published_path.is_file() and path.resolve() != published_path.resolve():
+        published = json.loads(
+            published_path.read_text(encoding="utf-8"),
+            parse_constant=reject_non_json_number,
+            parse_float=parse_finite_float,
+        )
+        if value_sha256(published) != value_sha256(contract):
+            raise ValueError(
+                "published capability contract content is immutable at a fixed version"
+            )
+    version = ContractVersion.parse(expected_version)
+    if version is None:
+        raise ValueError("capability contract version must be major.minor")
     revision = contract.get("revision")
     if not isinstance(revision, dict):
         raise ValueError("capability contract must declare revision metadata")
@@ -910,13 +1000,9 @@ def load_capability_contract(path: Path, expected_version: str) -> dict[str, Any
         if previous_version is not None or changes:
             raise ValueError("an initial contract cannot declare previous changes")
     elif kind in {"additive", "breaking"}:
-        if (
-            not isinstance(previous_version, str)
-            or len(previous_version.split(".")) != 2
-            or not all(part.isdigit() for part in previous_version.split("."))
-        ):
+        previous = ContractVersion.parse(previous_version)
+        if previous is None:
             raise ValueError("updated contracts require a previous major.minor version")
-        previous = tuple(int(part) for part in previous_version.split("."))
         if any(
             not isinstance(change, dict)
             or set(change) != {"capability", "kind"}
@@ -929,11 +1015,11 @@ def load_capability_contract(path: Path, expected_version: str) -> dict[str, Any
         if not change_kinds <= {"additive", "changed", "removed"}:
             raise ValueError("contract change kind is invalid")
         if kind == "additive":
-            if version[0] != previous[0] or version[1] <= previous[1]:
+            if version.major != previous.major or version.minor <= previous.minor:
                 raise ValueError("additive contracts must increment the minor version")
             if not changes or change_kinds != {"additive"}:
                 raise ValueError("additive contracts may declare only additive changes")
-        elif version[0] <= previous[0]:
+        elif version.major <= previous.major:
             raise ValueError("breaking contracts must increment the major version")
         elif not change_kinds.intersection({"changed", "removed"}):
             raise ValueError(
@@ -976,6 +1062,10 @@ def load_capability_contract(path: Path, expected_version: str) -> dict[str, Any
             raise ValueError(
                 f"capability {name} must declare canonicalizable mappings"
             )
+        if not set(canonicalizable.values()) <= set(supported):
+            raise ValueError(
+                f"capability {name} canonical targets must be supported values"
+            )
         if not isinstance(rule.get("required"), bool):
             raise ValueError(f"capability {name} required must be boolean")
         if rule.get("cardinality") != "exactly_one":
@@ -993,7 +1083,136 @@ def load_capability_contract(path: Path, expected_version: str) -> dict[str, Any
             raise ValueError(
                 f"removed capability {capability} must not remain declared"
             )
+    if kind != "initial":
+        previous_path = previous_capability_contract_path(path, previous_version)
+        previous_contract = load_capability_contract(
+            previous_path, previous_version
+        )
+        validate_contract_delta(previous_contract, contract)
     return contract
+
+
+def classification_record(
+    path: str,
+    capability: str,
+    observed: Any,
+    classification: str,
+    canonical: str | None,
+    reason: str,
+    evidence_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "path": path,
+        "capability": capability,
+        "observed": observed,
+        "classification": classification,
+        "canonical": canonical,
+        "reason": reason,
+        "evidence_paths": evidence_paths or [path],
+    }
+
+
+def inventory_capability_evidence(
+    inventory: dict[str, Any],
+) -> tuple[dict[str, list[tuple[str, str]]], list[dict[str, Any]]]:
+    evidence: dict[str, list[tuple[str, str]]] = {}
+    issues: list[dict[str, Any]] = []
+
+    def add(capability: str, path: str, value: str) -> None:
+        evidence.setdefault(capability, []).append((path, value))
+
+    if isinstance(inventory.get("input_schema"), list) and inventory["input_schema"]:
+        add("shape_profiles", "input_schema", "finite")
+
+    normalization = inventory.get("normalization")
+    if isinstance(normalization, dict) and "model" in normalization:
+        value = normalization["model"]
+        if isinstance(value, str) and value:
+            add("normalization", "normalization.model", value)
+        else:
+            issues.append(
+                classification_record(
+                    "normalization.model",
+                    "normalization",
+                    value,
+                    "unsupported",
+                    None,
+                    "model normalization must be a non-empty string",
+                )
+            )
+
+    schedules = inventory.get("schedules", [])
+    if isinstance(schedules, list):
+        for index, schedule in enumerate(schedules):
+            path = f"schedules[{index}].kind"
+            if isinstance(schedule, dict) and isinstance(schedule.get("kind"), str):
+                add("schedules", path, schedule["kind"])
+            else:
+                issues.append(
+                    classification_record(
+                        path,
+                        "schedules",
+                        schedule,
+                        "unsupported",
+                        None,
+                        "schedule semantics are unexplained",
+                    )
+                )
+
+    branches = inventory.get("dynamic_branches", [])
+    if isinstance(branches, list) and not branches:
+        add("control_flow", "dynamic_branches", "static")
+    elif isinstance(branches, list):
+        for index, branch in enumerate(branches):
+            path = f"dynamic_branches[{index}].kind"
+            if isinstance(branch, dict) and isinstance(branch.get("kind"), str):
+                add("control_flow", path, branch["kind"])
+            else:
+                issues.append(
+                    classification_record(
+                        f"dynamic_branches[{index}]",
+                        "control_flow",
+                        branch,
+                        "unsupported",
+                        None,
+                        "dynamic control flow is unexplained",
+                    )
+                )
+
+    for index, trace in enumerate(inventory.get("operator_traces", [])):
+        if not isinstance(trace, dict) or "semantic_capabilities" not in trace:
+            continue
+        semantics = trace["semantic_capabilities"]
+        if not isinstance(semantics, dict):
+            issues.append(
+                classification_record(
+                    f"operator_traces[{index}].semantic_capabilities",
+                    "operator_traces",
+                    semantics,
+                    "unsupported",
+                    None,
+                    "operator semantic capabilities must be an object",
+                )
+            )
+            continue
+        for capability, value in semantics.items():
+            path = f"operator_traces[{index}].semantic_capabilities.{capability}"
+            values = value if isinstance(value, list) else [value]
+            for observed in values:
+                if isinstance(observed, str) and observed:
+                    add(capability, path, observed)
+                else:
+                    issues.append(
+                        classification_record(
+                            path,
+                            capability,
+                            observed,
+                            "unsupported",
+                            None,
+                            "operator semantic capability must be a non-empty string",
+                        )
+                    )
+    return evidence, issues
 
 
 def classify_capabilities(
@@ -1002,69 +1221,62 @@ def classify_capabilities(
     raw_facts = inventory.get("capability_facts", {})
     facts = raw_facts if isinstance(raw_facts, dict) else {}
     rules = contract["capabilities"]
-    classifications = []
+    evidence, classifications = inventory_capability_evidence(inventory)
     if not isinstance(raw_facts, dict):
         classifications.append(
-            {
-                "path": "capability_facts",
-                "capability": "capability_facts",
-                "observed": raw_facts,
-                "classification": "unsupported",
-                "canonical": None,
-                "reason": "capability facts must be a JSON object",
-            }
+            classification_record(
+                "capability_facts",
+                "capability_facts",
+                raw_facts,
+                "unsupported",
+                None,
+                "capability facts must be a JSON object",
+            )
         )
-    for capability in sorted(set(rules) | set(facts)):
+    for capability in sorted(set(rules) | set(facts) | set(evidence)):
         observed_values = facts.get(capability, [])
         rule = rules.get(capability)
+        capability_evidence = evidence.get(capability, [])
         if not isinstance(observed_values, list):
             classifications.append(
-                {
-                    "path": f"capability_facts.{capability}",
-                    "capability": capability,
-                    "observed": observed_values,
-                    "classification": "unsupported",
-                    "canonical": None,
-                    "reason": "capability observations must be an array",
-                }
+                classification_record(
+                    f"capability_facts.{capability}",
+                    capability,
+                    observed_values,
+                    "unsupported",
+                    None,
+                    "capability observations must be an array",
+                )
             )
             continue
         if rule is None:
-            if not observed_values:
+            values = observed_values or [None]
+            for index, observed in enumerate(values):
                 classifications.append(
-                    {
-                        "path": f"capability_facts.{capability}",
-                        "capability": capability,
-                        "observed": [],
-                        "classification": "unsupported",
-                        "canonical": None,
-                        "reason": "capability is not declared by the contract",
-                    }
-                )
-            for index, observed in enumerate(observed_values):
-                classifications.append(
-                    {
-                        "path": f"capability_facts.{capability}[{index}]",
-                        "capability": capability,
-                        "observed": observed,
-                        "classification": "unsupported",
-                        "canonical": None,
-                        "reason": "capability is not declared by the contract",
-                    }
+                    classification_record(
+                        f"capability_facts.{capability}[{index}]",
+                        capability,
+                        observed,
+                        "unsupported",
+                        None,
+                        "capability is not declared by the contract",
+                    )
                 )
             continue
-        if not observed_values and not rule.get("required", True):
+        if not observed_values and not rule["required"] and not capability_evidence:
             continue
         if not observed_values:
             classifications.append(
-                {
-                    "path": f"capability_facts.{capability}",
-                    "capability": capability,
-                    "observed": None,
-                    "classification": "unsupported",
-                    "canonical": None,
-                    "reason": "required capability fact is unknown",
-                }
+                classification_record(
+                    f"capability_facts.{capability}",
+                    capability,
+                    None,
+                    "unsupported",
+                    None,
+                    "required capability fact is unknown",
+                    [path for path, _ in capability_evidence]
+                    or [f"capability_facts.{capability}"],
+                )
             )
             continue
         string_values = [
@@ -1072,25 +1284,46 @@ def classify_capabilities(
         ]
         if len(string_values) != len(observed_values):
             classifications.append(
-                {
-                    "path": f"capability_facts.{capability}",
-                    "capability": capability,
-                    "observed": observed_values,
-                    "classification": "unsupported",
-                    "canonical": None,
-                    "reason": "capability observations must be non-empty strings",
-                }
+                classification_record(
+                    f"capability_facts.{capability}",
+                    capability,
+                    observed_values,
+                    "unsupported",
+                    None,
+                    "capability observations must be non-empty strings",
+                )
             )
-        if rule.get("cardinality") == "exactly_one" and len(set(string_values)) != 1:
+        if len(set(string_values)) != 1:
             classifications.append(
-                {
-                    "path": f"capability_facts.{capability}",
-                    "capability": capability,
-                    "observed": observed_values,
-                    "classification": "unsupported",
-                    "canonical": None,
-                    "reason": "capability observations are contradictory",
-                }
+                classification_record(
+                    f"capability_facts.{capability}",
+                    capability,
+                    observed_values,
+                    "unsupported",
+                    None,
+                    "capability observations are contradictory",
+                )
+            )
+        evidence_values = {value for _, value in capability_evidence}
+        evidence_matches = evidence_values == set(string_values)
+        if (
+            capability == "shape_profiles"
+            and evidence_values == {"finite"}
+            and set(string_values) in ({"static"}, {"finite"})
+        ):
+            evidence_matches = True
+        if evidence_values and not evidence_matches:
+            classifications.append(
+                classification_record(
+                    capability_evidence[0][0],
+                    capability,
+                    sorted(evidence_values),
+                    "unsupported",
+                    None,
+                    "inventory semantics contradict declared capability facts",
+                    [path for path, _ in capability_evidence]
+                    + [f"capability_facts.{capability}"],
+                )
             )
         for index, observed in enumerate(observed_values):
             if not isinstance(observed, str) or not observed:
@@ -1110,31 +1343,37 @@ def classify_capabilities(
                 canonical = None
                 reason = "semantic is not declared supported or canonicalizable"
             classifications.append(
-                {
-                    "path": f"capability_facts.{capability}[{index}]",
-                    "capability": capability,
-                    "observed": observed,
-                    "classification": classification,
-                    "canonical": canonical,
-                    "reason": reason,
-                }
+                classification_record(
+                    f"capability_facts.{capability}[{index}]",
+                    capability,
+                    observed,
+                    classification,
+                    canonical,
+                    reason,
+                    [f"capability_facts.{capability}[{index}]"]
+                    + [
+                        path
+                        for path, evidence_value in capability_evidence
+                        if evidence_value == observed
+                        or (
+                            capability == "shape_profiles"
+                            and evidence_value == "finite"
+                            and observed == "static"
+                        )
+                    ],
+                )
             )
-    for field in ("custom_operators", "dynamic_branches"):
-        for index, observed in enumerate(inventory.get(field, [])):
-            classifications.append(
-                {
-                    "path": f"{field}[{index}]",
-                    "capability": (
-                        "control_flow" if field == "dynamic_branches" else field
-                    ),
-                    "observed": observed,
-                    "classification": "unsupported",
-                    "canonical": None,
-                    "reason": (
-                        f"unexplained {field.replace('_', ' ')} is outside the contract"
-                    ),
-                }
+    for index, observed in enumerate(inventory.get("custom_operators", [])):
+        classifications.append(
+            classification_record(
+                f"custom_operators[{index}]",
+                "custom_operators",
+                observed,
+                "unsupported",
+                None,
+                "unexplained custom operator is outside the contract",
             )
+        )
     counts = {
         kind: sum(item["classification"] == kind for item in classifications)
         for kind in ("supported", "canonicalizable", "unsupported")
@@ -1422,7 +1661,7 @@ def run_reference_inspection(
     return SUCCESS, [], artifacts
 
 
-def run_intake(args: argparse.Namespace) -> int:
+def run_port(args: argparse.Namespace) -> int:
     port_dir = args.port_dir.resolve()
     if port_dir_is_unsafe(port_dir):
         print("port directory must be outside source checkouts", file=sys.stderr)
@@ -1524,6 +1763,43 @@ def run_intake(args: argparse.Namespace) -> int:
                     contract_path, request["capability_contract_version"]
                 )
                 classification = classify_capabilities(inventory, contract)
+                classification_path = (
+                    port_dir / "private" / "capability_classification.json"
+                )
+                previous_classification = (
+                    json.loads(classification_path.read_text(encoding="utf-8"))
+                    if classification_path.is_file()
+                    else None
+                )
+                if previous_classification is not None:
+                    previous_contract = previous_classification.get("contract", {})
+                    if (
+                        previous_contract.get("version")
+                        == classification["contract"]["version"]
+                        and previous_contract.get("sha256")
+                        != classification["contract"]["sha256"]
+                    ):
+                        raise ValueError(
+                            "pinned capability contract content changed "
+                            "without a new version"
+                        )
+                    previous_fingerprints = previous_classification.get(
+                        "dependency_fingerprints", {}
+                    )
+                else:
+                    previous_fingerprints = {}
+                current_fingerprints = classification["dependency_fingerprints"]
+                classification["invalidated_capabilities"] = (
+                    sorted(
+                        capability
+                        for capability in set(previous_fingerprints)
+                        | set(current_fingerprints)
+                        if previous_fingerprints.get(capability)
+                        != current_fingerprints.get(capability)
+                    )
+                    if previous_classification is not None
+                    else []
+                )
             except (OSError, json.JSONDecodeError, ValueError) as error:
                 issue = {
                     "path": "capability_contract",
@@ -1539,9 +1815,6 @@ def run_intake(args: argparse.Namespace) -> int:
                 write_json(port_dir / "report.json", report)
                 print(issue["message"], file=sys.stderr)
                 return INVALID_INPUT.code
-            classification_path = (
-                port_dir / "private" / "capability_classification.json"
-            )
             write_json(classification_path, classification)
             report["artifacts"]["capability_classification"] = artifact_record(
                 port_dir,
@@ -1553,7 +1826,7 @@ def run_intake(args: argparse.Namespace) -> int:
                     "capability_contract": contract_path,
                 },
             )
-            report["stages"]["preflight"] = "passed"
+            report["stages"]["preflight"] = "running"
             report["capability_assessment"] = {
                 "status": "passed",
                 "contract_version": contract["contract_version"],
@@ -1647,7 +1920,7 @@ def parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--port-dir", type=Path, required=True)
     run.add_argument("--capability-contract", type=Path)
-    run.set_defaults(handler=run_intake)
+    run.set_defaults(handler=run_port)
 
     report = subcommands.add_parser("report", help="print the structured Port report")
     report.add_argument("--port-dir", type=Path, required=True)

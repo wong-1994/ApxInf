@@ -50,7 +50,10 @@ declaration that a list-valued feature is absent.
 each required semantic dimension: shape profiles, attention, masks, position
 encodings, normalization, activations, conditioning, action heads, schedules,
 and control flow. Values are compared to the machine-readable contract rather
-than inferred from model names.
+than inferred from model names. Preflight reconciles these declarations with
+the captured input schemas, `normalization.model`, each schedule `kind`, each
+dynamic-branch `kind`, and any `operator_traces[].semantic_capabilities`
+annotations, so contradictory raw inventory cannot pass by assertion alone.
 
 Both paths below are relative to the trusted source root:
 
@@ -88,9 +91,12 @@ capability as `supported`, `canonicalizable`, or `unsupported`. Unknown,
 contradictory, undeclared, or unexplained semantics block Preflight and produce
 a structured Gap Report. Contract revisions are declared as `initial`,
 `additive`, or `breaking`: additive changes increment the minor version, while
-changed or removed semantics require a new major version. Per-capability hashes
-let later resume logic invalidate only evidence that depends on changed
-capabilities.
+changed or removed semantics require a new major version. The prior contract is
+loaded and compared rather than trusting revision labels. Per-capability hashes
+and `invalidated_capabilities` identify only dependencies affected by an update;
+generic stale-artifact propagation and retention are added by the later resume
+stage. Passing this gate leaves overall Preflight `running` until canonical and
+kernel-coverage gates are implemented.
 
 Configured inspection generates only private Port artifacts:
 

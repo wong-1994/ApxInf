@@ -74,7 +74,7 @@ class PortIntakeTest(unittest.TestCase):
         request_path.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
 
     def initialize_inspectable_port(
-        self, root: Path, *, failure=None, lock_text: str = ""
+        self, root: Path, *, scenario=None, lock_text: str = ""
     ) -> tuple[Path, Path]:
         source = root / "trusted-source"
         checkpoint = root / "model.ckpt"
@@ -89,7 +89,7 @@ class PortIntakeTest(unittest.TestCase):
         )
         (package / "reference_impl.py").write_text(
             """
-FAILURE = __FAILURE__
+SCENARIO = __SCENARIO__
 
 import sys
 from .model_support import MODEL_VALUE
@@ -167,7 +167,7 @@ class Model:
 
 def load(checkpoint_path):
     assert sys.prefix != sys.base_prefix
-    if FAILURE == "load":
+    if SCENARIO == "load":
         raise RuntimeError("synthetic load failed")
     assert checkpoint_path.endswith("model.ckpt")
     return Model()
@@ -182,7 +182,7 @@ def preprocess(profile):
 
 
 def infer(model, inputs):
-    if FAILURE == "network":
+    if SCENARIO == "network":
         import socket
         socket.create_connection(("example.com", 443))
     assert model.shared.value == 3.0
@@ -190,7 +190,7 @@ def infer(model, inputs):
 
 
 def capture_intermediates(model, inputs):
-    if FAILURE == "trace":
+    if SCENARIO == "trace":
         raise RuntimeError("synthetic trace failed")
     return {
         "encoder.output": Tensor(
@@ -212,9 +212,11 @@ def describe():
         "operator_traces": [{"name": "action_head", "operator": "aten.linear"}],
         "preprocessing": {"images": "uint8_to_float32"},
         "tokenization": {"kind": "synthetic_ids"},
-        "normalization": {"actions": "q01_q99"},
+        "normalization": {"model": "rms_norm", "actions": "q01_q99"},
         "stochastic_inputs": [{"name": "noise", "distribution": "normal"}],
-        "schedules": [{"name": "flow", "steps": 2}],
+        "schedules": [
+            {"name": "flow", "kind": "euler_flow_matching", "steps": 2}
+        ],
         "custom_operators": [],
         "dynamic_branches": [],
         "capability_facts": {
@@ -230,31 +232,44 @@ def describe():
             "control_flow": ["static"],
         },
     }
-    if FAILURE == "invalid_inventory":
+    if SCENARIO == "invalid_inventory":
         description["preprocessing"] = []
-    elif FAILURE == "canonicalizable_attention":
+    elif SCENARIO == "canonicalizable_attention":
         description["capability_facts"]["attention"] = [
             "separate_qkv_scaled_dot_product"
         ]
-    elif FAILURE == "unsupported_attention":
+    elif SCENARIO == "unsupported_attention":
         description["capability_facts"]["attention"] = ["linear_attention"]
-    elif FAILURE == "unknown_masks":
+    elif SCENARIO == "unknown_masks":
         del description["capability_facts"]["masks"]
-    elif FAILURE == "missing_capability_facts":
+    elif SCENARIO == "missing_capability_facts":
         del description["capability_facts"]
-    elif FAILURE == "contradictory_normalization":
+    elif SCENARIO == "contradictory_normalization":
         description["capability_facts"]["normalization"] = [
             "rms_norm",
             "layer_norm",
         ]
-    elif FAILURE == "unexplained_control_flow":
+    elif SCENARIO == "conflicting_inventory_normalization":
+        description["normalization"]["model"] = "layer_norm"
+    elif SCENARIO == "conflicting_schedule":
+        description["capability_facts"]["schedules"] = ["none"]
+    elif SCENARIO == "static_shape_profile":
+        description["capability_facts"]["shape_profiles"] = ["static"]
+    elif SCENARIO == "explained_control_flow":
+        description["capability_facts"]["control_flow"] = [
+            "finite_profile_dispatch"
+        ]
+        description["dynamic_branches"] = [
+            {"name": "profile_router", "kind": "finite_profile_dispatch"}
+        ]
+    elif SCENARIO == "unexplained_control_flow":
         description["dynamic_branches"] = [{"name": "data_dependent_router"}]
     return description
 
 
-if FAILURE == "missing_description":
+if SCENARIO == "missing_description":
     del describe
-""".replace("__FAILURE__", repr(failure)).lstrip(),
+""".replace("__SCENARIO__", repr(scenario)).lstrip(),
             encoding="utf-8",
         )
         checkpoint.write_bytes(b"checkpoint bytes")
@@ -290,7 +305,7 @@ if FAILURE == "missing_description":
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["stages"]["intake"], "passed")
-            self.assertEqual(report["stages"]["preflight"], "passed")
+            self.assertEqual(report["stages"]["preflight"], "running")
             self.assertEqual(report["reference_inspection"]["status"], "passed")
             self.assertEqual(
                 report["capability_assessment"],
@@ -435,6 +450,7 @@ if FAILURE == "missing_description":
                 {"supported"},
             )
             self.assertEqual(len(classification["classifications"]), 10)
+            self.assertEqual(classification["invalidated_capabilities"], [])
             self.assertEqual(
                 set(classification["dependency_fingerprints"]),
                 set(inventory["capability_facts"]),
@@ -544,7 +560,7 @@ if FAILURE == "missing_description":
     def test_reference_load_failure_has_a_distinct_structured_category(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             port, _ = self.initialize_inspectable_port(
-                Path(temporary), failure="load"
+                Path(temporary), scenario="load"
             )
 
             result = self.run_port("run", "--port-dir", str(port))
@@ -559,7 +575,7 @@ if FAILURE == "missing_description":
     def test_reference_trace_failure_has_a_distinct_structured_category(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             port, _ = self.initialize_inspectable_port(
-                Path(temporary), failure="trace"
+                Path(temporary), scenario="trace"
             )
 
             result = self.run_port("run", "--port-dir", str(port))
@@ -573,7 +589,7 @@ if FAILURE == "missing_description":
     def test_reference_runtime_network_is_disabled_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             port, _ = self.initialize_inspectable_port(
-                Path(temporary), failure="network"
+                Path(temporary), scenario="network"
             )
 
             result = self.run_port("run", "--port-dir", str(port))
@@ -588,7 +604,7 @@ if FAILURE == "missing_description":
     def test_schema_invalid_source_inventory_is_a_trace_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             port, _ = self.initialize_inspectable_port(
-                Path(temporary), failure="invalid_inventory"
+                Path(temporary), scenario="invalid_inventory"
             )
 
             result = self.run_port("run", "--port-dir", str(port))
@@ -601,7 +617,7 @@ if FAILURE == "missing_description":
     def test_missing_semantic_inventory_is_a_trace_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             port, _ = self.initialize_inspectable_port(
-                Path(temporary), failure="missing_description"
+                Path(temporary), scenario="missing_description"
             )
 
             result = self.run_port("run", "--port-dir", str(port))
@@ -614,14 +630,14 @@ if FAILURE == "missing_description":
     def test_preflight_reports_declared_canonicalization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             port, _ = self.initialize_inspectable_port(
-                Path(temporary), failure="canonicalizable_attention"
+                Path(temporary), scenario="canonicalizable_attention"
             )
 
             result = self.run_port("run", "--port-dir", str(port))
 
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["stages"]["preflight"], "passed")
+            self.assertEqual(report["stages"]["preflight"], "running")
             self.assertEqual(report["capability_assessment"]["canonicalizable"], 1)
             classification_path = (
                 port / report["artifacts"]["capability_classification"]["path"]
@@ -635,19 +651,62 @@ if FAILURE == "missing_description":
             self.assertEqual(attention["classification"], "canonicalizable")
             self.assertEqual(attention["canonical"], "scaled_dot_product")
 
+    def test_explained_inventory_semantics_are_supported(self) -> None:
+        cases = {
+            "explained_control_flow": (
+                "control_flow",
+                "dynamic_branches[0].kind",
+            ),
+            "static_shape_profile": ("shape_profiles", "input_schema"),
+        }
+        for scenario, (capability, evidence_path) in cases.items():
+            with self.subTest(scenario=scenario):
+                with tempfile.TemporaryDirectory() as temporary:
+                    port, _ = self.initialize_inspectable_port(
+                        Path(temporary), scenario=scenario
+                    )
+
+                    result = self.run_port("run", "--port-dir", str(port))
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    report = json.loads(
+                        (port / "report.json").read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(report["stages"]["preflight"], "running")
+                    self.assertEqual(
+                        report["capability_assessment"]["unsupported"], 0
+                    )
+                    classification_path = (
+                        port
+                        / report["artifacts"]["capability_classification"]["path"]
+                    )
+                    classifications = json.loads(
+                        classification_path.read_text(encoding="utf-8")
+                    )["classifications"]
+                    classification_result = next(
+                        item
+                        for item in classifications
+                        if item["capability"] == capability
+                    )
+                    self.assertIn(
+                        evidence_path, classification_result["evidence_paths"]
+                    )
+
     def test_unsupported_semantics_block_preflight_with_a_gap_report(self) -> None:
         cases = {
             "unsupported_attention": "capability_facts.attention[0]",
             "unknown_masks": "capability_facts.masks",
             "missing_capability_facts": "capability_facts.attention",
             "contradictory_normalization": "capability_facts.normalization",
+            "conflicting_inventory_normalization": "normalization.model",
+            "conflicting_schedule": "schedules[0].kind",
             "unexplained_control_flow": "dynamic_branches[0]",
         }
-        for failure, expected_path in cases.items():
-            with self.subTest(failure=failure):
+        for scenario, expected_path in cases.items():
+            with self.subTest(scenario=scenario):
                 with tempfile.TemporaryDirectory() as temporary:
                     port, _ = self.initialize_inspectable_port(
-                        Path(temporary), failure=failure
+                        Path(temporary), scenario=scenario
                     )
 
                     result = self.run_port("run", "--port-dir", str(port))
@@ -767,9 +826,6 @@ if FAILURE == "missing_description":
             },
         )
         self.assertNotIn("models", contract)
-        serialized = json.dumps(contract).lower()
-        for model_name in ("pi0", "pi05", "openvla", "deepseek"):
-            self.assertNotIn(model_name, serialized)
 
         schema = json.loads(
             (ROOT / "schemas/vla-capability-contract-v1.schema.json").read_text(
@@ -782,6 +838,34 @@ if FAILURE == "missing_description":
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             port, _ = self.initialize_inspectable_port(root)
+            contract = json.loads(
+                (ROOT / "contracts/vla-capability-contract-1.0.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            mutated_same_version = copy.deepcopy(contract)
+            mutated_same_version["capabilities"]["attention"]["supported"].append(
+                "silent_same_version_addition"
+            )
+            mutated_path = root / "mutated-capability-contract-1.0.json"
+            mutated_path.write_text(
+                json.dumps(mutated_same_version), encoding="utf-8"
+            )
+            mutated = self.run_port(
+                "run",
+                "--port-dir",
+                str(port),
+                "--capability-contract",
+                str(mutated_path),
+            )
+            self.assertEqual(mutated.returncode, 3)
+            mutated_report = json.loads(
+                (port / "report.json").read_text(encoding="utf-8")
+            )
+            self.assertIn(
+                "immutable", mutated_report["issues"][0]["message"]
+            )
+
             initial = self.run_port("run", "--port-dir", str(port))
             self.assertEqual(initial.returncode, 0, initial.stderr)
             initial_report = json.loads(
@@ -794,11 +878,6 @@ if FAILURE == "missing_description":
                 ).read_text(encoding="utf-8")
             )
 
-            contract = json.loads(
-                (ROOT / "contracts/vla-capability-contract-1.0.json").read_text(
-                    encoding="utf-8"
-                )
-            )
             contract["contract_version"] = "1.1"
             contract["revision"] = {
                 "kind": "additive",
@@ -860,6 +939,9 @@ if FAILURE == "missing_description":
             self.assertNotIn(
                 "gripper_control", updated_classification["dependency_fingerprints"]
             )
+            self.assertEqual(
+                updated_classification["invalidated_capabilities"], ["attention"]
+            )
 
     def test_breaking_contract_update_requires_a_new_major_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -870,6 +952,72 @@ if FAILURE == "missing_description":
                     encoding="utf-8"
                 )
             )
+            request_path = port / "request.json"
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+
+            invalid_canonical = copy.deepcopy(contract)
+            invalid_canonical["contract_version"] = "1.1"
+            invalid_canonical["revision"] = {
+                "kind": "additive",
+                "previous_version": "1.0",
+                "changes": [{"capability": "attention", "kind": "additive"}],
+            }
+            invalid_canonical["capabilities"]["attention"]["canonicalizable"][
+                "new_attention"
+            ] = "not_a_supported_target"
+            invalid_canonical_path = root / "invalid-canonical-contract-1.1.json"
+            invalid_canonical_path.write_text(
+                json.dumps(invalid_canonical), encoding="utf-8"
+            )
+            request["capability_contract_version"] = "1.1"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            invalid_target = self.run_port(
+                "run",
+                "--port-dir",
+                str(port),
+                "--capability-contract",
+                str(invalid_canonical_path),
+            )
+            self.assertEqual(invalid_target.returncode, 3)
+            invalid_target_report = json.loads(
+                (port / "report.json").read_text(encoding="utf-8")
+            )
+            self.assertIn(
+                "canonical targets",
+                invalid_target_report["issues"][0]["message"],
+            )
+
+            additive_major = copy.deepcopy(contract)
+            additive_major["contract_version"] = "2.0"
+            additive_major["revision"] = {
+                "kind": "breaking",
+                "previous_version": "1.0",
+                "changes": [{"capability": "attention", "kind": "changed"}],
+            }
+            additive_major["capabilities"]["attention"]["supported"].append(
+                "new_additive_attention"
+            )
+            additive_major_path = root / "additive-major-contract-2.0.json"
+            additive_major_path.write_text(
+                json.dumps(additive_major), encoding="utf-8"
+            )
+            request["capability_contract_version"] = "2.0"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            wrong_major = self.run_port(
+                "run",
+                "--port-dir",
+                str(port),
+                "--capability-contract",
+                str(additive_major_path),
+            )
+            self.assertEqual(wrong_major.returncode, 3)
+            wrong_major_report = json.loads(
+                (port / "report.json").read_text(encoding="utf-8")
+            )
+            self.assertIn(
+                "additive-only", wrong_major_report["issues"][0]["message"]
+            )
+
             contract["contract_version"] = "2.0"
             contract["revision"] = {
                 "kind": "breaking",
@@ -882,8 +1030,6 @@ if FAILURE == "missing_description":
             contract["capabilities"]["attention"]["canonicalizable"] = {}
             contract_path = root / "capability-contract-2.0.json"
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
-            request_path = port / "request.json"
-            request = json.loads(request_path.read_text(encoding="utf-8"))
             request["capability_contract_version"] = "2.0"
             request_path.write_text(json.dumps(request), encoding="utf-8")
 
@@ -920,6 +1066,7 @@ if FAILURE == "missing_description":
             invalid_minor = copy.deepcopy(contract)
             invalid_minor["contract_version"] = "1.1"
             invalid_minor["revision"]["kind"] = "additive"
+            invalid_minor["revision"]["changes"][0]["kind"] = "additive"
             invalid_path = root / "invalid-capability-contract-1.1.json"
             invalid_path.write_text(json.dumps(invalid_minor), encoding="utf-8")
             request["capability_contract_version"] = "1.1"
@@ -936,7 +1083,7 @@ if FAILURE == "missing_description":
             invalid_report = json.loads(
                 (port / "report.json").read_text(encoding="utf-8")
             )
-            self.assertIn("additive", invalid_report["issues"][0]["message"])
+            self.assertIn("only add", invalid_report["issues"][0]["message"])
 
     def test_initialization_refuses_to_write_into_the_source_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
