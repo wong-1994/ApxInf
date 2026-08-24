@@ -221,6 +221,10 @@ def capture_intermediates(model, inputs):
 
 
 def postprocess(output):
+    if SCENARIO == "direct_mutating_postprocess":
+        original = output["actions"].value[0][0]
+        output["actions"].value = [[99.0, 99.0]]
+        return {"actions": Tensor((1, 2), [[original * 2.0, 4.0]])}
     return {
         "actions": Tensor(
             (1, 2), [[output["actions"].value[0][0] * 2.0, 4.0]]
@@ -273,6 +277,7 @@ def describe():
         "canonical_no_cache",
         "canonical_duplicate_inputs",
         "canonical_unexplained_branch",
+        "canonical_unexplained_transformed_branch",
     }:
         description["capability_facts"]["attention"] = [
             "separate_qkv_scaled_dot_product"
@@ -303,7 +308,10 @@ def describe():
         ]
     elif SCENARIO == "unexplained_control_flow":
         description["dynamic_branches"] = [{"name": "data_dependent_router"}]
-    if SCENARIO == "canonical_unexplained_branch":
+    if SCENARIO in {
+        "canonical_unexplained_branch",
+        "canonical_unexplained_transformed_branch",
+    }:
         description["capability_facts"]["control_flow"] = ["bounded_unrolled_loop"]
         description["dynamic_branches"] = [
             {"name": "training_loop", "kind": "bounded_unrolled_loop"}
@@ -475,6 +483,22 @@ def canonicalization_manifest():
                 "transformation_ids": ["rewrite-schedule"],
             }
         )
+    elif SCENARIO == "canonical_unexplained_transformed_branch":
+        manifest["semantic_rewrites"].append(
+            {
+                "capability": "control_flow",
+                "source": "bounded_unrolled_loop",
+                "canonical": "static",
+                "transformation_ids": ["rewrite-schedule"],
+            }
+        )
+        manifest["branches"] = [
+            {
+                "source": "training_loop",
+                "disposition": "transformed",
+                "transformation_ids": [],
+            }
+        ]
     elif SCENARIO == "canonical_bad_preprocess_path":
         manifest["preprocessing_mapping"].append(
             {
@@ -812,6 +836,24 @@ if SCENARIO == "missing_description":
                 },
             )
 
+    def test_direct_trace_snapshots_normalized_actions_before_postprocessing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(
+                Path(temporary), scenario="direct_mutating_postprocess"
+            )
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            trace_path = port / report["artifacts"]["canonical_trace"]["path"]
+            trace = json.loads(trace_path.read_text(encoding="utf-8"))
+            self.assertEqual(trace["cases"][0]["output"]["actions"]["data"], [[0.25, 2.0]])
+            self.assertEqual(
+                trace["cases"][0]["postprocessed"]["actions"]["data"],
+                [[0.5, 4.0]],
+            )
+
     def test_locked_environment_failure_is_reported_without_executing_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1116,6 +1158,7 @@ if SCENARIO == "missing_description":
             "canonical_missing_assumption": "algebraic assumptions",
             "canonical_state_gap": "state semantics",
             "canonical_unexplained_branch": "source branch",
+            "canonical_unexplained_transformed_branch": "non-empty",
         }
         for scenario, message in cases.items():
             with self.subTest(scenario=scenario):

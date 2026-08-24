@@ -355,7 +355,9 @@ def validate_manifest(
         if branch["disposition"] not in {"preserved", "transformed"}:
             raise ValueError(f"{path}.disposition must explain the source branch")
         references = require_string_list(
-            branch["transformation_ids"], f"{path}.transformation_ids"
+            branch["transformation_ids"],
+            f"{path}.transformation_ids",
+            nonempty=branch["disposition"] == "transformed",
         )
         if not set(references) <= transformation_ids:
             raise ValueError(f"{path} references an unknown transformation")

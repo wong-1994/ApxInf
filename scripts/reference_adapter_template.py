@@ -439,33 +439,40 @@ def inspect_source(args: argparse.Namespace) -> None:
             for seed in (0, 1):
                 adapter.set_seed(seed)
                 inputs = adapter.preprocess(profile)
+                inputs_capture = json_capture(inputs)
+                input_schema = value_schema(inputs)
                 output = adapter.infer(model, inputs)
+                output_capture = json_capture(output)
+                raw_output_schema = value_schema(output)
                 intermediates = adapter.capture_intermediates(model, inputs)
+                intermediates_capture = json_capture(intermediates)
+                intermediate_schema = value_schema(intermediates)
                 postprocessed = adapter.postprocess(output)
+                postprocessed_capture = json_capture(postprocessed)
                 captures.append(
                     {
                         "profile": profile.get("name"),
                         "seed": seed,
-                        "inputs": json_capture(inputs),
-                        "output": json_capture(output),
-                        "intermediates": json_capture(intermediates),
-                        "postprocessed": json_capture(postprocessed),
+                        "inputs": inputs_capture,
+                        "output": output_capture,
+                        "intermediates": intermediates_capture,
+                        "postprocessed": postprocessed_capture,
                     }
                 )
                 input_schemas.append(
-                    {"profile": profile.get("name"), "schema": value_schema(inputs)}
+                    {"profile": profile.get("name"), "schema": input_schema}
                 )
                 output_schemas.append(
                     {
                         "profile": profile.get("name"),
-                        "raw": value_schema(output),
+                        "raw": raw_output_schema,
                         "postprocessed": value_schema(postprocessed),
                     }
                 )
                 intermediate_schemas.append(
                     {
                         "profile": profile.get("name"),
-                        "schema": value_schema(intermediates),
+                        "schema": intermediate_schema,
                     }
                 )
 

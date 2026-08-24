@@ -45,11 +45,11 @@
     },
     "source_parameters": {
       "type": "array",
-      "items": {"$ref": "#/$defs/tensor"}
+      "items": {"$ref": "reference-inventory-v1.schema.json#/$defs/tensor"}
     },
     "canonical_parameters": {
       "type": "array",
-      "items": {"$ref": "#/$defs/tensor"}
+      "items": {"$ref": "reference-inventory-v1.schema.json#/$defs/tensor"}
     },
     "source_aliases": {"$ref": "#/$defs/nameGroups"},
     "canonical_aliases": {"$ref": "#/$defs/nameGroups"},
@@ -124,21 +124,6 @@
           "items": {"type": "string", "minLength": 1}
         },
         "transformation_ids": {"$ref": "#/$defs/stringArray"}
-      }
-    },
-    "tensor": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["name", "shape", "dtype", "requires_grad", "data_sha256"],
-      "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "shape": {
-          "type": "array",
-          "items": {"type": "integer", "minimum": 0}
-        },
-        "dtype": {"type": "string", "minLength": 1},
-        "requires_grad": {"type": "boolean"},
-        "data_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       }
     },
     "nameGroups": {
