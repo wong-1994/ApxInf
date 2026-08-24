@@ -231,3 +231,20 @@ Kernel coverage uses
 [`schemas/kernel-coverage-v1.schema.json`](../schemas/kernel-coverage-v1.schema.json),
 and
 [`schemas/kernel-gap-handoff-v1.schema.json`](../schemas/kernel-gap-handoff-v1.schema.json).
+
+## Family-neutral GEMM tuning
+
+Family Packs export execution plans through `scripts/tuning_workloads.py` as
+`apxinf.tuning.gemm-workloads.v1`. Each entry is a physical GEMM contract plus
+family, logical phase (`vision`, `prefill`, `decode`, or `action`), source
+operation, profile, executions per inference, and a complete target
+fingerprint. The generic tuner never imports a model or Family Pack config.
+
+The tuner orders work by estimated milliseconds saved per execution multiplied
+by executions per inference, enforces a budget for each device/profile pair,
+and reports coverage, best current results, and remaining hotspots. Persisted
+tactics are accepted only when device name, SM, multiprocessor count, kernel
+build, CUDA version, and every recorded library version match. After tactics
+are installed, the caller must rerun the selected Family Pack's complete
+inference correctness check. Version 1 intentionally rejects non-GEMM tunable
+objects.
