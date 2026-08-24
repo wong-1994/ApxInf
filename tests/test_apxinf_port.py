@@ -328,7 +328,20 @@ def postprocess(output):
 
 def describe():
     description = {
-        "operator_traces": [{"name": "action_head", "operator": "aten.linear"}],
+        "operator_traces": [{
+            "id": "action_head",
+            "operation": "aten.linear",
+            "semantics": {"equation": "y = x W^T", "family_role": "action head"},
+            "references": [{"case": "control-step/0", "tensor": "intermediates.encoder.output"}],
+            "dtype": "bf16",
+            "layout": "row_major",
+            "shapes": [[1, 2], [2, 2]],
+            "tolerances": {"absolute": 0.001, "relative": 0.01},
+            "golden_tensors": ["private/captures/inspection.json#profiles"],
+            "frequency": {"calls_per_inference": 1},
+            "performance_impact": {"estimated_latency_fraction": 0.25},
+            "expected_interface": "linear(input, weight) -> output",
+        }],
         "preprocessing": {"images": "uint8_to_float32"},
         "tokenization": {"kind": "synthetic_ids"},
         "normalization": {"model": "rms_norm", "actions": "q01_q99"},
@@ -663,7 +676,7 @@ if SCENARIO == "missing_description":
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["stages"]["intake"], "passed")
-            self.assertEqual(report["stages"]["preflight"], "running")
+            self.assertEqual(report["stages"]["preflight"], "passed")
             self.assertEqual(report["reference_inspection"]["status"], "passed")
             self.assertEqual(
                 report["capability_assessment"],
@@ -676,6 +689,16 @@ if SCENARIO == "missing_description":
                 },
             )
             self.assertEqual(report["exit"]["category"], "success")
+            self.assertEqual(report["gates"]["kernel_coverage"]["status"], "passed")
+            coverage = json.loads(
+                (port / report["artifacts"]["kernel_coverage"]["path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                coverage["classifications"][0]["classification"],
+                "existing_primitive",
+            )
 
             artifacts = report["artifacts"]
             adapter_path = port / artifacts["reference_adapter"]["path"]
@@ -781,7 +804,7 @@ if SCENARIO == "missing_description":
                 ]],
             )
             self.assertEqual(
-                inventory["operator_traces"][0]["operator"], "aten.linear"
+                inventory["operator_traces"][0]["operation"], "aten.linear"
             )
             for field in (
                 "input_schema",
@@ -962,6 +985,46 @@ if SCENARIO == "missing_description":
                 [[0.5, 4.0]],
             )
 
+    def test_true_kernel_gap_blocks_preflight_with_complete_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            port, _ = self.initialize_inspectable_port(root)
+            catalog = root / "kernel-capabilities.json"
+            catalog.write_text(
+                json.dumps({"schema_version": "1.0", "capabilities": []}),
+                encoding="utf-8",
+            )
+
+            result = self.run_port(
+                "run",
+                "--port-dir",
+                str(port),
+                "--kernel-capabilities",
+                str(catalog),
+            )
+
+            self.assertEqual(result.returncode, 10, result.stderr)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["stages"]["preflight"], "blocked")
+            self.assertEqual(report["exit"]["category"], "kernel_gap")
+            handoff = json.loads(
+                (port / report["artifacts"]["kernel_gap_handoff"]["path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            requirement = handoff["requirements"][0]
+            self.assertEqual(requirement["semantics"]["family_role"], "action head")
+            self.assertEqual(
+                set(
+                    (
+                        "semantics", "references", "dtype", "layout", "shapes",
+                        "tolerances", "golden_tensors", "requested_targets",
+                        "frequency", "performance_impact", "expected_interface",
+                    )
+                ) - requirement.keys(),
+                set(),
+            )
+
     def test_locked_environment_failure_is_reported_without_executing_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1110,7 +1173,7 @@ if SCENARIO == "missing_description":
 
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["stages"]["preflight"], "running")
+            self.assertEqual(report["stages"]["preflight"], "passed")
             self.assertEqual(report["capability_assessment"]["canonicalizable"], 1)
             classification_path = (
                 port / report["artifacts"]["capability_classification"]["path"]
@@ -1426,7 +1489,7 @@ if SCENARIO == "missing_description":
                     report = json.loads(
                         (port / "report.json").read_text(encoding="utf-8")
                     )
-                    self.assertEqual(report["stages"]["preflight"], "running")
+                    self.assertEqual(report["stages"]["preflight"], "passed")
                     self.assertEqual(
                         report["capability_assessment"]["unsupported"], 0
                     )

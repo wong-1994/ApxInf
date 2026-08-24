@@ -694,7 +694,7 @@ def verify(args: argparse.Namespace) -> None:
                 )
 
         trace = support.canonical_trace_document(
-            args.port_id, "canonicalized", classification, trace_cases
+            args.port_id, "canonicalized", classification, trace_cases, inventory
         )
         evidence = support.canonical_evidence_document(
             port_id=args.port_id,

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apxinf.dev/schemas/kernel-gap-handoff-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "port_id", "family", "requirements"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "port_id": {"type": "string", "minLength": 1},
+    "family": {"enum": ["llm", "vlm", "vla"]},
+    "requirements": {"type": "array", "minItems": 1}
+  }
+}

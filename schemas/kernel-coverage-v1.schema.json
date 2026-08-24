@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apxinf.dev/schemas/kernel-coverage-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "port_id", "family", "status", "classifications", "kernel_gaps", "optimization_opportunities"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "port_id": {"type": ["string", "null"]},
+    "family": {"enum": ["llm", "vlm", "vla"]},
+    "status": {"enum": ["passed", "blocked"]},
+    "classifications": {"type": "array", "minItems": 1},
+    "kernel_gaps": {"type": "array"},
+    "optimization_opportunities": {"type": "array"}
+  }
+}

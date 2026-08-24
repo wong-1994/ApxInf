@@ -138,8 +138,19 @@ changed or removed semantics require a new major version. The prior contract is
 loaded and compared rather than trusting revision labels. Per-capability hashes
 and `invalidated_capabilities` identify only dependencies affected by an update;
 generic stale-artifact propagation and retention are added by the later resume
-stage. Passing capability classification advances to the canonical-equivalence
-gate; overall Preflight remains `running` until the later kernel-coverage gate.
+stage. Passing capability classification advances through canonical equivalence
+and family-neutral kernel coverage. Every canonical computation is classified
+as existing fused, existing primitive, layout-only, correct fallback, missing
+required capability, or unsupported. Unclassified computations fail closed; a
+correct fallback becomes a non-blocking Optimization Opportunity.
+
+A missing required capability blocks Preflight before model implementation and
+emits `private/kernel_gap_handoff.json` for the separate kernel workflow. The
+handoff preserves family semantics and references plus dtype, layout, shapes,
+tolerances, golden tensors, requested targets, frequency, performance impact,
+and expected interface. A capability returned by that workflow must record
+successful revalidation against the original family references before a rerun
+can pass Preflight.
 
 Configured inspection generates only private Port artifacts:
 
@@ -153,6 +164,8 @@ Configured inspection generates only private Port artifacts:
 - `private/canonical_trace.json`: downstream trace for direct or canonicalized sources
 - `private/canonical_equivalence.json`: parameter, rewrite, and comparison evidence
 - `private/canonicalization_gap_report.json`: incomplete or failed equivalence evidence
+- `private/kernel_coverage.json`: classifications and Optimization Opportunities
+- `private/kernel_gap_handoff.json`: complete blocking Kernel Gap requirements
 
 The inventory and report bind these artifacts to the declared source revision,
 source digest, and checkpoint digest. Port directories are rejected when they
@@ -176,6 +189,7 @@ stale retention and resume are added by the later workflow-resume stage.
 | 7 | `reference_trace_failure` | Preprocessing, inference, capture, postprocessing, or inventory failed |
 | 8 | `unsupported_semantics` | Source semantics are unknown, contradictory, unexplained, or outside the pinned contract |
 | 9 | `correctness_failure` | Canonicalization evidence is incomplete or a differential comparison failed |
+| 10 | `kernel_gap` | A required capability is handed to the separate kernel workflow |
 
 The versioned contracts are
 [`schemas/port-request-v1.schema.json`](../schemas/port-request-v1.schema.json)
@@ -199,3 +213,8 @@ Canonical evidence uses
 [`schemas/canonical-equivalence-v1.schema.json`](../schemas/canonical-equivalence-v1.schema.json),
 and
 [`schemas/canonicalization-gap-report-v1.schema.json`](../schemas/canonicalization-gap-report-v1.schema.json).
+Kernel coverage uses
+[`schemas/kernel-computation-v1.schema.json`](../schemas/kernel-computation-v1.schema.json),
+[`schemas/kernel-coverage-v1.schema.json`](../schemas/kernel-coverage-v1.schema.json),
+and
+[`schemas/kernel-gap-handoff-v1.schema.json`](../schemas/kernel-gap-handoff-v1.schema.json).

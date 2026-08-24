@@ -249,9 +249,11 @@ def canonical_trace_document(
     mode: str,
     classification: dict[str, Any],
     cases: list[dict[str, Any]],
+    inventory: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": "1.0",
+        "family": "vla",
         "port_id": port_id,
         "mode": mode,
         "contract": classification["contract"],
@@ -260,6 +262,7 @@ def canonical_trace_document(
             for item in classification["classifications"]
             if item["path"].startswith("capability_facts.")
         },
+        "computations": inventory["operator_traces"],
         "cases": cases,
     }
 

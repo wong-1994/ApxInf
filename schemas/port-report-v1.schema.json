@@ -51,7 +51,7 @@
       "required": ["code", "category", "message"],
       "properties": {
         "code": {"type": "integer"},
-        "category": {"enum": ["success", "missing_input", "invalid_input", "unsupported_target", "environment_failure", "reference_load_failure", "reference_trace_failure", "unsupported_semantics", "correctness_failure"]},
+        "category": {"enum": ["success", "missing_input", "invalid_input", "unsupported_target", "environment_failure", "reference_load_failure", "reference_trace_failure", "unsupported_semantics", "correctness_failure", "kernel_gap"]},
         "message": {"type": "string"}
       }
     },

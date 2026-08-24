@@ -26,6 +26,7 @@ from porting_core import (
     ENVIRONMENT_FAILURE,
     FamilyPack,
     INVALID_INPUT,
+    KERNEL_GAP,
     MISSING_INPUT,
     PortOutcome,
     PortingCore,
@@ -39,6 +40,7 @@ from porting_core import (
     select_family_pack,
     validate_requested_tuple,
 )
+from kernel_coverage import KernelCoverageError, analyze_kernel_coverage
 
 
 REQUEST_SCHEMA_VERSION = "1.0"
@@ -79,6 +81,10 @@ def canonical_adapter_template() -> Path:
 
 def default_capability_contract(version: str) -> Path:
     return repository_root() / "contracts" / f"vla-capability-contract-{version}.json"
+
+
+def default_kernel_capabilities() -> Path:
+    return repository_root() / "contracts" / "kernel-capabilities-1.0.json"
 
 
 def port_dir_is_unsafe(port_dir: Path, source: Path | None = None) -> bool:
@@ -812,7 +818,7 @@ def write_direct_canonical_evidence(
     upstream_paths: dict[str, Path],
 ) -> tuple[dict[str, int], dict[str, dict[str, Any]]]:
     trace = canonical_trace_document(
-        request["port_id"], "direct", classification, capture["profiles"]
+        request["port_id"], "direct", classification, capture["profiles"], inventory
     )
     trace_path = port_dir / "private" / "canonical_trace.json"
     write_json(trace_path, trace)
@@ -2234,6 +2240,89 @@ def run_port(args: argparse.Namespace) -> int:
                     return canonical_outcome.code
                 core.set_gate("canonical_equivalence", "passed", summary)
                 report["exit"]["message"] = "Preflight canonical equivalence passed"
+            trace_path = port_dir / "private" / "canonical_trace.json"
+            try:
+                trace = json.loads(trace_path.read_text(encoding="utf-8"))
+                catalog_document = json.loads(
+                    args.kernel_capabilities.read_text(encoding="utf-8")
+                )
+                coverage = analyze_kernel_coverage(
+                    trace,
+                    catalog_document["capabilities"],
+                    request["requested_targets"],
+                )
+            except (OSError, json.JSONDecodeError, KeyError, KernelCoverageError) as error:
+                issue = {
+                    "path": "kernel_coverage",
+                    "message": f"could not classify canonical computations: {error}",
+                }
+                core.set_gate("kernel_coverage", "blocked", {"unclassified": 1})
+                report["stages"]["preflight"] = "blocked"
+                core.finish(CORRECTNESS_FAILURE, issue["message"])
+                report["issues"] = [issue]
+                write_json(port_dir / "report.json", report)
+                print(issue["message"], file=sys.stderr)
+                return CORRECTNESS_FAILURE.code
+            coverage_path = port_dir / "private" / "kernel_coverage.json"
+            write_json(coverage_path, coverage)
+            report["artifacts"]["kernel_coverage"] = artifact_record(
+                port_dir,
+                coverage_path,
+                request,
+                port_dir / artifacts["reference_environment"]["path"],
+                {
+                    "canonical_trace": trace_path,
+                    "kernel_capabilities": args.kernel_capabilities,
+                },
+            )
+            if coverage["status"] == "blocked":
+                if coverage["kernel_gaps"]:
+                    handoff = {
+                        "schema_version": "1.0",
+                        "port_id": request["port_id"],
+                        "family": request["model_family"],
+                        "requirements": coverage["kernel_gaps"],
+                    }
+                    handoff_path = port_dir / "private" / "kernel_gap_handoff.json"
+                    write_json(handoff_path, handoff)
+                    report["artifacts"]["kernel_gap_handoff"] = artifact_record(
+                        port_dir,
+                        handoff_path,
+                        request,
+                        port_dir / artifacts["reference_environment"]["path"],
+                        {
+                            "canonical_trace": trace_path,
+                            "kernel_coverage": coverage_path,
+                        },
+                    )
+                core.set_gate(
+                    "kernel_coverage",
+                    "blocked",
+                    {"kernel_gaps": len(coverage["kernel_gaps"])},
+                )
+                report["stages"]["preflight"] = "blocked"
+                if coverage["kernel_gaps"]:
+                    core.finish(KERNEL_GAP, "required kernel capability is missing")
+                else:
+                    core.finish(
+                        UNSUPPORTED_SEMANTICS,
+                        "canonical computation is explicitly unsupported",
+                    )
+                write_json(port_dir / "report.json", report)
+                print(report["exit"]["message"], file=sys.stderr)
+                return report["exit"]["code"]
+            core.set_gate(
+                "kernel_coverage",
+                "passed",
+                {
+                    "computations": len(coverage["classifications"]),
+                    "optimization_opportunities": len(
+                        coverage["optimization_opportunities"]
+                    ),
+                },
+            )
+            core.pass_stage("preflight")
+            core.finish(SUCCESS, "Preflight passed")
         else:
             report["exit"] = {
                 "code": outcome.code,
@@ -2279,6 +2368,9 @@ def parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--port-dir", type=Path, required=True)
     run.add_argument("--capability-contract", type=Path)
+    run.add_argument(
+        "--kernel-capabilities", type=Path, default=default_kernel_capabilities()
+    )
     run.set_defaults(handler=run_port)
 
     report = subcommands.add_parser("report", help="print the structured Port report")

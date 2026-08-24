@@ -44,6 +44,7 @@ REFERENCE_LOAD_FAILURE = PortOutcome(6, "reference_load_failure")
 REFERENCE_TRACE_FAILURE = PortOutcome(7, "reference_trace_failure")
 UNSUPPORTED_SEMANTICS = PortOutcome(8, "unsupported_semantics")
 CORRECTNESS_FAILURE = PortOutcome(9, "correctness_failure")
+KERNEL_GAP = PortOutcome(10, "kernel_gap")
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,8 @@ def _vla_payload_schema(path: Path, payload: Any) -> str:
         "canonical_equivalence.json": "canonical-equivalence-v1.schema.json",
         "canonicalization_gap_report.json": "canonicalization-gap-report-v1.schema.json",
         "capability_gap_report.json": "capability-gap-report-v1.schema.json",
+        "kernel_coverage.json": "kernel-coverage-v1.schema.json",
+        "kernel_gap_handoff.json": "kernel-gap-handoff-v1.schema.json",
     }
     if path.suffix == ".py":
         return "python-reference-adapter-v1"
