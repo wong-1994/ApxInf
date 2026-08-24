@@ -731,9 +731,6 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("correctness_thresholds", {})
     normalized.setdefault("tuning_budgets", [])
     normalized.setdefault("user_environment_declarations", {})
-    normalized.setdefault(
-        "capability_contract_version", DEFAULT_CAPABILITY_CONTRACT_VERSION
-    )
     return normalized
 
 
