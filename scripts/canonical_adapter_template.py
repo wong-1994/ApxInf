@@ -316,6 +316,8 @@ def validate_manifest(
     preprocessing = manifest["preprocessing_mapping"]
     if not isinstance(preprocessing, list) or not preprocessing:
         raise ValueError("preprocessing_mapping must select at least one input boundary")
+    preprocessing_sources = []
+    preprocessing_targets = []
     for index, mapping in enumerate(preprocessing):
         path = f"preprocessing_mapping[{index}]"
         if not isinstance(mapping, dict) or set(mapping) != {
@@ -329,11 +331,21 @@ def validate_manifest(
             for key in ("source", "canonical")
         ):
             raise ValueError(f"{path} paths must be strings")
+        for key in ("source", "canonical"):
+            mapping_path = mapping[key]
+            if mapping_path != "inputs" and not mapping_path.startswith("inputs."):
+                raise ValueError(f"{path}.{key} must start with inputs")
+        preprocessing_sources.append(mapping["source"])
+        preprocessing_targets.append(mapping["canonical"])
         references = require_string_list(
             mapping["transformation_ids"], f"{path}.transformation_ids"
         )
         if not set(references) <= transformation_ids:
             raise ValueError(f"{path} references an unknown transformation")
+    if len(preprocessing_sources) != len(set(preprocessing_sources)):
+        raise ValueError("preprocessing mappings cannot duplicate source paths")
+    if len(preprocessing_targets) != len(set(preprocessing_targets)):
+        raise ValueError("preprocessing mappings cannot duplicate canonical paths")
 
 
 def compare_values(
@@ -411,6 +423,19 @@ def comparison(
     }
 
 
+def mapped_value(root: Any, path: str) -> Any:
+    if path == "inputs":
+        return root
+    if not path.startswith("inputs."):
+        raise ValueError(f"preprocessing mapping path must start with inputs: {path}")
+    value = root
+    for part in path.split(".")[1:]:
+        if not isinstance(value, dict) or part not in value:
+            raise ValueError(f"preprocessing mapping path does not exist: {path}")
+        value = value[part]
+    return value
+
+
 def verify(args: argparse.Namespace) -> None:
     support = load_reference_support()
     support.disable_runtime_network()
@@ -455,14 +480,17 @@ def verify(args: argparse.Namespace) -> None:
             for seed in (0, 1):
                 adapter.set_seed(seed)
                 source_inputs = adapter.preprocess(profile)
-                expected_canonical_inputs = adapter.canonicalize_preprocessed_inputs(
-                    source_inputs
-                )
                 source_output = adapter.infer(source_model, source_inputs)
                 source_intermediates = adapter.capture_intermediates(
                     source_model, source_inputs
                 )
                 source_postprocessed = adapter.postprocess(source_output)
+
+                adapter.set_seed(seed)
+                transform_inputs = adapter.preprocess(profile)
+                expected_canonical_inputs = adapter.canonicalize_preprocessed_inputs(
+                    transform_inputs
+                )
 
                 adapter.set_seed(seed)
                 canonical_inputs = adapter.canonical_preprocess(profile)
@@ -493,13 +521,16 @@ def verify(args: argparse.Namespace) -> None:
                 comparisons = [
                     comparison(
                         "preprocessed_inputs",
-                        "inputs",
-                        "inputs",
-                        expected_canonical_inputs_json,
-                        canonical_inputs_json,
+                        mapping["source"],
+                        mapping["canonical"],
+                        mapped_value(
+                            expected_canonical_inputs_json, mapping["source"]
+                        ),
+                        mapped_value(canonical_inputs_json, mapping["canonical"]),
                         absolute,
                         relative,
                     )
+                    for mapping in manifest["preprocessing_mapping"]
                 ]
                 for mapping in manifest["intermediate_mapping"]:
                     comparisons.append(

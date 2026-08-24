@@ -100,6 +100,7 @@ from .model_support import MODEL_VALUE
 
 
 CURRENT_SEED = 0
+LAST_REFERENCE_TOKEN = None
 
 
 class Storage:
@@ -200,6 +201,8 @@ def preprocess(profile):
 
 
 def infer(model, inputs):
+    global LAST_REFERENCE_TOKEN
+    LAST_REFERENCE_TOKEN = inputs["tokens"].value[0][0]
     if SCENARIO == "network":
         import socket
         socket.create_connection(("example.com", 443))
@@ -258,6 +261,7 @@ def describe():
         "canonical_intermediate_mismatch",
         "canonical_preprocess_mismatch",
         "canonical_preprocess_rewrite",
+        "canonical_bad_preprocess_path",
         "canonical_shape_mismatch",
         "canonical_unmapped_parameter",
         "canonical_unknown_target",
@@ -326,14 +330,14 @@ def canonical_preprocess(profile):
 def canonicalize_preprocessed_inputs(inputs):
     if SCENARIO == "canonical_preprocess_rewrite":
         values = inputs["tokens"].value[0]
-        return {
-            **inputs,
-            "tokens": Tensor((1, 2), [[values[1], values[0]]]),
-        }
+        inputs["tokens"] = Tensor((1, 2), [[values[1], values[0]]])
+        return inputs
     return inputs
 
 
 def canonical_infer(model, inputs):
+    if SCENARIO == "canonical_preprocess_rewrite":
+        assert LAST_REFERENCE_TOKEN in {1.0, 5.0}
     if SCENARIO == "canonical_mismatch":
         return {"actions": Tensor((1, 2), [[9.0, 2.0]])}
     if SCENARIO == "canonical_shape_mismatch":
@@ -464,6 +468,8 @@ def canonicalization_manifest():
                 "transformation_ids": ["rewrite-schedule"],
             }
         )
+    elif SCENARIO == "canonical_bad_preprocess_path":
+        manifest["preprocessing_mapping"][0]["source"] = "inputs.missing"
     return manifest
 
 
@@ -1085,6 +1091,7 @@ if SCENARIO == "missing_description":
             "canonical_unmapped_parameter": "unmapped",
             "canonical_unknown_target": "canonical parameter",
             "canonical_broken_tie": "tied",
+            "canonical_bad_preprocess_path": "does not exist",
             "canonical_missing_assumption": "algebraic assumptions",
             "canonical_state_gap": "state semantics",
             "canonical_unexplained_branch": "source branch",
