@@ -264,3 +264,19 @@ Gate. When Thor BF16 is also requested, the declared minimum improvement is
 evaluated against BF16 evidence from the identical device fingerprint. Public
 support output contains only tuples that pass all applicable Gates; Orin FP8 is
 rejected before evidence evaluation and can never be advertised.
+
+## VLA Orin INT8 W8A8 qualification
+
+`scripts/vla_int8_qualification.py` qualifies only the Orin tuples explicitly
+requested by a VLA Port. An INT8 W8A8 request must identify its weights, scales,
+and calibration inputs by SHA-256 and provide family-attributed kernel coverage
+and tuning evidence. Tactics must match the validated Orin device, SM87,
+multiprocessor, kernel-build, CUDA, and library fingerprint.
+
+The Gate machine-evaluates every declared VLA stage plus normalized and
+deployable actions against INT8-specific maxima. User thresholds may be stricter
+than those maxima, but cannot weaken them. An INT8-only Port has no BF16
+implementation or relative Gate. When Orin BF16 is also requested, the declared
+minimum improvement is evaluated against BF16 evidence from the identical Orin
+fingerprint. Public support output contains only requested tuples that pass all
+applicable Gates; FP8 is rejected for Orin and can never be advertised.
