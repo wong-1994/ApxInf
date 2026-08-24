@@ -136,9 +136,8 @@ a structured Gap Report. Contract revisions are declared as `initial`,
 `additive`, or `breaking`: additive changes increment the minor version, while
 changed or removed semantics require a new major version. The prior contract is
 loaded and compared rather than trusting revision labels. Per-capability hashes
-and `invalidated_capabilities` identify only dependencies affected by an update;
-generic stale-artifact propagation and retention are added by the later resume
-stage. Passing capability classification advances through canonical equivalence
+and `invalidated_capabilities` identify only dependencies affected by an update.
+Passing capability classification advances through canonical equivalence
 and family-neutral kernel coverage. Every canonical computation is classified
 as existing fused, existing primitive, layout-only, correct fallback, missing
 required capability, or unsupported. Unclassified computations fail closed; a
@@ -172,11 +171,25 @@ source digest, and checkpoint digest. Port directories are rejected when they
 are inside either ApxInf or the trusted source checkout, so adapters and captured
 inputs cannot enter a proposed public commit. Tensor captures contain f32 data
 with explicit source dtype and shape metadata. Report artifact records carry
-content, workflow-tool, source, checkpoint, environment, and upstream-request
+content, workflow-tool, source, checkpoint, ApxInf source, kernel build,
+Capability Contract, documentation, applicable target-environment, and upstream
 fingerprints through a versioned common envelope that also pins the selected
 Family Pack, Capability Contract, stage, and family payload schema. The Family
-Pack validates each payload before its envelope is emitted. Dependency-aware
-stale retention and resume are added by the later workflow-resume stage.
+Pack validates each payload before its envelope is emitted.
+
+## Resume safely
+
+```bash
+python3 scripts/apxinf_port.py resume --port-dir /private/path/my-port
+```
+
+`resume` recomputes dependency and payload fingerprints; file existence alone
+never makes evidence current. Changed artifacts and their named descendants are
+marked `stale` but retained for diagnosis. Gates backed by stale evidence also
+become stale. Unaffected family and common artifacts remain current. A stage
+left `running` by interruption is reset deterministically to `not_started`, and
+the report records the interrupted stages, stale artifacts, and a structured
+resumption explanation.
 
 | Exit code | Category | Meaning |
 | ---: | --- | --- |

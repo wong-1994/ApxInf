@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -246,6 +247,11 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _value_sha256(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class ArtifactStore:
     """Stores family-validated Workflow Artifact provenance envelopes."""
 
@@ -283,6 +289,8 @@ class ArtifactStore:
         dependencies.update(
             {name: _sha256(item) for name, item in (upstream or {}).items()}
         )
+        declared = self.request.get("dependency_fingerprints", {})
+        target_environments = declared.get("target_environment_sha256", {})
         return {
             "envelope_version": WORKFLOW_ARTIFACT_ENVELOPE_VERSION,
             "family": self.pack.family,
@@ -290,18 +298,132 @@ class ArtifactStore:
             "stage": stage,
             "payload_schema": payload_schema,
             "path": path.relative_to(self.port_dir).as_posix(),
+            "dependency_paths": {
+                "environment": str(environment_path),
+                "orchestrator": str(self.orchestrator),
+                "reference_adapter": str(self.reference_adapter),
+                **{name: str(item) for name, item in (upstream or {}).items()},
+            },
+            "state": "current",
+            "explanation": {"changed_dependencies": [], "upstream_stale": []},
             "fingerprints": {
                 "content_sha256": _sha256(path),
                 "tool_sha256": {
                     "orchestrator": _sha256(self.orchestrator),
                     "reference_adapter": _sha256(self.reference_adapter),
                 },
-                "source_sha256": self.request["source"]["sha256"],
-                "checkpoint_sha256": self.request["checkpoint"]["sha256"],
-                "environment_sha256": _sha256(environment_path),
+                "source_sha256": declared.get(
+                    "source_sha256", self.request["source"]["sha256"]
+                ),
+                "checkpoint_sha256": declared.get(
+                    "checkpoint_sha256", self.request["checkpoint"]["sha256"]
+                ),
+                "apxinf_source_sha256": declared.get(
+                    "apxinf_source_sha256", _sha256(self.orchestrator)
+                ),
+                "kernel_build_sha256": declared.get("kernel_build_sha256"),
+                "environment_sha256": declared.get(
+                    "environment_sha256", _sha256(environment_path)
+                ),
+                "capability_contract_sha256": declared.get(
+                    "capability_contract_sha256",
+                    _value_sha256(self.request["capability_contract_version"]),
+                ),
+                "documentation_sha256": declared.get("documentation_sha256"),
+                "target_environment_sha256": target_environments,
                 "upstream_sha256": dependencies,
             },
         }
+
+
+def resume_report(
+    previous_report: Mapping[str, Any],
+    current_artifacts: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Reconcile recorded evidence with freshly fingerprinted dependencies.
+
+    Existing payloads are retained.  They become usable only when their complete
+    recorded fingerprint set still matches and every named upstream artifact is
+    current.
+    """
+
+    report = deepcopy(dict(previous_report))
+    artifacts = report.setdefault("artifacts", {})
+    stale: set[str] = set()
+    changed_by_artifact: dict[str, list[str]] = {}
+    for name, recorded in artifacts.items():
+        current = current_artifacts.get(name)
+        recorded_fingerprints = recorded.get("fingerprints", {})
+        current_fingerprints = current.get("fingerprints", {}) if current else {}
+        keys = sorted(set(recorded_fingerprints) | set(current_fingerprints))
+        changed = [
+            key
+            for key in keys
+            if recorded_fingerprints.get(key) != current_fingerprints.get(key)
+        ]
+        if current is None:
+            changed = ["current_fingerprint_evidence_missing"]
+        if changed:
+            stale.add(name)
+            changed_by_artifact[name] = changed
+
+    propagated = True
+    while propagated:
+        propagated = False
+        for name, artifact in artifacts.items():
+            upstream = artifact.get("fingerprints", {}).get("upstream_sha256", {})
+            if name not in stale and any(parent in stale for parent in upstream):
+                stale.add(name)
+                propagated = True
+
+    for name, artifact in artifacts.items():
+        upstream = artifact.get("fingerprints", {}).get("upstream_sha256", {})
+        upstream_stale = sorted(parent for parent in upstream if parent in stale)
+        artifact["state"] = "stale" if name in stale else "current"
+        artifact["explanation"] = {
+            "changed_dependencies": changed_by_artifact.get(name, []),
+            "upstream_stale": upstream_stale,
+        }
+
+    interrupted = sorted(
+        name for name, status in report.get("stages", {}).items() if status == "running"
+    )
+    for name in interrupted:
+        report["stages"][name] = "not_started"
+    stale_stages = {
+        artifact.get("stage")
+        for name, artifact in artifacts.items()
+        if name in stale and artifact.get("stage")
+    }
+    for stage in stale_stages:
+        if (
+            stage not in interrupted
+            and report.get("stages", {}).get(stage) == "passed"
+        ):
+            report["stages"][stage] = "stale"
+    gate_artifacts = {
+        "capability_contract": ["capability_classification"],
+        "canonical_equivalence": ["canonical_trace", "canonical_equivalence"],
+        "kernel_coverage": ["kernel_coverage"],
+    }
+    for gate_name, gate in report.get("gates", {}).items():
+        evidence_names = gate.get("evidence", {}).get("artifacts", [])
+        if not evidence_names:
+            evidence_names = gate_artifacts.get(gate_name, [])
+        if gate.get("status") == "running" or any(
+            name in stale for name in evidence_names
+        ):
+            gate["status"] = "stale"
+    report["resume"] = {
+        "interrupted_stages": interrupted,
+        "stale_artifacts": sorted(stale),
+        "resumable": True,
+        "explanation": (
+            "interrupted stages reset to not_started; stale evidence was retained "
+            "for diagnosis and excluded from Gates"
+        ),
+    }
+    return report
 
 
 def _tuple_states(requested: Any) -> list[dict[str, str]]:

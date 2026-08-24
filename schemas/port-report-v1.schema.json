@@ -130,6 +130,17 @@
     "artifacts": {
       "type": "object",
       "additionalProperties": {"$ref": "workflow-artifact-envelope-v1.schema.json"}
+    },
+    "resume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interrupted_stages", "stale_artifacts", "resumable", "explanation"],
+      "properties": {
+        "interrupted_stages": {"type": "array", "items": {"type": "string"}},
+        "stale_artifacts": {"type": "array", "items": {"type": "string"}},
+        "resumable": {"type": "boolean"},
+        "explanation": {"type": "string"}
+      }
     }
   }
 }

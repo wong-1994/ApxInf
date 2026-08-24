@@ -14,6 +14,7 @@ from porting_core import (  # noqa: E402
     ArtifactStore,
     PortingCore,
     VLA_FAMILY_PACK,
+    resume_report,
 )
 
 
@@ -90,6 +91,128 @@ class PortingCoreTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "schema"):
                 store.record(inventory, environment)
+
+    def test_resume_marks_only_changed_dependencies_and_descendants_stale(self) -> None:
+        artifacts = {
+            "common": self.envelope("vla", "common", content="a"),
+            "vla": self.envelope(
+                "vla", "vla", content="b", upstream={"common": "a"}
+            ),
+            "llm": self.envelope("llm", "llm", content="c"),
+        }
+        current = json.loads(json.dumps(artifacts))
+        current["common"]["fingerprints"]["documentation_sha256"] = "9" * 64
+
+        resumed = resume_report(
+            {
+                "stages": {"intake": "passed", "preflight": "passed"},
+                "gates": {
+                    "common": {
+                        "status": "passed",
+                        "evidence": {"artifacts": ["common"]},
+                    },
+                    "vla": {"status": "passed", "evidence": {"artifacts": ["vla"]}},
+                    "llm": {"status": "passed", "evidence": {"artifacts": ["llm"]}},
+                },
+                "artifacts": artifacts,
+            },
+            current,
+        )
+
+        self.assertEqual(resumed["artifacts"]["common"]["state"], "stale")
+        self.assertEqual(resumed["artifacts"]["vla"]["state"], "stale")
+        self.assertEqual(resumed["artifacts"]["llm"]["state"], "current")
+        self.assertEqual(resumed["gates"]["common"]["status"], "stale")
+        self.assertEqual(resumed["gates"]["vla"]["status"], "stale")
+        self.assertEqual(resumed["gates"]["llm"]["status"], "passed")
+        self.assertIn(
+            "documentation_sha256",
+            resumed["artifacts"]["common"]["explanation"][
+                "changed_dependencies"
+            ],
+        )
+
+    def test_resume_recovers_interrupted_stage_without_trusting_existing_files(
+        self,
+    ) -> None:
+        recorded = self.envelope("vlm", "capture", content="a")
+        current = json.loads(json.dumps(recorded))
+        current["fingerprints"]["content_sha256"] = "f" * 64
+        resumed = resume_report(
+            {
+                "stages": {"intake": "passed", "preflight": "running"},
+                "gates": {
+                    "capture": {
+                        "status": "running",
+                        "evidence": {"artifacts": ["capture"]},
+                    }
+                },
+                "artifacts": {"capture": recorded},
+            },
+            {"capture": current},
+        )
+
+        self.assertEqual(resumed["stages"]["preflight"], "not_started")
+        self.assertEqual(resumed["gates"]["capture"]["status"], "stale")
+        self.assertEqual(resumed["resume"]["interrupted_stages"], ["preflight"])
+        self.assertEqual(resumed["artifacts"]["capture"]["state"], "stale")
+
+    def test_resume_recognizes_each_dependency_class_without_cross_invalidation(
+        self,
+    ) -> None:
+        dependency_keys = (
+            "checkpoint_sha256",
+            "source_sha256",
+            "apxinf_source_sha256",
+            "kernel_build_sha256",
+            "environment_sha256",
+            "capability_contract_sha256",
+            "documentation_sha256",
+            "target_environment_sha256",
+        )
+        for key in dependency_keys:
+            with self.subTest(key=key):
+                artifacts = {
+                    "affected": self.envelope("llm", "affected", content="a"),
+                    "unrelated": self.envelope("vlm", "unrelated", content="b"),
+                }
+                current = json.loads(json.dumps(artifacts))
+                current["affected"]["fingerprints"][key] = {"changed": "value"}
+                resumed = resume_report(
+                    {"stages": {}, "gates": {}, "artifacts": artifacts}, current
+                )
+                self.assertEqual(
+                    resumed["artifacts"]["affected"]["state"], "stale"
+                )
+                self.assertEqual(
+                    resumed["artifacts"]["unrelated"]["state"], "current"
+                )
+
+    def envelope(self, family: str, path: str, *, content: str, upstream=None) -> dict:
+        return {
+            "envelope_version": "1.0",
+            "family": family,
+            "capability_contract_version": "1.0",
+            "stage": "preflight",
+            "payload_schema": f"synthetic-{family}-v1",
+            "path": f"private/{path}.json",
+            "dependency_paths": {},
+            "state": "current",
+            "explanation": {"changed_dependencies": [], "upstream_stale": []},
+            "fingerprints": {
+                "content_sha256": content,
+                "tool_sha256": {"runner": "1" * 64},
+                "source_sha256": "2" * 64,
+                "checkpoint_sha256": "3" * 64,
+                "apxinf_source_sha256": "4" * 64,
+                "kernel_build_sha256": "5" * 64,
+                "environment_sha256": "6" * 64,
+                "capability_contract_sha256": "7" * 64,
+                "documentation_sha256": "8" * 64,
+                "target_environment_sha256": {},
+                "upstream_sha256": upstream or {},
+            },
+        }
 
     def test_family_payload_validation_follows_references_and_constraints(self) -> None:
         inventory = {

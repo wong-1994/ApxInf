@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -38,6 +39,7 @@ from porting_core import (
     ArtifactStore,
     VLA_FAMILY_PACK,
     select_family_pack,
+    resume_report,
     validate_requested_tuple,
 )
 from kernel_coverage import KernelCoverageError, analyze_kernel_coverage
@@ -118,6 +120,25 @@ def source_sha256(root: Path) -> str:
             with path.open("rb") as source_file:
                 for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
                     digest.update(chunk)
+    return digest.hexdigest()
+
+
+def apxinf_source_sha256() -> str:
+    digest = hashlib.sha256()
+    result = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=repository_root(),
+        check=True,
+        capture_output=True,
+    )
+    for relative_bytes in result.stdout.split(b"\0"):
+        if not relative_bytes:
+            continue
+        relative = relative_bytes.decode("utf-8")
+        path = repository_root() / relative
+        digest.update(relative_bytes + b"\0")
+        if path.is_file():
+            digest.update(file_sha256(path).encode("ascii"))
     return digest.hexdigest()
 
 
@@ -761,6 +782,57 @@ def artifact_record(
     extra_upstream: dict[str, Path] | None = None,
 ) -> dict[str, Any]:
     pack = select_family_pack(request["model_family"])
+    request = copy.deepcopy(request)
+    environment_sha = file_sha256(environment_path)
+    contract_path = (extra_upstream or {}).get("capability_contract")
+    if contract_path is None:
+        contract_path = default_capability_contract(
+            request["capability_contract_version"]
+        )
+    contract_sha = (
+        file_sha256(contract_path)
+        if contract_path.is_file()
+        else value_sha256(request["capability_contract_version"])
+    )
+    kernel_path = (extra_upstream or {}).get(
+        "kernel_capabilities", default_kernel_capabilities()
+    )
+    source_dependent = path.name in {
+        "environment.json",
+        "source_inventory.json",
+        "inspection.json",
+    }
+    kernel_dependent = path.name in {
+        "kernel_coverage.json",
+        "kernel_gap_handoff.json",
+    }
+    contract_dependent = path.name in {
+        "capability_classification.json",
+        "capability_gap_report.json",
+    }
+    request["dependency_fingerprints"] = {
+        "source_sha256": request["source"]["sha256"] if source_dependent else None,
+        "checkpoint_sha256": (
+            request["checkpoint"]["sha256"] if source_dependent else None
+        ),
+        "apxinf_source_sha256": apxinf_source_sha256(),
+        "kernel_build_sha256": (
+            file_sha256(kernel_path) if kernel_dependent else None
+        ),
+        "environment_sha256": environment_sha if source_dependent else None,
+        "capability_contract_sha256": (
+            contract_sha if contract_dependent else None
+        ),
+        "documentation_sha256": None,
+        "target_environment_sha256": (
+            {
+                f"{item['target']}/{item['precision']}": environment_sha
+                for item in request.get("requested_targets", [])
+            }
+            if kernel_dependent
+            else {}
+        ),
+    }
     store = ArtifactStore(
         port_dir,
         request,
@@ -769,6 +841,105 @@ def artifact_record(
         port_dir / "private" / "reference_adapter.py",
     )
     return store.record(path, environment_path, extra_upstream)
+
+
+def resume_port(args: argparse.Namespace) -> int:
+    port_dir = args.port_dir.resolve()
+    try:
+        request = json.loads((port_dir / "request.json").read_text(encoding="utf-8"))
+        report = json.loads((port_dir / "report.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"cannot resume Port: {error}", file=sys.stderr)
+        return MISSING_INPUT.code
+    current: dict[str, dict[str, Any]] = {}
+    for name, recorded in report.get("artifacts", {}).items():
+        refreshed = copy.deepcopy(recorded)
+        fingerprints = refreshed["fingerprints"]
+        dependency_paths = refreshed.get("dependency_paths", {})
+        payload_path = port_dir / recorded.get("path", "")
+        if payload_path.is_file():
+            fingerprints["content_sha256"] = file_sha256(payload_path)
+        else:
+            fingerprints["content_sha256"] = None
+        source_path = request.get("source", {}).get("path")
+        checkpoint_path = request.get("checkpoint", {}).get("path")
+        if fingerprints.get("source_sha256") is not None:
+            fingerprints["source_sha256"] = (
+                source_sha256(Path(source_path)) if source_path else None
+            )
+        if fingerprints.get("checkpoint_sha256") is not None:
+            fingerprints["checkpoint_sha256"] = (
+                file_sha256(Path(checkpoint_path)) if checkpoint_path else None
+            )
+        fingerprints["apxinf_source_sha256"] = apxinf_source_sha256()
+        for tool_name in list(fingerprints.get("tool_sha256", {})):
+            tool_path = dependency_paths.get(tool_name)
+            fingerprints["tool_sha256"][tool_name] = (
+                file_sha256(Path(tool_path))
+                if tool_path and Path(tool_path).is_file()
+                else None
+            )
+        environment_path = dependency_paths.get("environment")
+        if environment_path and fingerprints.get("environment_sha256") is not None:
+            environment_digest = (
+                file_sha256(Path(environment_path))
+                if Path(environment_path).is_file()
+                else None
+            )
+            fingerprints["environment_sha256"] = environment_digest
+            fingerprints["target_environment_sha256"] = {
+                key: environment_digest
+                for key in fingerprints.get("target_environment_sha256", {})
+            }
+        kernel_path = Path(
+            dependency_paths.get(
+                "kernel_capabilities", str(default_kernel_capabilities())
+            )
+        )
+        if fingerprints.get("kernel_build_sha256") is not None:
+            fingerprints["kernel_build_sha256"] = (
+                file_sha256(kernel_path) if kernel_path.is_file() else None
+            )
+        contract_path = Path(
+            dependency_paths.get(
+                "capability_contract",
+                str(
+                    default_capability_contract(
+                        request["capability_contract_version"]
+                    )
+                ),
+            )
+        )
+        if fingerprints.get("capability_contract_sha256") is not None:
+            fingerprints["capability_contract_sha256"] = (
+                file_sha256(contract_path)
+                if contract_path.is_file()
+                else value_sha256(request["capability_contract_version"])
+            )
+        if fingerprints.get("documentation_sha256") is not None:
+            fingerprints["documentation_sha256"] = file_sha256(
+                repository_root() / "doc" / "porting-workflow.md"
+            )
+        upstream = fingerprints.get("upstream_sha256", {})
+        if "request" in upstream:
+            upstream["request"] = file_sha256(port_dir / "request.json")
+        for dependency_name in list(upstream):
+            dependency = report.get("artifacts", {}).get(dependency_name)
+            if dependency is not None:
+                dependency_path = port_dir / dependency["path"]
+                upstream[dependency_name] = (
+                    file_sha256(dependency_path) if dependency_path.is_file() else None
+                )
+            elif dependency_name in dependency_paths:
+                dependency_path = Path(dependency_paths[dependency_name])
+                upstream[dependency_name] = (
+                    file_sha256(dependency_path) if dependency_path.is_file() else None
+                )
+        current[name] = refreshed
+    resumed = resume_report(report, current)
+    write_json(port_dir / "report.json", resumed)
+    print(port_dir / "report.json")
+    return SUCCESS.code
 
 
 def value_sha256(value: Any) -> str:
@@ -2372,6 +2543,12 @@ def parser() -> argparse.ArgumentParser:
         "--kernel-capabilities", type=Path, default=default_kernel_capabilities()
     )
     run.set_defaults(handler=run_port)
+
+    resume = subcommands.add_parser(
+        "resume", help="reconcile saved evidence and recover interrupted stages"
+    )
+    resume.add_argument("--port-dir", type=Path, required=True)
+    resume.set_defaults(handler=resume_port)
 
     report = subcommands.add_parser("report", help="print the structured Port report")
     report.add_argument("--port-dir", type=Path, required=True)

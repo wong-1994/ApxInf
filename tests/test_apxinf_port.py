@@ -89,6 +89,33 @@ class PortIntakeTest(unittest.TestCase):
                 self.assertEqual(artifact["capability_contract_version"], "1.0")
                 self.assertTrue(artifact["payload_schema"])
 
+    def test_resume_reconciles_payload_content_and_interrupted_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(Path(temporary))
+            run = self.run_port("run", "--port-dir", str(port))
+            self.assertEqual(run.returncode, 0, run.stderr)
+            report_path = port / "report.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["stages"]["preflight"] = "running"
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            classification = (
+                port / report["artifacts"]["capability_classification"]["path"]
+            )
+            classification.write_text(
+                classification.read_text() + "\n", encoding="utf-8"
+            )
+
+            resumed = self.run_port("resume", "--port-dir", str(port))
+
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["stages"]["preflight"], "not_started")
+            self.assertEqual(
+                report["artifacts"]["capability_classification"]["state"],
+                "stale",
+            )
+            self.assertEqual(report["gates"]["capability_contract"]["status"], "stale")
+
     def test_mismatched_family_request_fails_before_reference_execution(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -722,7 +749,12 @@ if SCENARIO == "missing_description":
                         "tool_sha256",
                         "source_sha256",
                         "checkpoint_sha256",
+                        "apxinf_source_sha256",
+                        "kernel_build_sha256",
                         "environment_sha256",
+                        "capability_contract_sha256",
+                        "documentation_sha256",
+                        "target_environment_sha256",
                         "upstream_sha256",
                     },
                 )
