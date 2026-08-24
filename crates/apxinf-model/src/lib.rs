@@ -5,6 +5,7 @@ pub mod builtin;
 pub mod debug;
 pub mod llama;
 pub mod llm_trait;
+pub mod minimal_vla;
 pub mod registry;
 pub mod auto;
 pub mod profiling;

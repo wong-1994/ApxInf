@@ -17,6 +17,7 @@ pub fn register_builtin_models() {
     registry::register("llama", load_llama);
     registry::register("qwen3_vl", load_qwen3vl);
     registry::register("qwen3vl", load_qwen3vl);
+    registry::register("minimal_vla", crate::minimal_vla::load);
 
     #[cfg(feature = "cuda")]
     crate::pi05::register_builtin();

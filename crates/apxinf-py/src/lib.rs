@@ -35,6 +35,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use apxinf_core::{Device, Shape, Tensor};
+use apxinf_model::minimal_vla::MinimalVlaConfig;
 use apxinf_model::{
     AutoModel, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation, Pi05Config,
     SyntheticWeights, VisionObservation,
@@ -92,7 +93,30 @@ fn parse_layout(spec: &str) -> PyResult<ImageLayout> {
 /// queries and input validation match the runtime `AutoModel` builds.
 /// `LoadedModel` does not carry the config, so we read `config.json` (falling
 /// back to `Pi05Config::default()` when absent), matching the runtime loader.
-fn load_config(checkpoint: &Path) -> PyResult<Pi05Config> {
+#[derive(Clone)]
+struct ModelContract {
+    num_views: usize,
+    image_size: usize,
+    action_horizon: usize,
+    action_dim: usize,
+    max_token_len: usize,
+    patch_size: usize,
+}
+
+impl From<&Pi05Config> for ModelContract {
+    fn from(config: &Pi05Config) -> Self {
+        Self {
+            num_views: config.num_views,
+            image_size: config.image_size,
+            action_horizon: config.action_horizon,
+            action_dim: config.action_dim,
+            max_token_len: config.max_token_len,
+            patch_size: config.patch_size,
+        }
+    }
+}
+
+fn load_config(model: &str, checkpoint: &Path) -> PyResult<ModelContract> {
     let root = if checkpoint.is_dir() {
         checkpoint
     } else {
@@ -100,9 +124,22 @@ fn load_config(checkpoint: &Path) -> PyResult<Pi05Config> {
     };
     let config_path = root.join("config.json");
     if config_path.is_file() {
-        Pi05Config::from_json_file(&config_path).map_err(runtime_err)
+        if model == "minimal_vla" {
+            let config = MinimalVlaConfig::from_json_file(&config_path).map_err(runtime_err)?;
+            Ok(ModelContract {
+                num_views: config.num_views,
+                image_size: config.image_size,
+                action_horizon: config.action_horizon,
+                action_dim: config.action_dim,
+                max_token_len: config.max_token_len,
+                patch_size: 1,
+            })
+        } else {
+            let config = Pi05Config::from_json_file(&config_path).map_err(runtime_err)?;
+            Ok(ModelContract::from(&config))
+        }
     } else {
-        Ok(Pi05Config::default())
+        Ok(ModelContract::from(&Pi05Config::default()))
     }
 }
 
@@ -114,13 +151,13 @@ fn load_config(checkpoint: &Path) -> PyResult<Pi05Config> {
 #[pyclass(unsendable)]
 pub struct Model {
     model: LoadedModel,
-    config: Pi05Config,
+    config: ModelContract,
     device: Device,
 }
 
 impl Model {
     fn patch_rows(&self) -> usize {
-        self.config.num_views * self.config.patches_per_view()
+        self.config.num_views * (self.config.image_size / self.config.patch_size).pow(2)
     }
 
     fn patch_width(&self) -> usize {
@@ -157,11 +194,7 @@ impl Model {
         let data = noise.as_slice().map_err(|_| {
             PyValueError::new_err("apxinf_py.infer: noise must be C-contiguous float32")
         })?;
-        Tensor::from_f32(
-            Shape::new(vec![expected[0], expected[1]]),
-            data,
-        )
-        .map_err(runtime_err)
+        Tensor::from_f32(Shape::new(vec![expected[0], expected[1]]), data).map_err(runtime_err)
     }
 
     /// Run inference and marshal the flat host action into a `[horizon, dim]`
@@ -171,7 +204,10 @@ impl Model {
         py: Python<'py>,
         observation: Observation,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let flat = self.model.infer_host_f32(&observation).map_err(runtime_err)?;
+        let flat = self
+            .model
+            .infer_host_f32(&observation)
+            .map_err(runtime_err)?;
         let horizon = self.config.action_horizon;
         let dim = self.config.action_dim;
         if flat.len() != horizon * dim {
@@ -218,14 +254,16 @@ impl Model {
         action_horizon: Option<usize>,
     ) -> PyResult<Self> {
         let device = parse_device(device)?;
-        let mut config = load_config(&path)?;
+        let mut config = load_config(model, &path)?;
         // Only hand the loader an explicit config when the caller actually
         // overrode something; otherwise it reads `config.json` itself, exactly
         // as before.
         let overridden = match action_horizon {
             Some(horizon) => {
                 config.action_horizon = horizon;
-                config.validate().map_err(runtime_err)?;
+                if horizon == 0 {
+                    return Err(PyValueError::new_err("action_horizon must be positive"));
+                }
                 true
             }
             None => false,
@@ -235,7 +273,19 @@ impl Model {
             precision: parse_precision(precision)?,
             calibration_path: calibration,
             tuning_path: tactics,
-            config: overridden.then(|| config.clone()),
+            config: if overridden && model == "pi05" {
+                let root = if path.is_dir() {
+                    path.as_path()
+                } else {
+                    path.parent().unwrap_or_else(|| Path::new("."))
+                };
+                let mut pi05 =
+                    Pi05Config::from_json_file(&root.join("config.json")).map_err(runtime_err)?;
+                pi05.action_horizon = config.action_horizon;
+                Some(pi05)
+            } else {
+                None
+            },
             ..LoadOptions::default()
         };
         let loaded = AutoModel::load_model(device, &path, &options).map_err(runtime_err)?;
@@ -327,11 +377,10 @@ impl Model {
             uniform_fp8_scale,
             ..LoadOptions::default()
         };
-        let loaded = AutoModel::load_model(device, Path::new(""), &options)
-            .map_err(runtime_err)?;
+        let loaded = AutoModel::load_model(device, Path::new(""), &options).map_err(runtime_err)?;
         Ok(Self {
             model: loaded,
-            config,
+            config: ModelContract::from(&config),
             device,
         })
     }
@@ -367,17 +416,16 @@ impl Model {
         let tokens = token_ids
             .as_slice()
             .map_err(|_| {
-                PyValueError::new_err("apxinf_py._infer_patches: token_ids must be C-contiguous uint32")
+                PyValueError::new_err(
+                    "apxinf_py._infer_patches: token_ids must be C-contiguous uint32",
+                )
             })?
             .to_vec();
         self.validate_tokens(&tokens)?;
 
         let noise_tensor = self.noise_tensor(noise)?;
-        let patch_tensor = Tensor::from_f32(
-            Shape::new(vec![expected[0], expected[1]]),
-            patch_data,
-        )
-        .map_err(runtime_err)?;
+        let patch_tensor = Tensor::from_f32(Shape::new(vec![expected[0], expected[1]]), patch_data)
+            .map_err(runtime_err)?;
 
         let observation = Observation {
             vision: VisionObservation::Patches(patch_tensor),
@@ -477,7 +525,7 @@ impl Model {
 
     #[getter]
     fn patches_per_view(&self) -> usize {
-        self.config.patches_per_view()
+        (self.config.image_size / self.config.patch_size).pow(2)
     }
 
     #[getter]
@@ -537,7 +585,7 @@ mod tests {
 
     #[test]
     fn missing_config_falls_back_to_default() {
-        let config = load_config(Path::new("/nonexistent/checkpoint")).unwrap();
-        assert_eq!(config, Pi05Config::default());
+        let config = load_config("pi05", Path::new("/nonexistent/checkpoint")).unwrap();
+        assert_eq!(config.action_dim, Pi05Config::default().action_dim);
     }
 }

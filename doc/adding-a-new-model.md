@@ -274,3 +274,21 @@ The Qwen3-VL port is the reference implementation. See:
 - `scripts/hf_reference_dump.py` — reference dump script
 - `doc/20260619-qwen3vl/results.md` — verification numbers
 - `doc/20260619-qwen3vl/notes.md` — live diary of decisions + bugs
+
+## Minimal VLA Family Pack fixture
+
+`minimal_vla` is the maintained, deliberately tiny VLA used to exercise this
+guide's VLA integration seams without a private source checkout. Export its
+deterministic BF16 checkpoint with:
+
+```bash
+python scripts/export_minimal_vla.py /tmp/minimal-vla
+```
+
+The exporter writes `model.safetensors`, `config.json`, and a complete
+`export-manifest.json` containing each parameter's source dtype, shape,
+load-time transformation, tensor hash, and the whole-file hash. The model is
+registered with `AutoModel` and `AutoPolicy`; it supports only BF16 (the
+requested baseline tuple), uses the shared `VlaRuntime` / prepared-inference
+interfaces, and is served by the ordinary policy websocket path. FP8 and INT8
+remain separate, explicitly requested Ports.
