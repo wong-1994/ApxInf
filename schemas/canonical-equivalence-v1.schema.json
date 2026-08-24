@@ -63,6 +63,7 @@
     "state_semantics": {"type": "array"},
     "branches": {"type": "array"},
     "intermediate_mapping": {"type": "array"},
+    "preprocessing_mapping": {"type": "array", "minItems": 1},
     "cases": {
       "type": "array",
       "minItems": 4,
@@ -87,7 +88,8 @@
           "semantic_rewrites",
           "state_semantics",
           "branches",
-          "intermediate_mapping"
+          "intermediate_mapping",
+          "preprocessing_mapping"
         ]
       }
     }

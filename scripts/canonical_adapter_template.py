@@ -67,6 +67,7 @@ def validate_manifest(
         "state_semantics",
         "branches",
         "intermediate_mapping",
+        "preprocessing_mapping",
     }
     if not isinstance(manifest, dict) or set(manifest) != required:
         raise ValueError("canonicalization manifest has missing or unknown fields")
@@ -312,6 +313,28 @@ def validate_manifest(
         if any(not isinstance(mapping[key], str) or not mapping[key] for key in mapping):
             raise ValueError(f"intermediate_mapping[{index}] paths must be strings")
 
+    preprocessing = manifest["preprocessing_mapping"]
+    if not isinstance(preprocessing, list) or not preprocessing:
+        raise ValueError("preprocessing_mapping must select at least one input boundary")
+    for index, mapping in enumerate(preprocessing):
+        path = f"preprocessing_mapping[{index}]"
+        if not isinstance(mapping, dict) or set(mapping) != {
+            "source",
+            "canonical",
+            "transformation_ids",
+        }:
+            raise ValueError(f"{path} is invalid")
+        if any(
+            not isinstance(mapping[key], str) or not mapping[key]
+            for key in ("source", "canonical")
+        ):
+            raise ValueError(f"{path} paths must be strings")
+        references = require_string_list(
+            mapping["transformation_ids"], f"{path}.transformation_ids"
+        )
+        if not set(references) <= transformation_ids:
+            raise ValueError(f"{path} references an unknown transformation")
+
 
 def compare_values(
     source: Any, canonical: Any, absolute: float, relative: float
@@ -432,6 +455,9 @@ def verify(args: argparse.Namespace) -> None:
             for seed in (0, 1):
                 adapter.set_seed(seed)
                 source_inputs = adapter.preprocess(profile)
+                expected_canonical_inputs = adapter.canonicalize_preprocessed_inputs(
+                    source_inputs
+                )
                 source_output = adapter.infer(source_model, source_inputs)
                 source_intermediates = adapter.capture_intermediates(
                     source_model, source_inputs
@@ -450,7 +476,9 @@ def verify(args: argparse.Namespace) -> None:
                     canonical_output
                 )
 
-                source_inputs_json = support.json_capture(source_inputs)
+                expected_canonical_inputs_json = support.json_capture(
+                    expected_canonical_inputs
+                )
                 canonical_inputs_json = support.json_capture(canonical_inputs)
                 source_intermediates_json = support.json_capture(source_intermediates)
                 canonical_intermediates_json = support.json_capture(
@@ -467,7 +495,7 @@ def verify(args: argparse.Namespace) -> None:
                         "preprocessed_inputs",
                         "inputs",
                         "inputs",
-                        source_inputs_json,
+                        expected_canonical_inputs_json,
                         canonical_inputs_json,
                         absolute,
                         relative,
@@ -547,6 +575,7 @@ def verify(args: argparse.Namespace) -> None:
                 "state_semantics": manifest["state_semantics"],
                 "branches": manifest["branches"],
                 "intermediate_mapping": manifest["intermediate_mapping"],
+                "preprocessing_mapping": manifest["preprocessing_mapping"],
             },
         )
         failures = evidence["summary"]["failures"]

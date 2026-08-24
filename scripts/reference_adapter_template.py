@@ -80,6 +80,9 @@ class ReferenceAdapter:
     def canonical_preprocess(self, profile: dict[str, Any]) -> Any:
         return self._call("canonical_preprocess", profile)
 
+    def canonicalize_preprocessed_inputs(self, inputs: Any) -> Any:
+        return self._call("canonicalize_preprocessed_inputs", inputs)
+
     def canonical_infer(self, model: Any, inputs: Any) -> Any:
         return self._call("canonical_infer", model, inputs)
 

@@ -80,7 +80,7 @@ Canonical VLA trace contract. A source whose semantics are already canonical
 uses direct mode and does not create a Canonical Adapter. A source with one or
 more `canonicalizable` capabilities must additionally expose
 `canonicalize(model)`, `canonical_preprocess(profile)`,
-`canonical_infer(model, inputs)`,
+`canonicalize_preprocessed_inputs(inputs)`, `canonical_infer(model, inputs)`,
 `canonical_capture_intermediates(model, inputs)`,
 `canonical_postprocess(output)`, and `canonicalization_manifest()` from its
 trusted entrypoint. The generic Canonical Adapter wrapper is copied into the
@@ -91,16 +91,18 @@ with shape, dtype, alias, and tied-weight checks, and declares all transpose,
 split, concatenation, packing, mask, conditioning, cache, and schedule
 transformations that apply. Each transformation is labeled
 `algebraic` or `numerical_equivalence`; algebraic transformations must list
-their assumptions. The manifest also maps selected intermediate checkpoints,
+their assumptions. The manifest also maps preprocessing representations and
+selected intermediate checkpoints,
 accounts for source branches, and covers each declared mask, conditioning,
 cache, or schedule state transformation without inventing absent state.
 
 The gate requires at least two distinct representative profiles and explicit
 absolute and relative thresholds. It resets Python, NumPy, PyTorch, and an
-optional source `set_seed(seed)` hook for seeds 0 and 1. It compares selected
-intermediates, normalized actions, and deployable postprocessed actions for
-every profile/seed case. An incomplete manifest or failed comparison blocks
-Preflight with a private Canonical VLA Gap Report.
+optional source `set_seed(seed)` hook for seeds 0 and 1. It compares canonical
+preprocessing against the declared source-to-canonical input transform, then
+compares selected intermediates, normalized actions, and deployable
+postprocessed actions for every profile/seed case. An incomplete manifest or
+failed comparison blocks Preflight with a private Canonical VLA Gap Report.
 
 ## Run Intake and Preflight
 

@@ -257,6 +257,7 @@ def describe():
         "canonical_mismatch",
         "canonical_intermediate_mismatch",
         "canonical_preprocess_mismatch",
+        "canonical_preprocess_rewrite",
         "canonical_shape_mismatch",
         "canonical_unmapped_parameter",
         "canonical_unknown_target",
@@ -316,6 +317,19 @@ def canonical_preprocess(profile):
     inputs = preprocess(profile)
     if SCENARIO == "canonical_preprocess_mismatch":
         inputs["tokens"] = Tensor((1, 2), [[77.0, 2.0]])
+    elif SCENARIO == "canonical_preprocess_rewrite":
+        values = inputs["tokens"].value[0]
+        inputs["tokens"] = Tensor((1, 2), [[values[1], values[0]]])
+    return inputs
+
+
+def canonicalize_preprocessed_inputs(inputs):
+    if SCENARIO == "canonical_preprocess_rewrite":
+        values = inputs["tokens"].value[0]
+        return {
+            **inputs,
+            "tokens": Tensor((1, 2), [[values[1], values[0]]]),
+        }
     return inputs
 
 
@@ -330,6 +344,12 @@ def canonical_infer(model, inputs):
 def canonical_capture_intermediates(model, inputs):
     if SCENARIO == "canonical_intermediate_mismatch":
         return {"encoder.output": Tensor((1, 2), [[99.0, 1.0]])}
+    if SCENARIO == "canonical_preprocess_rewrite":
+        return {
+            "encoder.output": Tensor(
+                (1, 2), [[model.shared.value, inputs["tokens"].value[0][1]]]
+            )
+        }
     return capture_intermediates(model, inputs)
 
 
@@ -403,6 +423,17 @@ def canonicalization_manifest():
         "branches": [],
         "intermediate_mapping": [
             {"source": "encoder.output", "canonical": "encoder.output"}
+        ],
+        "preprocessing_mapping": [
+            {
+                "source": "inputs",
+                "canonical": "inputs",
+                "transformation_ids": (
+                    ["rewrite-packing"]
+                    if SCENARIO == "canonical_preprocess_rewrite"
+                    else []
+                ),
+            }
         ],
     }
     if SCENARIO == "canonical_unmapped_parameter":
@@ -1021,6 +1052,32 @@ if SCENARIO == "missing_description":
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
             self.assertNotIn(
                 "cache", {item["category"] for item in evidence["state_semantics"]}
+            )
+
+    def test_declared_preprocessing_representation_rewrite_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            port, _ = self.initialize_inspectable_port(
+                Path(temporary), scenario="canonical_preprocess_rewrite"
+            )
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            evidence_path = (
+                port / report["artifacts"]["canonical_equivalence"]["path"]
+            )
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                evidence["preprocessing_mapping"][0]["transformation_ids"],
+                ["rewrite-packing"],
+            )
+            self.assertTrue(
+                all(
+                    comparison["passed"]
+                    for case in evidence["cases"]
+                    for comparison in case["comparisons"]
+                )
             )
 
     def test_incomplete_canonical_semantics_stop_with_a_gap_report(self) -> None:
