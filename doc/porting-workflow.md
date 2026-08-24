@@ -280,3 +280,31 @@ implementation or relative Gate. When Orin BF16 is also requested, the declared
 minimum improvement is evaluated against BF16 evidence from the identical Orin
 fingerprint. Public support output contains only requested tuples that pass all
 applicable Gates; FP8 is rejected for Orin and can never be advertised.
+
+## Common qualification state
+
+`scripts/qualification.py` computes qualification state only across the tuples
+declared by a Port request. Family Packs provide metric and deployment checks;
+the Core stores their named Gates without knowing about control steps, tokens,
+images, or other family concepts. The VLA adapter in
+`scripts/vla_qualification.py` requires absolute control-step p50 and p95 limits
+for every requested tuple.
+
+Fresh tuple evidence records benchmark warmup and sample counts, observation
+and action profiles, workspace and peak memory, and family-defined metrics.
+Thor and Orin evidence also records power mode, clocks, temperature, device,
+driver, CUDA, libraries, and kernel build. Nonconforming evidence remains in
+diagnostics but cannot qualify a release. Missing representative real inputs
+caps otherwise passing evidence at `provisional`.
+
+Deployment-complete requires inference, VLA policy processing, and action
+serving for every requested tuple. A Deployment-complete Port is
+Performance-pending until all requested tuple Gates pass and is
+Release-qualified only with fresh, conforming, representative evidence. A
+same-device BF16 improvement Gate exists only when both BF16 and a lower
+precision are requested for that target.
+
+Correctness and performance waivers must be scoped to a requested tuple, cite
+evidence, carry an ISO expiration date, and include explicit maintainer
+approval. A waiver records an accepted deviation but cannot turn waived
+evidence into Release-qualified evidence.
