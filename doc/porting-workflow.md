@@ -191,6 +191,39 @@ left `running` by interruption is reset deterministically to `not_started`, and
 the report records the interrupted stages, stale artifacts, and a structured
 resumption explanation.
 
+## Carry evidence between trusted machines
+
+Create a local directory bundle, copy it through a trusted private channel, and
+merge it into another directory for the same Port:
+
+```bash
+python3 scripts/apxinf_port.py bundle \
+  --port-dir /private/path/my-port \
+  --output /private/path/my-port-bundle
+python3 scripts/apxinf_port.py merge-bundle \
+  --port-dir /private/path/my-port \
+  --bundle /private/path/my-port-bundle
+```
+
+`manifest.json` binds every included file to a SHA-256 digest and preserves the
+Port, Family Pack, contract, source, checkpoint, dependency, and target-machine
+provenance. Requests and artifact envelopes are stripped of absolute paths.
+Credentials, checkpoint files, captured real inputs, and JSON payloads carrying
+absolute paths or secret fields are omitted. Private Reference and Canonical
+Adapters may remain in this non-publishable bundle for trusted verification.
+
+Merge fails closed on tampering, conflicting artifact names, missing upstream
+evidence, stale artifacts, family/payload mismatches, unrequested tuples, or
+target evidence whose payload and target-environment fingerprint disagree.
+Valid target evidence is copied into the Port and listed under
+`portable_evidence`, allowing qualification to consume independently collected
+requested tuples without treating tactics or performance as portable across
+environments.
+
+No command cleans up automatically. `cleanup` reports retention by default;
+only `cleanup --confirm` removes the complete private Port directory. This is
+irreversible unless the user made a separate backup.
+
 | Exit code | Category | Meaning |
 | ---: | --- | --- |
 | 0 | `success` | Intake passed |

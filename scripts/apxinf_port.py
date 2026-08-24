@@ -43,6 +43,7 @@ from porting_core import (
     validate_requested_tuple,
 )
 from kernel_coverage import KernelCoverageError, analyze_kernel_coverage
+from portable_bundle import BundleError, create_bundle, merge_bundle
 
 
 REQUEST_SCHEMA_VERSION = "1.0"
@@ -2520,6 +2521,46 @@ def show_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def bundle_port(args: argparse.Namespace) -> int:
+    try:
+        result = create_bundle(args.port_dir, args.output)
+    except (BundleError, OSError) as error:
+        print(f"cannot create Portable Run Bundle: {error}", file=sys.stderr)
+        return INVALID_INPUT.code
+    print(result)
+    return SUCCESS.code
+
+
+def merge_port_bundle(args: argparse.Namespace) -> int:
+    try:
+        result = merge_bundle(args.port_dir, args.bundle)
+    except (BundleError, OSError) as error:
+        print(f"cannot merge Portable Run Bundle: {error}", file=sys.stderr)
+        return INVALID_INPUT.code
+    print(result)
+    return SUCCESS.code
+
+
+def cleanup_port(args: argparse.Namespace) -> int:
+    port_dir = args.port_dir.resolve()
+    if not port_dir.is_dir():
+        print(f"Port directory does not exist: {port_dir}", file=sys.stderr)
+        return MISSING_INPUT.code
+    if not args.confirm:
+        print(f"retained {port_dir}; cleanup is explicit and no files were removed")
+        return SUCCESS.code
+    request_path = port_dir / "request.json"
+    if port_dir_is_unsafe(port_dir) or not request_path.is_file():
+        print("refusing to remove a directory that is not a safe Port", file=sys.stderr)
+        return INVALID_INPUT.code
+    shutil.rmtree(port_dir)
+    print(
+        f"removed private Port directory {port_dir}; "
+        "recovery requires a prior backup"
+    )
+    return SUCCESS.code
+
+
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog="apxinf-port")
     subcommands = command.add_subparsers(dest="command", required=True)
@@ -2553,6 +2594,29 @@ def parser() -> argparse.ArgumentParser:
     report = subcommands.add_parser("report", help="print the structured Port report")
     report.add_argument("--port-dir", type=Path, required=True)
     report.set_defaults(handler=show_report)
+
+    bundle = subcommands.add_parser("bundle", help="create a local Portable Run Bundle")
+    bundle.add_argument("--port-dir", type=Path, required=True)
+    bundle.add_argument("--output", type=Path, required=True)
+    bundle.set_defaults(handler=bundle_port)
+
+    merge = subcommands.add_parser(
+        "merge-bundle", help="validate and merge a Portable Run Bundle"
+    )
+    merge.add_argument("--port-dir", type=Path, required=True)
+    merge.add_argument("--bundle", type=Path, required=True)
+    merge.set_defaults(handler=merge_port_bundle)
+
+    cleanup = subcommands.add_parser(
+        "cleanup", help="show the explicit retention policy for a Port"
+    )
+    cleanup.add_argument("--port-dir", type=Path, required=True)
+    cleanup.add_argument(
+        "--confirm",
+        action="store_true",
+        help="irreversibly remove the complete private Port",
+    )
+    cleanup.set_defaults(handler=cleanup_port)
     return command
 
 
