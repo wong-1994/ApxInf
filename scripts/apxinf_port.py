@@ -22,30 +22,32 @@ from reference_adapter_template import (
     canonical_trace_document,
 )
 from porting_core import (
-    WORKFLOW_ARTIFACT_ENVELOPE_VERSION,
+    CORRECTNESS_FAILURE,
+    ENVIRONMENT_FAILURE,
     FamilyPack,
+    INVALID_INPUT,
+    MISSING_INPUT,
+    PortOutcome,
+    PortingCore,
+    REFERENCE_LOAD_FAILURE,
+    REFERENCE_TRACE_FAILURE,
+    SUCCESS,
+    UNSUPPORTED_SEMANTICS,
+    UNSUPPORTED_TARGET,
+    ArtifactStore,
+    VLA_FAMILY_PACK,
     select_family_pack,
     validate_requested_tuple,
 )
 
 
 REQUEST_SCHEMA_VERSION = "1.0"
-REPORT_SCHEMA_VERSION = "1.0"
 REFERENCE_ADAPTER_CONTRACT_VERSION = "1.0"
-SUPPORTED_TUPLES = (
-    ("thor", "bf16"),
-    ("thor", "fp8"),
-    ("orin", "bf16"),
-    ("orin", "int8_w8a8"),
-)
 TARGETS = {"thor", "orin"}
 PRECISIONS = {"bf16", "fp8", "int8_w8a8"}
 
 
-@dataclass(frozen=True)
-class IntakeOutcome:
-    code: int
-    category: str
+IntakeOutcome = PortOutcome
 
 
 @dataclass(frozen=True, order=True)
@@ -61,17 +63,6 @@ class ContractVersion:
         if len(parts) != 2 or not all(part.isdigit() for part in parts):
             return None
         return cls(*(int(part) for part in parts))
-
-
-SUCCESS = IntakeOutcome(0, "success")
-MISSING_INPUT = IntakeOutcome(2, "missing_input")
-INVALID_INPUT = IntakeOutcome(3, "invalid_input")
-UNSUPPORTED_TARGET = IntakeOutcome(4, "unsupported_target")
-ENVIRONMENT_FAILURE = IntakeOutcome(5, "environment_failure")
-REFERENCE_LOAD_FAILURE = IntakeOutcome(6, "reference_load_failure")
-REFERENCE_TRACE_FAILURE = IntakeOutcome(7, "reference_trace_failure")
-UNSUPPORTED_SEMANTICS = IntakeOutcome(8, "unsupported_semantics")
-CORRECTNESS_FAILURE = IntakeOutcome(9, "correctness_failure")
 
 
 def repository_root() -> Path:
@@ -252,140 +243,17 @@ def parse_finite_float(value: str) -> float:
     return parsed
 
 
-def tuple_states(requested: Any) -> list[dict[str, str]]:
-    if not isinstance(requested, list):
-        requested = []
-    selected = {
-        (item.get("target"), item.get("precision"))
-        for item in requested
-        if isinstance(item, dict)
-        and isinstance(item.get("target"), str)
-        and isinstance(item.get("precision"), str)
-    }
-    return [
-        {
-            "target": target,
-            "precision": precision,
-            "status": "requested" if (target, precision) in selected else "not_requested",
-        }
-        for target, precision in SUPPORTED_TUPLES
-    ]
-
-
-def successful_report(
-    request: dict[str, Any], warnings: list[dict[str, str]]
-) -> dict[str, Any]:
-    return {
-        "schema_version": REPORT_SCHEMA_VERSION,
-        "port_id": request["port_id"],
-        "request_schema_version": request["schema_version"],
-        "stages": {
-            "intake": "passed",
-            "preflight": "not_started",
-        },
-        "exit": {
-            "code": SUCCESS.code,
-            "category": SUCCESS.category,
-            "message": "Intake passed with warnings" if warnings else "Intake passed",
-        },
-        "request_declarations": {
-            "model_family": request["model_family"],
-            "source": request["source"],
-            "checkpoint": request["checkpoint"],
-            "reference": request["reference"],
-            "capability_contract_version": request["capability_contract_version"],
-            "representative_profiles": request["representative_profiles"],
-            "requested_targets": request["requested_targets"],
-            "correctness_thresholds": request["correctness_thresholds"],
-            "tuning_budgets": request["tuning_budgets"],
-            "environment": request.get("user_environment_declarations", {}),
-        },
-        "observed_environment": environment_facts(),
-        "reference_inspection": {
-            "status": "not_configured",
-            "adapter_contract_version": None,
-        },
-        "capability_assessment": {
-            "status": "not_configured",
-            "contract_version": request["capability_contract_version"],
-            "supported": 0,
-            "canonicalizable": 0,
-            "unsupported": 0,
-        },
-        "canonicalization": {
-            "status": "not_started",
-            "mode": None,
-            "cases": 0,
-            "comparisons": 0,
-            "failures": 0,
-        },
-        "target_precisions": tuple_states(request["requested_targets"]),
-        "issues": [],
-        "warnings": warnings,
-        "artifacts": {},
-    }
-
-
 def failed_report(
     request: dict[str, Any], outcome: IntakeOutcome, issues: list[dict[str, str]]
 ) -> dict[str, Any]:
-    port_id = request.get("port_id")
-    request_schema_version = request.get("schema_version")
-    return {
-        "schema_version": REPORT_SCHEMA_VERSION,
-        "port_id": port_id if isinstance(port_id, str) else None,
-        "request_schema_version": (
-            request_schema_version if isinstance(request_schema_version, str) else None
-        ),
-        "stages": {
-            "intake": "failed",
-            "preflight": "not_started",
-        },
-        "exit": {
-            "code": outcome.code,
-            "category": outcome.category,
-            "message": issues[0]["message"] if issues else "Intake failed",
-        },
-        "request_declarations": json_safe(
-            {
-                "source": request.get("source"),
-                "model_family": request.get("model_family"),
-                "checkpoint": request.get("checkpoint"),
-                "reference": request.get("reference"),
-                "capability_contract_version": request.get(
-                    "capability_contract_version"
-                ),
-                "representative_profiles": request.get("representative_profiles"),
-                "requested_targets": request.get("requested_targets"),
-                "correctness_thresholds": request.get("correctness_thresholds"),
-                "tuning_budgets": request.get("tuning_budgets"),
-                "environment": request.get("user_environment_declarations"),
-            }
-        ),
-        "observed_environment": environment_facts(),
-        "reference_inspection": {
-            "status": "not_configured",
-            "adapter_contract_version": None,
-        },
-        "capability_assessment": {
-            "status": "not_configured",
-            "contract_version": request.get("capability_contract_version"),
-            "supported": 0,
-            "canonicalizable": 0,
-            "unsupported": 0,
-        },
-        "canonicalization": {
-            "status": "not_started",
-            "mode": None,
-            "cases": 0,
-            "comparisons": 0,
-            "failures": 0,
-        },
-        "target_precisions": tuple_states(request.get("requested_targets", [])),
-        "issues": issues,
-        "warnings": [],
-        "artifacts": {},
-    }
+    safe_request = json_safe(request)
+    if not isinstance(safe_request.get("port_id"), str):
+        safe_request["port_id"] = None
+    if not isinstance(safe_request.get("schema_version"), str):
+        safe_request["schema_version"] = None
+    family = safe_request.get("model_family")
+    pack = select_family_pack(family) if family in {"vla"} else VLA_FAMILY_PACK
+    return PortingCore.failed(safe_request, pack, outcome, issues, environment_facts()).report
 
 
 def unsupported_target_issues(request: dict[str, Any]) -> list[dict[str, str]]:
@@ -887,41 +755,14 @@ def artifact_record(
     extra_upstream: dict[str, Path] | None = None,
 ) -> dict[str, Any]:
     pack = select_family_pack(request["model_family"])
-    try:
-        payload = (
-            json.loads(path.read_text(encoding="utf-8"))
-            if path.suffix == ".json"
-            else path.read_bytes()
-        )
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"invalid Workflow Artifact payload: {error}") from error
-    payload_schema = pack.validate_payload(path, payload)
-    upstream = {"request": file_sha256(port_dir / "request.json")}
-    if extra_upstream:
-        upstream.update(
-            {name: file_sha256(path) for name, path in extra_upstream.items()}
-        )
-    return {
-        "envelope_version": WORKFLOW_ARTIFACT_ENVELOPE_VERSION,
-        "family": pack.family,
-        "capability_contract_version": request["capability_contract_version"],
-        "stage": "preflight",
-        "payload_schema": payload_schema,
-        "path": path.relative_to(port_dir).as_posix(),
-        "fingerprints": {
-            "content_sha256": file_sha256(path),
-            "tool_sha256": {
-                "orchestrator": file_sha256(Path(__file__).resolve()),
-                "reference_adapter": file_sha256(
-                    port_dir / "private" / "reference_adapter.py"
-                ),
-            },
-            "source_sha256": request["source"]["sha256"],
-            "checkpoint_sha256": request["checkpoint"]["sha256"],
-            "environment_sha256": file_sha256(environment_path),
-            "upstream_sha256": upstream,
-        },
-    }
+    store = ArtifactStore(
+        port_dir,
+        request,
+        pack,
+        Path(__file__).resolve(),
+        port_dir / "private" / "reference_adapter.py",
+    )
+    return store.record(path, environment_path, extra_upstream)
 
 
 def value_sha256(value: Any) -> str:
@@ -2070,12 +1911,18 @@ def run_port(args: argparse.Namespace) -> int:
         print(invalid_provenance[0]["message"], file=sys.stderr)
         return INVALID_INPUT.code
 
-    report = successful_report(request, warnings)
+    core = PortingCore(request, family_pack, environment_facts(), warnings)
+    core.pass_stage("intake")
+    core.finish(
+        SUCCESS,
+        "Intake passed with warnings" if warnings else "Intake passed",
+    )
+    report = core.report
     if request["reference"].get("entrypoint") is not None:
         outcome, inspection_issues, artifacts = run_reference_inspection(
             port_dir, request
         )
-        report["artifacts"] = artifacts
+        core.add_artifacts(artifacts)
         report["reference_inspection"] = {
             "status": "passed" if outcome == SUCCESS else "failed",
             "adapter_contract_version": REFERENCE_ADAPTER_CONTRACT_VERSION,
@@ -2154,12 +2001,17 @@ def run_port(args: argparse.Namespace) -> int:
                     "capability_contract": contract_path,
                 },
             )
-            report["stages"]["preflight"] = "running"
+            core.start_stage("preflight")
             report["capability_assessment"] = {
                 "status": "passed",
                 "contract_version": contract["contract_version"],
                 **classification["summary"],
             }
+            core.set_gate(
+                "capability_contract",
+                "passed",
+                classification["summary"],
+            )
             report["exit"]["message"] = "Preflight capability assessment passed"
             if classification["summary"]["unsupported"]:
                 gaps = [
@@ -2191,6 +2043,7 @@ def run_port(args: argparse.Namespace) -> int:
                     },
                 )
                 report["stages"]["preflight"] = "blocked"
+                core.set_gate("capability_contract", "blocked", classification["summary"])
                 report["capability_assessment"]["status"] = "blocked"
                 report["exit"] = {
                     "code": UNSUPPORTED_SEMANTICS.code,
@@ -2273,6 +2126,7 @@ def run_port(args: argparse.Namespace) -> int:
                     "comparisons": 0,
                     "failures": 1,
                 }
+                core.set_gate("canonical_equivalence", "blocked", {"failures": 1})
                 report["stages"]["preflight"] = "blocked"
                 report["exit"] = {
                     "code": CORRECTNESS_FAILURE.code,
@@ -2303,6 +2157,7 @@ def run_port(args: argparse.Namespace) -> int:
                     "mode": "direct",
                     **summary,
                 }
+                core.set_gate("canonical_equivalence", "passed", summary)
                 report["exit"]["message"] = "Preflight canonical trace passed"
             else:
                 environment_path = (
@@ -2330,6 +2185,7 @@ def run_port(args: argparse.Namespace) -> int:
                     **summary,
                 }
                 if canonical_outcome != SUCCESS:
+                    core.set_gate("canonical_equivalence", "blocked", summary)
                     if canonical_gaps:
                         gap = {
                             "schema_version": "1.0",
@@ -2376,6 +2232,7 @@ def run_port(args: argparse.Namespace) -> int:
                     write_json(port_dir / "report.json", report)
                     print(report["exit"]["message"], file=sys.stderr)
                     return canonical_outcome.code
+                core.set_gate("canonical_equivalence", "passed", summary)
                 report["exit"]["message"] = "Preflight canonical equivalence passed"
         else:
             report["exit"] = {

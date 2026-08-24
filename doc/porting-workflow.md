@@ -124,6 +124,10 @@ unsupported, and Reference Adapter failures. The report keeps
 `request_declarations` separate from machine-observed `observed_environment`
 facts, records omitted facts under `warnings`, and records every supported tuple
 as either `requested` or `not_requested`.
+The family-neutral Porting Core owns these lifecycle states, stable exit
+categories, requested-tuple states, and named Gate results. Family Packs return
+semantic evidence to those Gates without teaching the Core about actions,
+logits, media, caches, or schedules.
 
 When source inspection is configured, `run` classifies every declared
 capability as `supported`, `canonicalizable`, or `unsupported`. Unknown,

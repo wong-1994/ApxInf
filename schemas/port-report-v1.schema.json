@@ -9,6 +9,7 @@
     "port_id",
     "request_schema_version",
     "stages",
+    "gates",
     "exit",
     "request_declarations",
     "observed_environment",
@@ -30,6 +31,18 @@
       "properties": {
         "intake": {"enum": ["not_started", "running", "passed", "failed", "blocked", "stale", "skipped"]},
         "preflight": {"enum": ["not_started", "running", "passed", "failed", "blocked", "stale", "skipped"]}
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "evidence"],
+        "properties": {
+          "status": {"enum": ["not_started", "running", "passed", "failed", "blocked", "stale", "skipped"]},
+          "evidence": {"type": "object"}
+        }
       }
     },
     "exit": {
@@ -116,50 +129,7 @@
     },
     "artifacts": {
       "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["envelope_version", "family", "capability_contract_version", "stage", "payload_schema", "path", "fingerprints"],
-        "properties": {
-          "envelope_version": {"const": "1.0"},
-          "family": {"enum": ["llm", "vlm", "vla"]},
-          "capability_contract_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
-          "stage": {"type": "string", "minLength": 1},
-          "payload_schema": {"type": "string", "minLength": 1},
-          "path": {"type": "string", "minLength": 1},
-          "fingerprints": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "content_sha256",
-              "tool_sha256",
-              "source_sha256",
-              "checkpoint_sha256",
-              "environment_sha256",
-              "upstream_sha256"
-            ],
-            "properties": {
-              "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "tool_sha256": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["orchestrator", "reference_adapter"],
-                "properties": {
-                  "orchestrator": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                  "reference_adapter": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-                }
-              },
-              "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "checkpoint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "environment_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "upstream_sha256": {
-                "type": "object",
-                "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-              }
-            }
-          }
-        }
-      }
+      "additionalProperties": {"$ref": "workflow-artifact-envelope-v1.schema.json"}
     }
   }
 }
