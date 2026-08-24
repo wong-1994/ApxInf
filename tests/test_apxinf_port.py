@@ -35,6 +35,8 @@ class PortIntakeTest(unittest.TestCase):
 
         result = self.run_port(
             "init",
+            "--family",
+            "vla",
             "--source",
             str(source),
             "--source-revision",
@@ -46,6 +48,98 @@ class PortIntakeTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         return port
+
+    def test_init_requires_an_explicit_registered_family(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            missing = self.run_port("init", "--port-dir", str(root / "missing"))
+            self.assertNotEqual(missing.returncode, 0)
+
+            unknown = self.run_port(
+                "init", "--family", "robot", "--port-dir", str(root / "unknown")
+            )
+            self.assertEqual(unknown.returncode, 3)
+            self.assertFalse((root / "unknown").exists())
+
+            for family in ("llm", "vlm"):
+                unavailable = self.run_port(
+                    "init",
+                    "--family",
+                    family,
+                    "--port-dir",
+                    str(root / family),
+                )
+                self.assertEqual(unavailable.returncode, 3)
+                self.assertFalse((root / family).exists())
+
+    def test_vla_request_and_artifacts_pin_the_family_pack(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            port, _ = self.initialize_inspectable_port(root)
+            request = json.loads((port / "request.json").read_text(encoding="utf-8"))
+            self.assertEqual(request["model_family"], "vla")
+            self.assertEqual(request["capability_contract_version"], "1.0")
+
+            result = self.run_port("run", "--port-dir", str(port))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            for artifact in report["artifacts"].values():
+                self.assertEqual(artifact["envelope_version"], "1.0")
+                self.assertEqual(artifact["family"], "vla")
+                self.assertEqual(artifact["capability_contract_version"], "1.0")
+                self.assertTrue(artifact["payload_schema"])
+
+    def test_mismatched_family_request_fails_before_reference_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            port, source = self.initialize_inspectable_port(root)
+            marker = source / "executed"
+            reference = source / "reference_pkg" / "reference_impl.py"
+            reference.write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).write_text('yes')\n"
+                + reference.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            request_path = port / "request.json"
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            request["model_family"] = "llm"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+
+            result = self.run_port("run", "--port-dir", str(port))
+            self.assertEqual(result.returncode, 3)
+            self.assertFalse(marker.exists())
+
+    def test_mismatched_family_contract_fails_before_reference_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            port, source = self.initialize_inspectable_port(root)
+            marker = source / "executed"
+            reference = source / "reference_pkg" / "reference_impl.py"
+            reference.write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).write_text('yes')\n"
+                + reference.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            contract = json.loads(
+                (ROOT / "contracts/vla-capability-contract-1.0.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            contract["family"] = "text_generation_llm"
+            contract_path = root / "llm-contract-1.0.json"
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+
+            result = self.run_port(
+                "run",
+                "--port-dir",
+                str(port),
+                "--capability-contract",
+                str(contract_path),
+            )
+            self.assertEqual(result.returncode, 3)
+            self.assertFalse(marker.exists())
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertIn("family", report["issues"][0]["message"])
 
     def complete_request(
         self, port: Path, target: str = "thor", precision: str = "bf16"
@@ -537,6 +631,8 @@ if SCENARIO == "missing_description":
         checkpoint.write_bytes(b"checkpoint bytes")
         result = self.run_port(
             "init",
+            "--family",
+            "vla",
             "--source",
             str(source),
             "--source-revision",
@@ -1755,6 +1851,8 @@ if SCENARIO == "missing_description":
 
             result = self.run_port(
                 "init",
+                "--family",
+                "vla",
                 "--source",
                 str(source),
                 "--source-revision",
@@ -2016,7 +2114,9 @@ if SCENARIO == "missing_description":
         with tempfile.TemporaryDirectory() as temporary:
             port = Path(temporary) / "private-port"
 
-            result = self.run_port("init", "--port-dir", str(port))
+            result = self.run_port(
+                "init", "--family", "vla", "--port-dir", str(port)
+            )
 
             self.assertEqual(result.returncode, 0, result.stderr)
             request = json.loads((port / "request.json").read_text(encoding="utf-8"))

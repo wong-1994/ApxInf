@@ -21,24 +21,17 @@ from reference_adapter_template import (
     canonical_evidence_document,
     canonical_trace_document,
 )
+from porting_core import (
+    WORKFLOW_ARTIFACT_ENVELOPE_VERSION,
+    FamilyPack,
+    select_family_pack,
+    validate_requested_tuple,
+)
 
 
 REQUEST_SCHEMA_VERSION = "1.0"
 REPORT_SCHEMA_VERSION = "1.0"
 REFERENCE_ADAPTER_CONTRACT_VERSION = "1.0"
-DEFAULT_CAPABILITY_CONTRACT_VERSION = "1.0"
-REQUIRED_CAPABILITIES = {
-    "shape_profiles",
-    "attention",
-    "masks",
-    "position_encodings",
-    "normalization",
-    "activations",
-    "conditioning",
-    "action_heads",
-    "schedules",
-    "control_flow",
-}
 SUPPORTED_TUPLES = (
     ("thor", "bf16"),
     ("thor", "fp8"),
@@ -142,6 +135,11 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def initialize(args: argparse.Namespace) -> int:
+    try:
+        family_pack = select_family_pack(args.family)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return INVALID_INPUT.code
     port_dir = args.port_dir.resolve()
     source = args.source.resolve() if args.source is not None else None
     checkpoint = args.checkpoint.resolve() if args.checkpoint is not None else None
@@ -182,6 +180,7 @@ def initialize(args: argparse.Namespace) -> int:
     request = {
         "schema_version": REQUEST_SCHEMA_VERSION,
         "port_id": f"{source_name}-{revision_suffix}",
+        "model_family": family_pack.family,
         "source": {
             "path": str(source) if source is not None else None,
             "revision": source_revision,
@@ -196,7 +195,7 @@ def initialize(args: argparse.Namespace) -> int:
             "dependency_lock": args.dependency_lock,
             "network_access": False,
         },
-        "capability_contract_version": DEFAULT_CAPABILITY_CONTRACT_VERSION,
+        "capability_contract_version": family_pack.default_contract_version,
         "representative_profiles": [{"name": None, "inputs": {}}],
         "requested_targets": [
             {
@@ -290,6 +289,7 @@ def successful_report(
             "message": "Intake passed with warnings" if warnings else "Intake passed",
         },
         "request_declarations": {
+            "model_family": request["model_family"],
             "source": request["source"],
             "checkpoint": request["checkpoint"],
             "reference": request["reference"],
@@ -349,6 +349,7 @@ def failed_report(
         "request_declarations": json_safe(
             {
                 "source": request.get("source"),
+                "model_family": request.get("model_family"),
                 "checkpoint": request.get("checkpoint"),
                 "reference": request.get("reference"),
                 "capability_contract_version": request.get(
@@ -389,15 +390,18 @@ def failed_report(
 
 def unsupported_target_issues(request: dict[str, Any]) -> list[dict[str, str]]:
     issues = []
+    try:
+        pack = select_family_pack(request.get("model_family"))
+    except ValueError as error:
+        return [{"path": "model_family", "message": str(error)}]
     for index, item in enumerate(request.get("requested_targets", [])):
         pair = (item.get("target"), item.get("precision"))
         if None in pair:
             continue
-        if pair not in SUPPORTED_TUPLES:
-            if pair == ("orin", "fp8"):
-                message = "orin does not support fp8; use bf16 or int8_w8a8"
-            else:
-                message = f"unsupported target/precision tuple: {pair[0]}/{pair[1]}"
+        try:
+            validate_requested_tuple(pack, pair[0], pair[1])
+        except ValueError as error:
+            message = str(error)
             issues.append({"path": f"requested_targets[{index}]", "message": message})
     return issues
 
@@ -440,6 +444,7 @@ def schema_issues(request: Any) -> list[dict[str, str]]:
     allowed_fields = {
         "schema_version",
         "port_id",
+        "model_family",
         "source",
         "checkpoint",
         "reference",
@@ -450,7 +455,9 @@ def schema_issues(request: Any) -> list[dict[str, str]]:
         "tuning_budgets",
         "user_environment_declarations",
     }
-    required_fields = {"schema_version", "port_id", "capability_contract_version"}
+    required_fields = {
+        "schema_version", "port_id", "model_family", "capability_contract_version"
+    }
     for field in sorted(required_fields - request.keys()):
         issues.append({"path": field, "message": "field is required by the request schema"})
     add_unknown_field_issues(
@@ -472,6 +479,11 @@ def schema_issues(request: Any) -> list[dict[str, str]]:
     for field in ("port_id",):
         if field in request and not isinstance(request[field], str):
             issues.append({"path": field, "message": "must be a string"})
+    if "model_family" in request:
+        try:
+            select_family_pack(request["model_family"])
+        except ValueError as error:
+            issues.append({"path": "model_family", "message": str(error)})
     contract_version = request.get("capability_contract_version")
     if "capability_contract_version" in request and (
         ContractVersion.parse(contract_version) is None
@@ -877,12 +889,27 @@ def artifact_record(
     environment_path: Path,
     extra_upstream: dict[str, Path] | None = None,
 ) -> dict[str, Any]:
+    pack = select_family_pack(request["model_family"])
+    try:
+        payload = (
+            json.loads(path.read_text(encoding="utf-8"))
+            if path.suffix == ".json"
+            else path.read_bytes()
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid Workflow Artifact payload: {error}") from error
+    payload_schema = pack.validate_payload(path, payload)
     upstream = {"request": file_sha256(port_dir / "request.json")}
     if extra_upstream:
         upstream.update(
             {name: file_sha256(path) for name, path in extra_upstream.items()}
         )
     return {
+        "envelope_version": WORKFLOW_ARTIFACT_ENVELOPE_VERSION,
+        "family": pack.family,
+        "capability_contract_version": request["capability_contract_version"],
+        "stage": "preflight",
+        "payload_schema": payload_schema,
         "path": path.relative_to(port_dir).as_posix(),
         "fingerprints": {
             "content_sha256": file_sha256(path),
@@ -1081,7 +1108,10 @@ def validate_contract_delta(
             )
 
 
-def load_capability_contract(path: Path, expected_version: str) -> dict[str, Any]:
+def load_capability_contract(
+    path: Path, expected_version: str, pack: FamilyPack | None = None
+) -> dict[str, Any]:
+    pack = pack or select_family_pack("vla")
     contract = json.loads(
         path.read_text(encoding="utf-8"),
         parse_constant=reject_non_json_number,
@@ -1100,8 +1130,10 @@ def load_capability_contract(path: Path, expected_version: str) -> dict[str, Any
         raise ValueError("capability contract has missing or unknown top-level fields")
     if contract.get("schema_version") != "1.0":
         raise ValueError("capability contract schema_version must equal 1.0")
-    if contract.get("family") != "canonical_transformer_vla":
-        raise ValueError("capability contract family must be canonical_transformer_vla")
+    if contract.get("family") != pack.contract_family:
+        raise ValueError(
+            f"capability contract family must be {pack.contract_family}"
+        )
     if contract.get("contract_version") != expected_version:
         raise ValueError(
             "capability contract version does not match the exact request pin"
@@ -1164,7 +1196,7 @@ def load_capability_contract(path: Path, expected_version: str) -> dict[str, Any
     capabilities = contract.get("capabilities")
     if not isinstance(capabilities, dict) or not capabilities:
         raise ValueError("capability contract must declare capabilities")
-    missing_capabilities = sorted(REQUIRED_CAPABILITIES - capabilities.keys())
+    missing_capabilities = sorted(pack.required_capabilities - capabilities.keys())
     if missing_capabilities:
         raise ValueError(
             "capability contract is missing required capabilities: "
@@ -1204,7 +1236,7 @@ def load_capability_contract(path: Path, expected_version: str) -> dict[str, Any
             raise ValueError(f"capability {name} required must be boolean")
         if rule.get("cardinality") != "exactly_one":
             raise ValueError(f"capability {name} cardinality must be exactly_one")
-        if name in REQUIRED_CAPABILITIES and not rule["required"]:
+        if name in pack.required_capabilities and not rule["required"]:
             raise ValueError(f"core capability {name} must remain required")
     for change in changes:
         capability = change["capability"]
@@ -1993,6 +2025,30 @@ def run_port(args: argparse.Namespace) -> int:
         print(issues[0]["message"], file=sys.stderr)
         return UNSUPPORTED_TARGET.code
 
+    family_pack = select_family_pack(request["model_family"])
+    contract_path = (
+        args.capability_contract.resolve()
+        if args.capability_contract is not None
+        else default_capability_contract(request["capability_contract_version"])
+    )
+    contract = None
+    if request["reference"].get("entrypoint") is not None:
+        try:
+            contract = load_capability_contract(
+                contract_path,
+                request["capability_contract_version"],
+                family_pack,
+            )
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            issue = {
+                "path": "capability_contract",
+                "message": f"could not evaluate capability contract: {error}",
+            }
+            report = failed_report(request, INVALID_INPUT, [issue])
+            write_json(port_dir / "report.json", report)
+            print(issue["message"], file=sys.stderr)
+            return INVALID_INPUT.code
+
     try:
         missing_provenance, invalid_provenance = provenance_issues(request)
     except OSError as error:
@@ -2034,18 +2090,9 @@ def run_port(args: argparse.Namespace) -> int:
                 else "Intake and source inspection passed"
             )
             inventory_path = port_dir / artifacts["source_inventory"]["path"]
-            contract_path = (
-                args.capability_contract.resolve()
-                if args.capability_contract is not None
-                else default_capability_contract(
-                    request["capability_contract_version"]
-                )
-            )
             try:
                 inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
-                contract = load_capability_contract(
-                    contract_path, request["capability_contract_version"]
-                )
+                assert contract is not None
                 classification = classify_capabilities(inventory, contract)
                 classification_path = (
                     port_dir / "private" / "capability_classification.json"
@@ -2364,6 +2411,7 @@ def parser() -> argparse.ArgumentParser:
     subcommands = command.add_subparsers(dest="command", required=True)
 
     init = subcommands.add_parser("init", help="create a private Port request draft")
+    init.add_argument("--family", required=True)
     init.add_argument("--source", type=Path)
     init.add_argument("--source-revision")
     init.add_argument("--checkpoint", type=Path)

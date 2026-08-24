@@ -1,7 +1,8 @@
-# VLA Porting Workflow
+# Model Porting Workflow
 
-Intake, trusted-source inspection, Capability Contract classification, and
-Canonical VLA equivalence are available through one command surface:
+The family-neutral Porting Core exposes Intake, trusted-source inspection,
+Capability Contract classification, and Canonical equivalence through one
+command surface:
 `scripts/apxinf_port.py`. It creates and validates private Port artifacts
 without modifying the ApxInf source tree. Source-model code runs only when a
 Reference Adapter entrypoint and dependency lock are explicitly configured.
@@ -13,8 +14,14 @@ paths and may later contain reference evidence.
 
 ```bash
 python3 scripts/apxinf_port.py init \
+  --family vla \
   --port-dir /private/path/my-port
 ```
+
+Every request explicitly selects `llm`, `vlm`, or `vla`. The selected Family
+Pack and its exact Capability Contract version are pinned before trusted source
+code can execute. The VLA Family Pack is the first registered implementation;
+LLM and VLM requests are recognized but rejected until their packs are added.
 
 `--source`, `--source-revision`, and `--checkpoint` may be supplied during
 initialization or left blank in the draft. When paths are supplied,
@@ -59,6 +66,7 @@ Both paths below are relative to the trusted source root:
 
 ```bash
 python3 scripts/apxinf_port.py init \
+  --family vla \
   --source /trusted/model-source \
   --source-revision 0123456789abcdef \
   --checkpoint /trusted/checkpoints/model.ckpt \
@@ -148,8 +156,10 @@ are inside either ApxInf or the trusted source checkout, so adapters and capture
 inputs cannot enter a proposed public commit. Tensor captures contain f32 data
 with explicit source dtype and shape metadata. Report artifact records carry
 content, workflow-tool, source, checkpoint, environment, and upstream-request
-fingerprints. Dependency-aware stale retention and resume are added by the later
-workflow-resume stage.
+fingerprints through a versioned common envelope that also pins the selected
+Family Pack, Capability Contract, stage, and family payload schema. The Family
+Pack validates each payload before its envelope is emitted. Dependency-aware
+stale retention and resume are added by the later workflow-resume stage.
 
 | Exit code | Category | Meaning |
 | ---: | --- | --- |
@@ -166,6 +176,8 @@ workflow-resume stage.
 The versioned contracts are
 [`schemas/port-request-v1.schema.json`](../schemas/port-request-v1.schema.json)
 and [`schemas/port-report-v1.schema.json`](../schemas/port-report-v1.schema.json).
+Artifact records use
+[`schemas/workflow-artifact-envelope-v1.schema.json`](../schemas/workflow-artifact-envelope-v1.schema.json).
 Reference inspection adds
 [`schemas/reference-inventory-v1.schema.json`](../schemas/reference-inventory-v1.schema.json),
 [`schemas/reference-environment-v1.schema.json`](../schemas/reference-environment-v1.schema.json),
