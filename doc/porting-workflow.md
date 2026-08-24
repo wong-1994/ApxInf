@@ -248,3 +248,19 @@ build, CUDA version, and every recorded library version match. After tactics
 are installed, the caller must rerun the selected Family Pack's complete
 inference correctness check. Version 1 intentionally rejects non-GEMM tunable
 objects.
+
+## VLA Thor FP8 qualification
+
+`scripts/vla_fp8_qualification.py` qualifies only the tuples explicitly
+requested by a VLA Port. A Thor FP8 request must identify its weights, scales,
+and calibration inputs by SHA-256 and provide family-attributed kernel coverage
+and tuning evidence. Tactics must match the validated Thor device, SM,
+multiprocessor, kernel-build, CUDA, and library fingerprint.
+
+The Gate machine-evaluates every declared VLA stage plus normalized and
+deployable actions. User thresholds may be stricter than the VLA FP8 maxima,
+but cannot weaken them. An FP8-only Port has no BF16 implementation or relative
+Gate. When Thor BF16 is also requested, the declared minimum improvement is
+evaluated against BF16 evidence from the identical device fingerprint. Public
+support output contains only tuples that pass all applicable Gates; Orin FP8 is
+rejected before evidence evaluation and can never be advertised.
