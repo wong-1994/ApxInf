@@ -100,7 +100,7 @@
     "tensor": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "shape", "dtype", "requires_grad"],
+      "required": ["name", "shape", "dtype", "requires_grad", "data_sha256"],
       "properties": {
         "name": {"type": "string", "minLength": 1},
         "shape": {
@@ -108,7 +108,8 @@
           "items": {"type": "integer", "minimum": 0}
         },
         "dtype": {"type": "string", "minLength": 1},
-        "requires_grad": {"type": "boolean"}
+        "requires_grad": {"type": "boolean"},
+        "data_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       }
     },
     "nameGroup": {

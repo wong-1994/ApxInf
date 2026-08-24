@@ -98,6 +98,14 @@ class ReferenceAdapter:
             raise TypeError("canonicalization_manifest() must return an object")
         return manifest
 
+    def canonical_parameter_values(
+        self, model: Any, mapping: dict[str, Any]
+    ) -> dict[str, Any]:
+        values = self._call("canonical_parameter_values", model, mapping)
+        if not isinstance(values, dict):
+            raise TypeError("canonical_parameter_values() must return an object")
+        return values
+
     def describe(self) -> dict[str, Any]:
         description = self._call("describe")
         if not isinstance(description, dict):
@@ -337,11 +345,16 @@ def storage_key(value: Any) -> tuple[str, int]:
 
 
 def tensor_record(name: str, value: Any) -> dict[str, Any]:
+    captured = json_capture(value)
+    encoded = json.dumps(
+        captured, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
     return {
         "name": name,
         "shape": tensor_shape(value) or [],
         "dtype": str(getattr(value, "dtype", type(value).__name__)),
         "requires_grad": bool(getattr(value, "requires_grad", False)),
+        "data_sha256": hashlib.sha256(encoded).hexdigest(),
     }
 
 

@@ -35,14 +35,6 @@ def load_reference_support() -> Any:
     return module
 
 
-def write_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-
-
 def require_string_list(value: Any, path: str, *, nonempty: bool = False) -> list[str]:
     if not isinstance(value, list) or (nonempty and not value) or any(
         not isinstance(item, str) or not item for item in value
@@ -57,6 +49,7 @@ def validate_manifest(
     inventory: dict[str, Any],
     classification: dict[str, Any],
     canonical_parameters: list[dict[str, Any]],
+    expected_canonical_parameters: list[dict[str, Any]],
     canonical_aliases: list[list[str]],
     canonical_tied_weights: list[list[str]],
 ) -> None:
@@ -127,6 +120,9 @@ def validate_manifest(
     target_parameters = {
         parameter["name"]: parameter for parameter in canonical_parameters
     }
+    expected_target_parameters = {
+        parameter["name"]: parameter for parameter in expected_canonical_parameters
+    }
     for index, mapping in enumerate(mappings):
         path = f"parameter_mapping[{index}]"
         if not isinstance(mapping, dict) or set(mapping) != {
@@ -166,6 +162,19 @@ def validate_manifest(
         target_dtypes = {target_parameters[name]["dtype"] for name in targets}
         if source_dtypes != target_dtypes:
             raise ValueError(f"{path} does not preserve the mapped parameter dtype")
+        for target in targets:
+            expected = expected_target_parameters.get(target)
+            actual = target_parameters[target]
+            if expected is None:
+                raise ValueError(f"{path} does not produce canonical parameter {target}")
+            if (
+                expected["shape"] != actual["shape"]
+                or expected["dtype"] != actual["dtype"]
+                or expected["data_sha256"] != actual["data_sha256"]
+            ):
+                raise ValueError(
+                    f"{path} canonical parameter value does not match {target}"
+                )
     expected_sources = list(source_parameters)
     if len(mapped_sources) != len(set(mapped_sources)) or set(mapped_sources) != set(
         expected_sources
@@ -215,6 +224,61 @@ def validate_manifest(
     )
     require_preserved_groups(
         "tied weights", inventory["tied_weights"], canonical_tied_weights
+    )
+
+    def projected_groups(source_groups: list[list[str]]) -> set[frozenset[str]]:
+        return {
+            frozenset(
+                target
+                for source in group
+                if source in source_targets
+                for target in source_targets[source]
+            )
+            for group in source_groups
+            if len(group) > 1
+        }
+
+    structural_ids = {
+        transformation["id"]
+        for transformation in transformations
+        if transformation["category"] in {"split", "concatenation", "packing"}
+    }
+    target_mapping = {
+        target: mapping
+        for mapping in mappings
+        for target in mapping["targets"]
+    }
+
+    def require_explained_relation_change(
+        kind: str,
+        expected_groups: set[frozenset[str]],
+        actual_groups: set[frozenset[str]],
+    ) -> None:
+        changed_targets = set().union(*(expected_groups ^ actual_groups))
+        unexplained = sorted(
+            target
+            for target in changed_targets
+            if target not in target_mapping
+            or not (
+                set(target_mapping[target]["transformation_ids"])
+                & structural_ids
+            )
+        )
+        if unexplained:
+            raise ValueError(
+                f"canonical {kind} changes require split, concatenation, or "
+                f"packing evidence for targets: {unexplained}"
+            )
+
+    require_explained_relation_change(
+        "aliases",
+        projected_groups([group for group in source_aliases if len(group) > 1]),
+        {frozenset(group) for group in canonical_aliases},
+    )
+    require_explained_relation_change(
+        "tied weights",
+        projected_groups(inventory["tied_weights"]),
+        {frozenset(group) for group in canonical_tied_weights},
     )
 
     expected_rewrites = {
@@ -346,6 +410,8 @@ def validate_manifest(
         raise ValueError("preprocessing mappings cannot duplicate source paths")
     if len(preprocessing_targets) != len(set(preprocessing_targets)):
         raise ValueError("preprocessing mappings cannot duplicate canonical paths")
+    if "inputs" not in preprocessing_sources or "inputs" not in preprocessing_targets:
+        raise ValueError("preprocessing mappings must cover the complete inputs boundary")
 
 
 def compare_values(
@@ -459,6 +525,20 @@ def verify(args: argparse.Namespace) -> None:
             support.tensor_record(name, value)
             for name, value in canonical_parameter_values
         ]
+        expected_canonical_parameters = []
+        for mapping in manifest["parameter_mapping"]:
+            try:
+                mapped_values = adapter.canonical_parameter_values(
+                    canonical_source_model, mapping
+                )
+            except KeyError as error:
+                raise ValueError(
+                    f"parameter mapping references an unknown canonical parameter: {error}"
+                ) from error
+            for name, value in mapped_values.items():
+                expected_canonical_parameters.append(
+                    support.tensor_record(name, value)
+                )
         canonical_aliases = support.alias_groups(canonical_parameter_values)
         canonical_tied_weights = support.tied_weight_groups(
             canonical_parameter_values
@@ -468,6 +548,7 @@ def verify(args: argparse.Namespace) -> None:
             inventory,
             classification,
             canonical_parameters,
+            expected_canonical_parameters,
             canonical_aliases,
             canonical_tied_weights,
         )
@@ -481,10 +562,15 @@ def verify(args: argparse.Namespace) -> None:
                 adapter.set_seed(seed)
                 source_inputs = adapter.preprocess(profile)
                 source_output = adapter.infer(source_model, source_inputs)
+                source_output_json = support.json_capture(source_output)
                 source_intermediates = adapter.capture_intermediates(
                     source_model, source_inputs
                 )
+                source_intermediates_json = support.json_capture(
+                    source_intermediates
+                )
                 source_postprocessed = adapter.postprocess(source_output)
+                source_postprocessed_json = support.json_capture(source_postprocessed)
 
                 adapter.set_seed(seed)
                 transform_inputs = adapter.preprocess(profile)
@@ -494,29 +580,26 @@ def verify(args: argparse.Namespace) -> None:
 
                 adapter.set_seed(seed)
                 canonical_inputs = adapter.canonical_preprocess(profile)
+                canonical_inputs_json = support.json_capture(canonical_inputs)
                 canonical_output = adapter.canonical_infer(
                     canonical_model, canonical_inputs
                 )
+                canonical_output_json = support.json_capture(canonical_output)
                 canonical_intermediates = adapter.canonical_capture_intermediates(
                     canonical_model, canonical_inputs
+                )
+                canonical_intermediates_json = support.json_capture(
+                    canonical_intermediates
                 )
                 canonical_postprocessed = adapter.canonical_postprocess(
                     canonical_output
                 )
+                canonical_postprocessed_json = support.json_capture(
+                    canonical_postprocessed
+                )
 
                 expected_canonical_inputs_json = support.json_capture(
                     expected_canonical_inputs
-                )
-                canonical_inputs_json = support.json_capture(canonical_inputs)
-                source_intermediates_json = support.json_capture(source_intermediates)
-                canonical_intermediates_json = support.json_capture(
-                    canonical_intermediates
-                )
-                source_output_json = support.json_capture(source_output)
-                canonical_output_json = support.json_capture(canonical_output)
-                source_postprocessed_json = support.json_capture(source_postprocessed)
-                canonical_postprocessed_json = support.json_capture(
-                    canonical_postprocessed
                 )
                 comparisons = [
                     comparison(
@@ -610,10 +693,10 @@ def verify(args: argparse.Namespace) -> None:
             },
         )
         failures = evidence["summary"]["failures"]
-        write_json(args.trace, trace)
-        write_json(args.evidence, evidence)
+        support.write_json(args.trace, trace)
+        support.write_json(args.evidence, evidence)
         if failures:
-            write_json(
+            support.write_json(
                 args.result,
                 {
                     "status": "gap",
@@ -633,12 +716,12 @@ def verify(args: argparse.Namespace) -> None:
                 },
             )
         else:
-            write_json(
+            support.write_json(
                 args.result,
                 {"status": "success", "summary": evidence["summary"]},
             )
     except Exception as error:
-        write_json(
+        support.write_json(
             args.result,
             {
                 "status": "gap",

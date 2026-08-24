@@ -258,6 +258,7 @@ def describe():
     elif SCENARIO in {
         "canonicalizable_attention",
         "canonical_mismatch",
+        "canonical_mutating_postprocess",
         "canonical_intermediate_mismatch",
         "canonical_preprocess_mismatch",
         "canonical_preprocess_rewrite",
@@ -265,6 +266,7 @@ def describe():
         "canonical_shape_mismatch",
         "canonical_unmapped_parameter",
         "canonical_unknown_target",
+        "canonical_wrong_weight",
         "canonical_broken_tie",
         "canonical_missing_assumption",
         "canonical_state_gap",
@@ -342,6 +344,8 @@ def canonical_infer(model, inputs):
         return {"actions": Tensor((1, 2), [[9.0, 2.0]])}
     if SCENARIO == "canonical_shape_mismatch":
         return {"actions": Tensor((1,), [inputs["noise"].value[0][0]])}
+    if SCENARIO == "canonical_mutating_postprocess":
+        return {"actions": Tensor((1, 2), [[9.0, 2.0]])}
     return infer(model, inputs)
 
 
@@ -358,6 +362,9 @@ def canonical_capture_intermediates(model, inputs):
 
 
 def canonical_postprocess(output):
+    if SCENARIO == "canonical_mutating_postprocess":
+        output["actions"].value = [[0.0, 0.0]]
+        return output
     if SCENARIO == "canonical_shape_mismatch":
         return {"actions": Tensor((1,), [output["actions"].value[0]])}
     return postprocess(output)
@@ -469,8 +476,21 @@ def canonicalization_manifest():
             }
         )
     elif SCENARIO == "canonical_bad_preprocess_path":
-        manifest["preprocessing_mapping"][0]["source"] = "inputs.missing"
+        manifest["preprocessing_mapping"].append(
+            {
+                "source": "inputs.missing",
+                "canonical": "inputs.missing",
+                "transformation_ids": [],
+            }
+        )
     return manifest
+
+
+def canonical_parameter_values(model, mapping):
+    values = dict(model.named_parameters(remove_duplicate=False))
+    if SCENARIO == "canonical_wrong_weight" and mapping["targets"][0] == "encoder.weight":
+        return {"encoder.weight": Tensor((2, 2), 99.0)}
+    return {target: values[target] for target in mapping["targets"]}
 
 
 if SCENARIO == "missing_description":
@@ -1090,6 +1110,7 @@ if SCENARIO == "missing_description":
         cases = {
             "canonical_unmapped_parameter": "unmapped",
             "canonical_unknown_target": "canonical parameter",
+            "canonical_wrong_weight": "value",
             "canonical_broken_tie": "tied",
             "canonical_bad_preprocess_path": "does not exist",
             "canonical_missing_assumption": "algebraic assumptions",
@@ -1141,6 +1162,10 @@ if SCENARIO == "missing_description":
                 "intermediates",
             },
             "canonical_shape_mismatch": {
+                "normalized_actions",
+                "postprocessed_actions",
+            },
+            "canonical_mutating_postprocess": {
                 "normalized_actions",
                 "postprocessed_actions",
             },
