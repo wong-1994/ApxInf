@@ -271,6 +271,7 @@ def describe():
         "canonical_unmapped_parameter",
         "canonical_unknown_target",
         "canonical_wrong_weight",
+        "canonical_missing_parameter_transform",
         "canonical_broken_tie",
         "canonical_missing_assumption",
         "canonical_state_gap",
@@ -461,6 +462,17 @@ def canonicalization_manifest():
         manifest["parameter_mapping"][0]["targets"] = ["missing.weight"]
     elif SCENARIO == "canonical_missing_assumption":
         manifest["transformations"][0]["assumptions"] = []
+    elif SCENARIO == "canonical_missing_parameter_transform":
+        manifest["parameter_mapping"][0]["targets"] = [
+            "encoder.weight",
+            "action_head.weight",
+        ]
+        manifest["parameter_mapping"][0]["transformation_ids"] = []
+        manifest["parameter_mapping"][1]["sources"] = [
+            "decoder.weight_alias",
+            "encoder.weight_view",
+        ]
+        manifest["parameter_mapping"] = manifest["parameter_mapping"][:2]
     elif SCENARIO == "canonical_state_gap":
         manifest["state_semantics"] = manifest["state_semantics"][:-1]
     elif SCENARIO == "canonical_no_cache":
@@ -1153,6 +1165,7 @@ if SCENARIO == "missing_description":
             "canonical_unmapped_parameter": "unmapped",
             "canonical_unknown_target": "canonical parameter",
             "canonical_wrong_weight": "value",
+            "canonical_missing_parameter_transform": "structural",
             "canonical_broken_tie": "tied",
             "canonical_bad_preprocess_path": "does not exist",
             "canonical_missing_assumption": "algebraic assumptions",

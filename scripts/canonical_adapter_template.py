@@ -156,12 +156,35 @@ def validate_manifest(
         target_elements = sum(
             math.prod(target_parameters[name]["shape"]) for name in targets
         )
-        if source_elements != target_elements:
-            raise ValueError(f"{path} does not preserve the mapped parameter size")
         source_dtypes = {source_parameters[name]["dtype"] for name in sources}
         target_dtypes = {target_parameters[name]["dtype"] for name in targets}
         if source_dtypes != target_dtypes:
             raise ValueError(f"{path} does not preserve the mapped parameter dtype")
+        source_shapes = [source_parameters[name]["shape"] for name in sources]
+        target_shapes = [target_parameters[name]["shape"] for name in targets]
+        source_hashes = [source_parameters[name]["data_sha256"] for name in sources]
+        expected_hashes = [
+            expected_target_parameters[name]["data_sha256"]
+            for name in targets
+            if name in expected_target_parameters
+        ]
+        structure_changed = (
+            len(sources) != len(targets)
+            or source_shapes != target_shapes
+            or source_hashes != expected_hashes
+        )
+        structural_ids = {
+            transformation["id"]
+            for transformation in transformations
+            if transformation["category"]
+            in {"transpose", "split", "concatenation", "packing"}
+        }
+        if structure_changed and not set(references) & structural_ids:
+            raise ValueError(
+                f"{path} must cite a structural parameter transformation"
+            )
+        if source_elements != target_elements:
+            raise ValueError(f"{path} does not preserve the mapped parameter size")
         for target in targets:
             expected = expected_target_parameters.get(target)
             actual = target_parameters[target]
