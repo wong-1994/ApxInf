@@ -44,6 +44,7 @@ from porting_core import (
 )
 from kernel_coverage import KernelCoverageError, analyze_kernel_coverage
 from portable_bundle import BundleError, create_bundle, merge_bundle
+from publication import PublicationError, prepare_publication
 
 
 REQUEST_SCHEMA_VERSION = "1.0"
@@ -2541,6 +2542,28 @@ def merge_port_bundle(args: argparse.Namespace) -> int:
     return SUCCESS.code
 
 
+def prepare_port_publication(args: argparse.Namespace) -> int:
+    try:
+        payload = json.loads(args.publication.read_text(encoding="utf-8"))
+        report_path = args.port_dir.resolve() / "report.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        declared_family = report.get("request_declarations", {}).get("model_family")
+        if payload.get("port_id") != report.get("port_id"):
+            raise PublicationError("publication port_id does not match the Port report")
+        if payload.get("family") != declared_family:
+            raise PublicationError("publication family does not match the Port report")
+        result = prepare_publication(
+            args.repository, args.base_commit, payload, args.output
+        )
+        report["refactor_assessment"] = payload["refactor_assessment"]
+        write_json(report_path, report)
+    except (PublicationError, OSError, json.JSONDecodeError) as error:
+        print(f"cannot prepare Port publication: {error}", file=sys.stderr)
+        return INVALID_INPUT.code
+    print(result)
+    return SUCCESS.code
+
+
 def cleanup_port(args: argparse.Namespace) -> int:
     port_dir = args.port_dir.resolve()
     if not port_dir.is_dir():
@@ -2606,6 +2629,17 @@ def parser() -> argparse.ArgumentParser:
     merge.add_argument("--port-dir", type=Path, required=True)
     merge.add_argument("--bundle", type=Path, required=True)
     merge.set_defaults(handler=merge_port_bundle)
+
+    publication = subcommands.add_parser(
+        "prepare-publication",
+        help="validate and prepare local PR, support, and refactor artifacts",
+    )
+    publication.add_argument("--port-dir", type=Path, required=True)
+    publication.add_argument("--repository", type=Path, required=True)
+    publication.add_argument("--base-commit", required=True)
+    publication.add_argument("--publication", type=Path, required=True)
+    publication.add_argument("--output", type=Path, required=True)
+    publication.set_defaults(handler=prepare_port_publication)
 
     cleanup = subcommands.add_parser(
         "cleanup", help="show the explicit retention policy for a Port"

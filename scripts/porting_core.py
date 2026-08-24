@@ -500,6 +500,10 @@ class PortingCore:
             "issues": [],
             "warnings": warnings,
             "artifacts": {},
+            "refactor_assessment": {
+                "status": "none",
+                "summary": "No shared architectural debt has been identified.",
+            },
         }
         report.update(self.pack.report_defaults(request))
         return report

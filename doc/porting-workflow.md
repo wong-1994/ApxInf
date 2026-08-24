@@ -224,6 +224,40 @@ No command cleans up automatically. `cleanup` reports retention by default;
 only `cleanup --confirm` removes the complete private Port directory. This is
 irreversible unless the user made a separate backup.
 
+## Prepare publication safely
+
+Every Port report contains a `refactor_assessment`. It is explicitly `none`
+when no shared architectural debt was found. Concrete debt is recorded as
+`deferred` with a title, evidence, and proposed follow-up; it is never
+implemented as part of the Port.
+
+After the maintained implementation has been committed on a clean dedicated
+branch or worktree, `prepare-publication` validates the complete three-dot diff
+from its pinned base commit. It rejects source/reference adapters, checkpoints,
+real inputs, credentials, sensitive content, files without redistribution
+approval, and files larger than 1 MiB. It neither stashes nor resets work.
+The publication input must declare every changed path exactly once under
+`public_files`, classify it as maintained source, a synthetic fixture, or
+support metadata, and record explicit redistribution approval. Undeclared and
+original-source material fails closed.
+
+```bash
+python3 scripts/apxinf_port.py prepare-publication \
+  --port-dir /private/path/my-port \
+  --repository /path/to/ApxInf \
+  --base-commit <pinned-base-sha> \
+  --publication /private/path/publication.json \
+  --output /private/path/prepared-publication
+```
+
+The local output contains `support-metadata.json` with the family and only
+requested tuples backed by Release-qualified evidence, plus
+`pull-request.md`. Deferred debt also produces a submission-ready
+`refactor-issue.md`, and the PR text always includes a Deferred Refactors
+section. A remote action declaration (`push`, `create_pr`, `create_issue`, or
+`link_issue`) is rejected unless `publication_authorized` is explicitly true;
+preparation itself performs no remote action.
+
 | Exit code | Category | Meaning |
 | ---: | --- | --- |
 | 0 | `success` | Intake passed |
