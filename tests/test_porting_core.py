@@ -90,3 +90,37 @@ class PortingCoreTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "schema"):
                 store.record(inventory, environment)
+
+    def test_family_payload_validation_follows_references_and_constraints(self) -> None:
+        inventory = {
+            "schema_version": "1.0",
+            "adapter_contract_version": "1.0",
+            "source": {
+                "revision": "main",
+                "sha256": "1" * 64,
+                "entrypoint": "model.py",
+            },
+            "checkpoint": {"sha256": "2" * 64},
+            "modules": [{"name": "model", "type": ""}],
+            "parameters": [],
+            "buffers": [],
+            "aliases": [],
+            "tied_weights": [],
+            "operator_traces": [],
+            "input_schema": [],
+            "output_schema": [],
+            "intermediate_schema": [],
+            "preprocessing": {},
+            "tokenization": {},
+            "normalization": {},
+            "stochastic_inputs": [],
+            "schedules": [],
+            "custom_operators": [],
+            "dynamic_branches": [],
+            "capability_facts": {},
+        }
+
+        with self.assertRaisesRegex(ValueError, "minLength"):
+            VLA_FAMILY_PACK.validate_payload(
+                Path("source_inventory.json"), inventory
+            )

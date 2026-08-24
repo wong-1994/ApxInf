@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -102,7 +103,7 @@ def _vla_payload_schema(path: Path, payload: Any) -> str:
         raise ValueError(f"no VLA payload schema is registered for {path.name}")
     schema_path = Path(__file__).resolve().parents[1] / "schemas" / schema_name
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    _validate_json_schema(payload, schema, path.name)
+    _validate_json_schema(payload, schema, path.name, schema, schema_path)
     return schema_name
 
 
@@ -118,7 +119,59 @@ def _json_type_matches(value: Any, expected: str) -> bool:
     }[expected]
 
 
-def _validate_json_schema(value: Any, schema: Mapping[str, Any], path: str) -> None:
+def _resolve_schema_reference(
+    reference: str,
+    root_schema: Mapping[str, Any],
+    schema_path: Path,
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Path]:
+    document, _, fragment = reference.partition("#")
+    resolved_path = schema_path
+    resolved_root = root_schema
+    if document:
+        resolved_path = schema_path.parent / document
+        resolved_root = json.loads(resolved_path.read_text(encoding="utf-8"))
+    resolved: Any = resolved_root
+    if fragment:
+        if not fragment.startswith("/"):
+            raise ValueError(f"unsupported payload schema reference: {reference}")
+        for token in fragment[1:].split("/"):
+            token = token.replace("~1", "/").replace("~0", "~")
+            if not isinstance(resolved, dict) or token not in resolved:
+                raise ValueError(f"unresolved payload schema reference: {reference}")
+            resolved = resolved[token]
+    if not isinstance(resolved, dict):
+        raise ValueError(f"payload schema reference is not an object: {reference}")
+    return resolved, resolved_root, resolved_path
+
+
+def _validate_json_schema(
+    value: Any,
+    schema: Mapping[str, Any],
+    path: str,
+    root_schema: Mapping[str, Any] | None = None,
+    schema_path: Path | None = None,
+) -> None:
+    root_schema = root_schema or schema
+    schema_path = schema_path or Path(__file__)
+    if "$ref" in schema:
+        referenced, referenced_root, referenced_path = _resolve_schema_reference(
+            schema["$ref"], root_schema, schema_path
+        )
+        _validate_json_schema(
+            value, referenced, path, referenced_root, referenced_path
+        )
+    for item_schema in schema.get("allOf", []):
+        _validate_json_schema(value, item_schema, path, root_schema, schema_path)
+    condition = schema.get("if")
+    if isinstance(condition, dict) and isinstance(schema.get("then"), dict):
+        try:
+            _validate_json_schema(value, condition, path, root_schema, schema_path)
+        except ValueError:
+            pass
+        else:
+            _validate_json_schema(
+                value, schema["then"], path, root_schema, schema_path
+            )
     if "const" in schema and value != schema["const"]:
         raise ValueError(
             f"{path} does not satisfy payload schema const {schema['const']!r}"
@@ -129,7 +182,18 @@ def _validate_json_schema(value: Any, schema: Mapping[str, Any], path: str) -> N
     if expected is not None:
         choices = [expected] if isinstance(expected, str) else expected
         if not any(_json_type_matches(value, choice) for choice in choices):
-            raise ValueError(f"{path} does not satisfy payload schema type {expected!r}")
+            raise ValueError(
+                f"{path} does not satisfy payload schema type {expected!r}"
+            )
+    if isinstance(value, str):
+        if len(value) < schema.get("minLength", 0):
+            raise ValueError(f"{path} does not satisfy payload schema minLength")
+        pattern = schema.get("pattern")
+        if pattern is not None and re.search(pattern, value) is None:
+            raise ValueError(f"{path} does not satisfy payload schema pattern")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            raise ValueError(f"{path} does not satisfy payload schema minimum")
     if isinstance(value, dict):
         required = set(schema.get("required", []))
         missing = sorted(required - value.keys())
@@ -142,13 +206,33 @@ def _validate_json_schema(value: Any, schema: Mapping[str, Any], path: str) -> N
                 raise ValueError(f"{path} payload schema rejects {', '.join(unknown)}")
         for name, item in value.items():
             item_schema = properties.get(name)
-            if item_schema is None and isinstance(schema.get("additionalProperties"), dict):
+            if item_schema is None and isinstance(
+                schema.get("additionalProperties"), dict
+            ):
                 item_schema = schema["additionalProperties"]
             if item_schema is not None:
-                _validate_json_schema(item, item_schema, f"{path}.{name}")
-    if isinstance(value, list) and isinstance(schema.get("items"), dict):
-        for index, item in enumerate(value):
-            _validate_json_schema(item, schema["items"], f"{path}[{index}]")
+                _validate_json_schema(
+                    item, item_schema, f"{path}.{name}", root_schema, schema_path
+                )
+    if isinstance(value, list):
+        if len(value) < schema.get("minItems", 0):
+            raise ValueError(f"{path} does not satisfy payload schema minItems")
+        if schema.get("uniqueItems"):
+            serialized = [
+                json.dumps(item, sort_keys=True, separators=(",", ":"))
+                for item in value
+            ]
+            if len(serialized) != len(set(serialized)):
+                raise ValueError(f"{path} does not satisfy payload schema uniqueItems")
+        if isinstance(schema.get("items"), dict):
+            for index, item in enumerate(value):
+                _validate_json_schema(
+                    item,
+                    schema["items"],
+                    f"{path}[{index}]",
+                    root_schema,
+                    schema_path,
+                )
 
 
 def _sha256(path: Path) -> str:
