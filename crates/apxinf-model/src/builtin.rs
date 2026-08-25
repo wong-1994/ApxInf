@@ -17,7 +17,6 @@ pub fn register_builtin_models() {
     registry::register("llama", load_llama);
     registry::register("qwen3_vl", load_qwen3vl);
     registry::register("qwen3vl", load_qwen3vl);
-    registry::register("minimal_vla", crate::minimal_vla::load);
 
     #[cfg(feature = "cuda")]
     crate::pi05::register_builtin();
@@ -42,7 +41,7 @@ fn load_llama(
     }
     let config = apxinf_loader::safetensors::config_from_metadata(&metadata);
     let weights = LlamaWeights::from_map(&config, tensors)?;
-    Ok(LoadedModel::Text(Box::new(GeneralLlama::new(
+    Ok(LoadedModel::text(Box::new(GeneralLlama::new(
         config, weights, backend,
     )?)))
 }
@@ -62,7 +61,7 @@ fn load_qwen3vl(
     let (tensors, _) = apxinf_loader::safetensors::load_native_path(path)
         .map_err(|error| Error::Other(format!("load {}: {error}", path.display())))?;
     let model = GeneralQwen3VL::from_weights_with_backend(config, tensors, backend)?;
-    Ok(LoadedModel::Text(Box::new(model)))
+    Ok(LoadedModel::text(Box::new(model)))
 }
 
 fn upcast_bf16_weights(tensors: &mut HashMap<String, Tensor>) -> Result<()> {

@@ -8,14 +8,6 @@ target machine.
 The CUDA kernels, CUTLASS, and FlashAttention sources needed by PI0.5 are
 vendored in this repository, so no external source checkout is required.
 
-## VLA model porting
-
-Use the single-entry [`scripts/apxinf_port.py`](scripts/apxinf_port.py) command
-to initialize a private Port request, inspect trusted source semantics, classify
-them against the versioned VLA Capability Contract, and prove a direct or
-canonicalized inference trace during read-only Preflight. See the
-[Porting Workflow guide](doc/porting-workflow.md).
-
 ## PI0.5 Performance and Accuracy
 
 ApxInf provides native PI0.5 CUDA paths for Jetson AGX Thor (SM110) and Jetson AGX
@@ -36,6 +28,8 @@ single-stream policy inference rate.
 | Jetson AGX Thor | BF16 | 72.454 ms | 13.8 Hz |
 | Jetson AGX Thor | FP8 | **41.159 ms** | **24.3 Hz** |
 | Jetson AGX Orin | BF16 | 165.665 ms | 6.0 Hz |
+| RTX 4090 | BF16 | 31.38 ms | 31.9 Hz |
+| RTX 4090 | INT8 | 25.99 ms | 38.5 Hz |
 
 ### LIBERO accuracy
 
@@ -77,6 +71,7 @@ CUDA distribution appropriate for the machine. Known-good configurations are:
 | Jetson Thor | `sm_110` | CUDA 13.0 |
 | Thor-U | `sm_101` | CUDA 12.8 |
 | Jetson AGX Orin | `sm_87` | CUDA 12.6 and 13.2 |
+| RTX 4090 | `sm_89` | CUDA 12.8 |
 
 Set the toolkit path before building. On a native build, ApxInf queries the
 CUDA runtime and automatically selects the architecture of the visible GPU:
@@ -183,6 +178,28 @@ cargo run --release --features cuda-no-nvtx -- generate \
   --device cuda --dtype bf16 --max-tokens 50
 ```
 
+By default, `generate` reads model-recommended settings from
+`generation_config.json`; missing fields fall back to ApxInf's historical
+greedy defaults. Request flags override the model settings. Use `--greedy` to
+force greedy decoding or `--sample` to force the backend-native random logits
+pipeline; the seed identifies a reproducible counter-based random stream:
+
+```bash
+cargo run --release --features cuda-no-nvtx -- generate \
+  --model /path/to/model \
+  --prompt "Describe CUDA graphs." \
+  --device cuda --dtype bf16 --max-tokens 50 \
+  --sample --temperature 0.8 --top-k 40 --top-p 0.95 \
+  --repetition-penalty 1.1 --seed 42
+```
+
+Use `--generation-config apxinf` to ignore the model file, or pass a JSON file
+or directory instead of `auto`. Deployment defaults can be layered with
+`--override-generation-config '{"temperature":0.7,"top_p":0.9}'`.
+Supported JSON fields are `max_new_tokens`, `eos_token_id` (scalar or list),
+`do_sample`, `temperature`, `top_k`, `top_p`, and the repetition/frequency/
+presence penalties; unrelated Hugging Face fields are ignored.
+
 For Qwen3-VL, add `--image`. The CLI shells out to the Hugging Face processor to
 turn the image into `pixel_values` + `image_grid_thw`, so that Python environment
 needs:
@@ -214,6 +231,9 @@ cargo run --release --features cuda-no-nvtx -- generate \
 
 `generate` exits non-zero when preprocessing, loading, or generation fails, so it
 is safe to chain in a script.
+
+See the [sampling subsystem documentation](doc/20260819-sampling-subsystem/README.md)
+for the sampling API and backend design.
 
 ## 5. Run PI0.5
 
@@ -345,6 +365,12 @@ correctness-oriented decode-to-FP16 compatibility path.
 > numbers possible. The remaining architecture overrides (`--views`,
 > `--image-size`, `--num-flow-steps`, `--max-token-len`) do reshape weights and
 > stay rejected on a checkpoint.
+
+PI0.5 accepts an exact caller-supplied initial latent for debugging and parity
+checks. When no latent is supplied, it fills the model's stable CUDA latent
+buffer from the internal counter-based random stream, avoiding a host noise
+allocation and upload. The explicit seeded APIs remain available for exact
+replay.
 
 ### Python environment
 

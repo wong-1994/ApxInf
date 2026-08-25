@@ -20,7 +20,6 @@ pub struct TuningDbHeader {
     pub kernel_build_id: Option<String>,
     pub device_name: Option<String>,
     pub sm: Option<u32>,
-    pub multiprocessor_count: Option<u32>,
     pub cuda_version: Option<String>,
     pub cublas_version: Option<String>,
 }
@@ -94,10 +93,6 @@ impl TuningDb {
                 .map(str::to_string),
             device_name,
             sm,
-            multiprocessor_count: object
-                .get("multiprocessor_count")
-                .and_then(|value| value.as_u64())
-                .and_then(|value| u32::try_from(value).ok()),
             cuda_version: object
                 .get("cuda_version")
                 .or_else(|| object.get("cuda"))
@@ -151,14 +146,6 @@ impl TuningDb {
                 return Err(Error::Other(format!(
                     "tuning database targets SM{sm}, current device is SM{}",
                     caps.sm
-                )));
-            }
-        }
-        if let Some(expected) = self.header.multiprocessor_count {
-            if expected != caps.multiprocessor_count {
-                return Err(Error::Other(format!(
-                    "tuning database targets {expected} multiprocessors, current device has {}",
-                    caps.multiprocessor_count
                 )));
             }
         }
@@ -695,16 +682,6 @@ mod tests {
 
         let wrong_cublas = TuningDb::from_json_str(&database("12.6", "12.7")).unwrap();
         assert!(wrong_cublas.build_store(&caps(87), &versions()).is_err());
-    }
-
-    #[test]
-    fn rejects_wrong_multiprocessor_count() {
-        let database = format!(
-            r#"{{"schema":"apxinf.cuda.tuning.v1","kernel_build_id":"{}","device_name":"test","sm":87,"multiprocessor_count":15,"cuda_version":"12.6","cublas_version":"12.6.4","records":[]}}"#,
-            super::super::KERNEL_BUILD_ID
-        );
-        let db = TuningDb::from_json_str(&database).unwrap();
-        assert!(db.build_store(&caps(87), &versions()).is_err());
     }
 
     #[test]
