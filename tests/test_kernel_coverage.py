@@ -76,8 +76,15 @@ class KernelCoverageTest(unittest.TestCase):
             "unsupported",
         ):
             with self.subTest(classification=classification):
+                computation = self.computation()
+                if classification in {"layout_only", "correct_fallback"}:
+                    computation["operator_replay"] = {
+                        "passed": True,
+                        "references": computation["references"],
+                        "comparisons": [{"max_absolute": 0.0005, "max_relative": 0.005}],
+                    }
                 result = analyze_kernel_coverage(
-                    self.trace(),
+                    self.trace(computations=[computation]),
                     [self.capability(classification)],
                     [{"target": "thor", "precision": "bf16"}],
                 )
@@ -101,8 +108,14 @@ class KernelCoverageTest(unittest.TestCase):
             self.assertIn(field, requirement)
 
     def test_fallback_is_an_optimization_opportunity_not_a_blocker(self) -> None:
+        computation = self.computation()
+        computation["operator_replay"] = {
+            "passed": True,
+            "references": computation["references"],
+            "comparisons": [{"max_absolute": 0.0005, "max_relative": 0.005}],
+        }
         result = analyze_kernel_coverage(
-            self.trace(),
+            self.trace(computations=[computation]),
             [self.capability("correct_fallback")],
             [{"target": "thor", "precision": "bf16"}],
         )
@@ -110,6 +123,20 @@ class KernelCoverageTest(unittest.TestCase):
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["kernel_gaps"], [])
         self.assertEqual(result["optimization_opportunities"][0]["computation_id"], "projection")
+
+    def test_layout_or_fallback_without_operator_replay_becomes_a_kernel_gap(self) -> None:
+        for classification in ("layout_only", "correct_fallback"):
+            with self.subTest(classification=classification):
+                result = analyze_kernel_coverage(
+                    self.trace(),
+                    [self.capability(classification)],
+                    [{"target": "thor", "precision": "bf16"}],
+                )
+                self.assertEqual(result["status"], "blocked")
+                self.assertEqual(
+                    result["classifications"][0]["classification"],
+                    "missing_required_capability",
+                )
 
     def test_returned_capability_must_be_revalidated_against_original_references(self) -> None:
         returned = self.capability(

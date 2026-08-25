@@ -76,6 +76,30 @@ def _validate_returned_capability(
         )
 
 
+def _operator_replay_passed(computation: Mapping[str, Any]) -> bool:
+    replay = computation.get("operator_replay")
+    if not isinstance(replay, dict) or replay.get("passed") is not True:
+        return False
+    if replay.get("references") != computation["references"]:
+        return False
+    comparisons = replay.get("comparisons")
+    if not isinstance(comparisons, list) or not comparisons:
+        return False
+    tolerances = computation["tolerances"]
+    absolute = tolerances.get("absolute")
+    relative = tolerances.get("relative")
+    if not isinstance(absolute, (int, float)) or not isinstance(relative, (int, float)):
+        return False
+    return all(
+        isinstance(item, dict)
+        and isinstance(item.get("max_absolute"), (int, float))
+        and isinstance(item.get("max_relative"), (int, float))
+        and item["max_absolute"] <= absolute
+        and item["max_relative"] <= relative
+        for item in comparisons
+    )
+
+
 def analyze_kernel_coverage(
     trace: Mapping[str, Any],
     capability_catalog: Sequence[Mapping[str, Any]],
@@ -118,6 +142,10 @@ def analyze_kernel_coverage(
             if capability is None
             else capability.get("classification")
         )
+        if classification in {"layout_only", "correct_fallback"} and not _operator_replay_passed(
+            computation
+        ):
+            classification = "missing_required_capability"
         if classification != "missing_required_capability" and classification not in CLASSIFICATIONS:
             raise KernelCoverageError(
                 f"computation {computation['id']} has an unrecognized classification"

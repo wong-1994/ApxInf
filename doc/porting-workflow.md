@@ -181,6 +181,15 @@ as existing fused, existing primitive, layout-only, correct fallback, missing
 required capability, or unsupported. Unclassified computations fail closed; a
 correct fallback becomes a non-blocking Optimization Opportunity.
 
+Layout-only rewrites and correct fallbacks require operator-replay evidence in
+the canonical computation. The replay must cite the computation's original
+family references and report absolute and relative errors within its declared
+tolerances. A catalog entry alone cannot establish either classification;
+missing, mismatched, self-failed, or out-of-tolerance replay becomes a blocking
+Kernel Gap. Existing primitives still require complete semantic matching in the
+catalog; broad operator-name similarity is not evidence that masks, layouts, or
+shape constraints agree.
+
 A missing required capability blocks Preflight before model implementation and
 emits `private/kernel_gap_handoff.json` for the separate kernel workflow. The
 handoff preserves family semantics and references plus dtype, layout, shapes,

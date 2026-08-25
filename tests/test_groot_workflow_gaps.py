@@ -38,7 +38,17 @@ class GrootWorkflowGapTest(unittest.TestCase):
         catalog = json.loads((ROOT / "contracts/kernel-capabilities-1.0.json").read_text())
         capability = next(item for item in catalog["capabilities"] if item["operation"] == "conv3d")
         self.assertEqual(capability["classification"], "layout_only")
-        self.assertEqual(capability["target_shapes"], [[1, 3, 2, 14, 14]])
+        self.assertEqual(
+            capability["target_shapes"],
+            [[256, 3, 2, 16, 16], [1024, 3, 2, 16, 16]],
+        )
+        self.assertIn("bias", capability["interface"])
+
+    def test_generic_sdpa_is_not_claimed_by_the_kernel_catalog(self) -> None:
+        catalog = json.loads((ROOT / "contracts/kernel-capabilities-1.0.json").read_text())
+        self.assertFalse(
+            any(item["operation"] == "scaled_dot_product_attention" for item in catalog["capabilities"])
+        )
 
     def groot_inventory(self) -> dict:
         facts = {
