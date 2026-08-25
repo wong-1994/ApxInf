@@ -2,85 +2,13 @@
   "schema_version": "1.0",
   "capabilities": [
     {
-      "operation": "conv3d",
-      "provenance": "built_in",
-      "classification": "layout_only",
-      "supported_dtypes": ["bf16"],
-      "supported_layouts": ["row_major"],
-      "target_shapes": [[256, 3, 2, 16, 16], [1024, 3, 2, 16, 16]],
-      "interface": "non_overlapping_conv3d(input, weight, bias, stride=[2,16,16]) -> output"
-    },
-    {
       "operation": "aten.linear",
       "provenance": "built_in",
       "classification": "existing_primitive",
       "supported_dtypes": ["bf16"],
       "supported_layouts": ["row_major"],
-      "target_shapes": ["*"],
+      "target_shapes": [[1, 2], [2, 2]],
       "interface": "linear(input, weight) -> output"
-    },
-    {
-      "operation": "aten.linear",
-      "provenance": "built_in",
-      "classification": "existing_primitive",
-      "supported_dtypes": ["bf16"],
-      "supported_layouts": ["row_major"],
-      "target_shapes": ["*"],
-      "interface": "linear(input, weight, bias) -> output"
-    },
-    {
-      "operation": "rms_norm",
-      "provenance": "built_in",
-      "classification": "existing_primitive",
-      "supported_dtypes": ["bf16"],
-      "supported_layouts": ["row_major"],
-      "target_shapes": ["*"],
-      "interface": "rms_norm(input, weight) -> output"
-    },
-    {
-      "operation": "layer_norm",
-      "provenance": "built_in",
-      "classification": "existing_primitive",
-      "supported_dtypes": ["bf16"],
-      "supported_layouts": ["row_major"],
-      "target_shapes": ["*"],
-      "interface": "layer_norm(input, weight, bias) -> output"
-    },
-    {
-      "operation": "adaptive_layer_norm",
-      "provenance": "built_in",
-      "classification": "existing_primitive",
-      "supported_dtypes": ["bf16"],
-      "supported_layouts": ["row_major"],
-      "target_shapes": ["*"],
-      "interface": "adaptive_norm(input, conditioning) -> output"
-    },
-    {
-      "operation": "geglu",
-      "provenance": "built_in",
-      "classification": "existing_primitive",
-      "supported_dtypes": ["bf16"],
-      "supported_layouts": ["row_major"],
-      "target_shapes": ["*"],
-      "interface": "geglu(input) -> output"
-    },
-    {
-      "operation": "category_specific_mlp",
-      "provenance": "built_in",
-      "classification": "correct_fallback",
-      "supported_dtypes": ["bf16"],
-      "supported_layouts": ["row_major"],
-      "target_shapes": ["*"],
-      "interface": "category_specific_mlp(input, embodiment) -> output"
-    },
-    {
-      "operation": "euler_update",
-      "provenance": "built_in",
-      "classification": "existing_primitive",
-      "supported_dtypes": ["bf16"],
-      "supported_layouts": ["row_major"],
-      "target_shapes": ["*"],
-      "interface": "euler_update(action, velocity, dt) -> action"
     }
   ]
 }
