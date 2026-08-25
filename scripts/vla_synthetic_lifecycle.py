@@ -43,7 +43,11 @@ def main() -> None:
         environment["APXINF_ACCEPTANCE_PORT_ID"] = PORT_ID
         for index, (stage, command) in enumerate(stages):
             consumed = json.loads(upstream_path.read_text(encoding="utf-8"))
-            consumed_digest = digest(consumed)
+            consumed_payload = dict(consumed)
+            claimed_digest = consumed_payload.pop("artifact_sha256", None)
+            consumed_digest = claimed_digest or digest(consumed_payload)
+            if claimed_digest is not None and claimed_digest != digest(consumed_payload):
+                raise RuntimeError(f"{stage} received a corrupt upstream artifact")
             if consumed_digest != upstream_digest:
                 raise RuntimeError(f"{stage} received a stale upstream artifact")
             completed = subprocess.run(command, cwd=repository, env=environment, text=True, capture_output=True)
