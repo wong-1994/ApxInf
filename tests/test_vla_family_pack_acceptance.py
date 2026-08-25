@@ -15,13 +15,26 @@ class VlaFamilyPackAcceptanceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.manifest = json.loads((ROOT / "tests/fixtures/vla-family-pack-acceptance-v1.json").read_text())
 
+    def lifecycle_stdout(self) -> str:
+        import hashlib
+        def digest(value):
+            return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        subject = self.manifest["acceptance_subject"]
+        upstream = digest(subject)
+        artifacts = []
+        for index, stage in enumerate(("intake", "preflight", "maintained_implementation", "policy_integration", "serving", "tuning", "qualification", "bundling", "pr_preparation")):
+            artifact = {"port_id": subject["port_id"], "sequence": index, "stage": stage, "status": "passed", "upstream_sha256": upstream, "command": ["actual", stage], "stdout_sha256": hashlib.sha256(b"").hexdigest()}
+            artifact["artifact_sha256"] = digest(artifact)
+            artifacts.append(artifact)
+            upstream = artifact["artifact_sha256"]
+        return json.dumps({"schema_version": "1.0", "port_id": subject["port_id"], "artifacts": artifacts}) + "\n"
+
     @mock.patch("vla_family_pack_acceptance.subprocess.run")
     def test_complete_matrix_executes_every_stage_and_contract(self, run) -> None:
-        run.side_effect = lambda command, **kwargs: mock.Mock(
-            returncode=0,
-            stdout="deadbeef\n" if tuple(command) == ("git", "rev-parse", "HEAD") else "",
-            stderr="",
-        )
+        run.side_effect = lambda command, **kwargs: mock.Mock(returncode=0, stdout=(
+            "deadbeef\n" if tuple(command) == ("git", "rev-parse", "HEAD") else
+            self.lifecycle_stdout() if "scripts/vla_synthetic_lifecycle.py" in command else ""
+        ), stderr="")
         result = run_acceptance(self.manifest, ROOT, python="python", cargo="cargo")
         expected = acceptance_checks("python", "cargo", "python", controlled_hardware=False)
         self.assertEqual(
@@ -50,7 +63,7 @@ class VlaFamilyPackAcceptanceTest(unittest.TestCase):
     @mock.patch("vla_family_pack_acceptance.subprocess.run")
     def test_command_failure_fails_closed_with_check_name(self, run) -> None:
         run.return_value = mock.Mock(returncode=1, stdout="", stderr="runtime mismatch")
-        with self.assertRaisesRegex(AcceptanceError, "core_preflight.*runtime mismatch"):
+        with self.assertRaisesRegex(AcceptanceError, "synthetic_vla_lifecycle.*runtime mismatch"):
             run_acceptance(self.manifest, ROOT)
 
     @mock.patch("vla_family_pack_acceptance.subprocess.run")
@@ -60,8 +73,10 @@ class VlaFamilyPackAcceptanceTest(unittest.TestCase):
             stdout = ""
             if command == ("git", "rev-parse", "HEAD"):
                 stdout = "deadbeef\n"
-            elif command[1:3] == ("-c", "import json,torch; p=torch.cuda.get_device_properties(0); print(json.dumps({'available':torch.cuda.is_available(),'name':p.name,'capability':[p.major,p.minor],'cuda':torch.version.cuda,'total_memory':p.total_memory}))"):
-                stdout = '{"available": true, "name": "NVIDIA Thor", "capability": [11, 0], "cuda": "13.0", "total_memory": 1}\n'
+            elif "scripts/vla_synthetic_lifecycle.py" in command:
+                stdout = self.lifecycle_stdout()
+            elif "scripts/thor_environment.py" in command:
+                stdout = '{"available": true, "device": "NVIDIA Thor", "capability": [11, 0], "cuda": "13.0", "total_memory": 1, "driver": "580", "libraries": {"torch": "2"}, "kernel_build": "tegra", "power_mode": "MAXN", "clocks_and_temperature": "GPU 10%@40C GR3D_FREQ 1%"}\n'
             elif "scripts/bench_pi05.py" in command:
                 stdout = "layer                 p50      p95\nL0_model           100.00   110.00\n"
             return mock.Mock(returncode=0, stdout=stdout, stderr="")
@@ -83,8 +98,10 @@ class VlaFamilyPackAcceptanceTest(unittest.TestCase):
     def test_slow_thor_fails_the_machine_evaluated_gate(self, run) -> None:
         def completed(command, **kwargs):
             command = tuple(command)
-            if command[1:2] == ("-c",):
-                stdout = '{"available": true, "name": "NVIDIA Thor", "capability": [11, 0]}\n'
+            if "scripts/vla_synthetic_lifecycle.py" in command:
+                stdout = self.lifecycle_stdout()
+            elif "scripts/thor_environment.py" in command:
+                stdout = '{"available": true, "device": "NVIDIA Thor", "capability": [11, 0], "cuda": "13.0", "driver": "580", "libraries": {"torch": "2"}, "kernel_build": "tegra", "power_mode": "MAXN", "clocks_and_temperature": "GPU@40C GR3D_FREQ 1%"}\n'
             elif "scripts/bench_pi05.py" in command:
                 stdout = "L0_model           100.00   250.00\n"
             else:

@@ -22,6 +22,8 @@
     {"path": "crates/apxinf-model/src/minimal_vla/mod.rs", "kind": "maintained_source"},
     {"path": "doc/porting-workflow.md", "kind": "maintained_source"},
     {"path": "scripts/vla_family_pack_acceptance.py", "kind": "maintained_source"},
+    {"path": "scripts/thor_environment.py", "kind": "maintained_source"},
+    {"path": "scripts/vla_synthetic_lifecycle.py", "kind": "maintained_source"},
     {"path": "scripts/porting_core.py", "kind": "maintained_source"},
     {"path": "schemas/vla-core-replay-v1.schema.json", "kind": "maintained_source"},
     {"path": "tests/test_vla_family_pack_acceptance.py", "kind": "synthetic_fixture"},

@@ -33,6 +33,7 @@ def acceptance_checks(
 ) -> tuple[AcceptanceCheck, ...]:
     """Return executable evidence checks; no lifecycle stage self-reports."""
     software = (
+        AcceptanceCheck("synthetic_vla_lifecycle", ("intake", "preflight", "maintained_implementation", "policy_integration", "serving", "tuning", "qualification", "bundling", "pr_preparation"), (python, "scripts/vla_synthetic_lifecycle.py", "--python", python, "--cargo", cargo, "--repository", ".")),
         AcceptanceCheck("core_preflight", ("intake", "preflight"), (python, "-m", "unittest", "tests.test_apxinf_port.PortIntakeTest.test_vla_request_and_artifacts_pin_the_family_pack", "tests.test_apxinf_port.PortIntakeTest.test_valid_rewrite_proves_private_canonical_equivalence", "tests.test_apxinf_port.PortIntakeTest.test_unsupported_semantics_block_preflight_with_a_gap_report", "tests.test_apxinf_port.PortIntakeTest.test_true_kernel_gap_blocks_preflight_with_complete_handoff")),
         AcceptanceCheck("minimal_vla_runtime", ("maintained_implementation",), (cargo, "test", "-p", "apxinf-model", "--lib", "minimal_vla::tests")),
         AcceptanceCheck("minimal_vla_policy", ("policy_integration",), (python, "-m", "pytest", "-q", "python/apxinf/tests/test_minimal_vla.py")),
@@ -47,17 +48,38 @@ def acceptance_checks(
     if not controlled_hardware:
         return software
     return software + (
-        AcceptanceCheck("thor_identity", ("controlled_hardware_identity",), (runtime_python, "-c", "import json,torch; p=torch.cuda.get_device_properties(0); print(json.dumps({'available':torch.cuda.is_available(),'name':p.name,'capability':[p.major,p.minor],'cuda':torch.version.cuda,'total_memory':p.total_memory}))")),
+        AcceptanceCheck("thor_identity", ("controlled_hardware_identity",), (runtime_python, "scripts/thor_environment.py")),
         AcceptanceCheck("thor_bf16_performance", ("controlled_hardware_performance",), (runtime_python, "scripts/bench_pi05.py", "--random-weights", "--layer", "l0", "--precision", "bf16", "--device", "cuda:0", "--warmup", "1", "--samples", "3")),
     )
 
 def _hardware_evidence(check: AcceptanceCheck, stdout: str) -> dict[str, Any] | None:
+    if check.name == "synthetic_vla_lifecycle":
+        try:
+            evidence = json.loads(stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as error:
+            raise AcceptanceError("synthetic lifecycle did not emit valid JSON") from error
+        artifacts = evidence.get("artifacts")
+        if evidence.get("port_id") != "synthetic-minimal-vla-v1" or not isinstance(artifacts, list):
+            raise AcceptanceError("synthetic lifecycle used the wrong Port")
+        expected_upstream = _digest_json({"port_id": evidence["port_id"], "model_type": "minimal_vla", "source_kind": "synthetic_external"})
+        for index, artifact in enumerate(artifacts):
+            if artifact.get("sequence") != index or artifact.get("upstream_sha256") != expected_upstream:
+                raise AcceptanceError("synthetic lifecycle artifact chain is not causal")
+            payload = dict(artifact)
+            claimed = payload.pop("artifact_sha256", None)
+            if claimed != _digest_json(payload):
+                raise AcceptanceError("synthetic lifecycle artifact digest is invalid")
+            expected_upstream = claimed
+        return evidence
     if check.name == "thor_identity":
         try:
             identity = json.loads(stdout.strip().splitlines()[-1])
         except (IndexError, json.JSONDecodeError) as error:
             raise AcceptanceError("thor_identity did not emit valid JSON") from error
-        if not identity.get("available") or "thor" not in str(identity.get("name", "")).lower():
+        required = {"driver", "cuda", "libraries", "kernel_build", "power_mode", "clocks_and_temperature"}
+        if not required <= identity.keys() or any(not identity[field] for field in required):
+            raise AcceptanceError("Thor environment evidence is incomplete")
+        if not identity.get("available") or "thor" not in str(identity.get("device", "")).lower():
             raise AcceptanceError("controlled hardware is not NVIDIA Thor")
         if identity.get("capability") != [11, 0]:
             raise AcceptanceError("controlled Thor must report CUDA capability 11.0")
@@ -139,23 +161,6 @@ def _sha256(path: Path) -> str:
 def _digest_json(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
-def _lifecycle_evidence(subject: Mapping[str, str], results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Bind every executed stage to one Port and its preceding artifact."""
-    upstream = _digest_json(subject)
-    artifacts: list[dict[str, Any]] = []
-    for result in results:
-        for stage in result["stages"]:
-            payload = {
-                "port_id": subject["port_id"], "model_type": subject["model_type"],
-                "stage": stage, "check": result["name"], "status": result["status"],
-                "command_sha256": _digest_json(result["command"]),
-                "stdout_sha256": result["stdout_sha256"], "upstream_sha256": upstream,
-            }
-            payload["artifact_sha256"] = _digest_json(payload)
-            artifacts.append(payload)
-            upstream = payload["artifact_sha256"]
-    return artifacts
-
 def _pi05_core_replay(repository: Path, subject: Mapping[str, str], result: Mapping[str, Any]) -> dict[str, Any]:
     """Record unchanged PI0.5 mathematics as a shared-Core Workflow Artifact."""
     from porting_core import ArtifactStore, VLA_FAMILY_PACK
@@ -163,14 +168,18 @@ def _pi05_core_replay(repository: Path, subject: Mapping[str, str], result: Mapp
         port = Path(temporary)
         private = port / "private"
         private.mkdir()
+        source_path = repository / "crates/apxinf-model/src/pi05/math.rs"
+        checkpoint_marker = private / "random_weights.json"
+        checkpoint_marker.write_text(json.dumps({"kind": "deterministic_random_weights", "seed": 0}), encoding="utf-8")
         request = {
             "schema_version": "1.0", "port_id": subject["port_id"], "model_family": "vla",
             "capability_contract_version": "1.0",
-            "source": {"sha256": "1" * 64}, "checkpoint": {"sha256": "2" * 64},
+            "source": {"path": str(source_path), "sha256": _sha256(source_path)},
+            "checkpoint": {"path": str(checkpoint_marker), "sha256": _sha256(checkpoint_marker)},
         }
         (port / "request.json").write_text(json.dumps(request), encoding="utf-8")
         environment = private / "environment.json"
-        environment.write_text(json.dumps({"schema_version": "1.0"}), encoding="utf-8")
+        environment.write_text(json.dumps({"schema_version": "1.0", "platform": platform.platform(), "python": sys.version}), encoding="utf-8")
         adapter = private / "reference_adapter.py"
         adapter.write_text("# acceptance replay adapter\n", encoding="utf-8")
         payload = private / "pi05_replay.json"
@@ -219,7 +228,7 @@ def run_acceptance(
     commit = subprocess.run(
         ("git", "rev-parse", "HEAD"), cwd=repository, text=True, capture_output=True, check=True
     ).stdout.strip()
-    lifecycle = _lifecycle_evidence(manifest["acceptance_subject"], results)
+    lifecycle = next(result["evidence"]["artifacts"] for result in results if result["name"] == "synthetic_vla_lifecycle")
     pi05_result = next(result for result in results if result["name"] == "pi05_replay")
     replay = _pi05_core_replay(repository, manifest["acceptance_subject"], pi05_result)
     status = "accepted" if controlled_hardware else "software-validated"
