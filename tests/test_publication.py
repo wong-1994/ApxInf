@@ -195,10 +195,9 @@ class PublicationTest(unittest.TestCase):
             undeclared["public_files"][0]["path"] = "different.rs"
             with self.assertRaisesRegex(PublicationError, "exactly match"):
                 self.prepare(repo, base, undeclared, root / "out")
-            payload = self.payload("vla")
-            payload["base_branch"] = "port/example"
-            with self.assertRaisesRegex(PublicationError, "non-base"):
-                self.prepare(repo, base, payload, root / "out")
+            subprocess.run(["git", "branch", "-m", "main-work"], cwd=repo, check=True)
+            with self.assertRaisesRegex(PublicationError, "dedicated"):
+                self.prepare(repo, base, self.payload("vla"), root / "out")
 
     def test_rejects_private_key_blocks_and_malformed_refactor_debt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -209,6 +208,16 @@ class PublicationTest(unittest.TestCase):
             )
             subprocess.run(["git", "add", "model.rs"], cwd=repo, check=True)
             subprocess.run(["git", "commit", "-qm", "bad secret"], cwd=repo, check=True)
+            with self.assertRaisesRegex(PublicationError, "sensitive"):
+                self.prepare(repo, base, self.payload("vla"), root / "out")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo, base = self.make_repo(root)
+            (repo / "model.rs").write_text(
+                "token = 'ghp_abcdefghijklmnopqrstuvwxyz123456'\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "add", "model.rs"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-qm", "bad token"], cwd=repo, check=True)
             with self.assertRaisesRegex(PublicationError, "sensitive"):
                 self.prepare(repo, base, self.payload("vla"), root / "out")
         with tempfile.TemporaryDirectory() as temporary:

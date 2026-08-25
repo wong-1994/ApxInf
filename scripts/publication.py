@@ -28,9 +28,13 @@ FORBIDDEN_SUFFIXES = frozenset(
     {".ckpt", ".env", ".onnx", ".pt", ".pth", ".safetensors"}
 )
 SENSITIVE_CONTENT = re.compile(
-    rb"(?i)(api[_-]?key|access[_-]?key(?:_id)?|access[_-]?token|secret(?:_access_key)?|password|private[_-]?key)\s*[:=]\s*[^\s,}]+"
+    rb"(?i)(api[_-]?key|access[_-]?key(?:_id)?|access[_-]?token|secret(?:_access_key)?|password|private[_-]?key|_authToken)\s*[:=]\s*[^\s,}]+"
 )
 PRIVATE_KEY_BLOCK = re.compile(rb"-----BEGIN (?:OPENSSH |RSA |EC |DSA )?PRIVATE KEY-----")
+TOKEN_SIGNATURE = re.compile(
+    rb"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"
+)
+DEDICATED_BRANCH_PREFIXES = ("port/", "feat/")
 
 
 class PublicationError(ValueError):
@@ -52,9 +56,7 @@ def _git(repo: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
-def _require_safe_git_state(
-    repo: Path, base_commit: str, base_branch: str
-) -> dict[Path, str]:
+def _require_safe_git_state(repo: Path, base_commit: str) -> dict[Path, str]:
     if not repo.is_dir() or _git(repo, "rev-parse", "--show-toplevel") != str(
         repo.resolve()
     ):
@@ -63,13 +65,12 @@ def _require_safe_git_state(
     if _git(repo, "status", "--porcelain"):
         raise PublicationError("publication preparation requires a clean worktree")
     branch = _git(repo, "branch", "--show-current")
-    if not branch or branch == base_branch:
-        raise PublicationError("publication requires a dedicated non-base branch")
-    base_ref = f"refs/heads/{base_branch}"
-    _git(repo, "rev-parse", "--verify", base_ref)
-    merge_base = _git(repo, "merge-base", base_ref, "HEAD")
-    if merge_base != _git(repo, "rev-parse", base_commit):
-        raise PublicationError("base_commit must be the merge base of the dedicated branch")
+    if not branch or not branch.startswith(DEDICATED_BRANCH_PREFIXES):
+        raise PublicationError(
+            "publication requires a dedicated port/ or feat/ branch or worktree"
+        )
+    if _git(repo, "merge-base", base_commit, "HEAD") != _git(repo, "rev-parse", base_commit):
+        raise PublicationError("base_commit must be an ancestor of the dedicated branch")
     commits = _git(repo, "rev-list", "--count", f"{base_commit}..HEAD")
     if commits == "0":
         raise PublicationError("publication requires at least one local stage commit")
@@ -116,7 +117,11 @@ def _check_public_files(
         if path.stat().st_size > MAX_PUBLIC_FILE_BYTES:
             raise PublicationError(f"publication rejects oversized artifact: {relative}")
         content = path.read_bytes()
-        if SENSITIVE_CONTENT.search(content) or PRIVATE_KEY_BLOCK.search(content):
+        if (
+            SENSITIVE_CONTENT.search(content)
+            or PRIVATE_KEY_BLOCK.search(content)
+            or TOKEN_SIGNATURE.search(content)
+        ):
             raise PublicationError(f"publication rejects sensitive content: {relative}")
         if b"redistribution_approved=false" in content.replace(b" ", b"").lower():
             raise PublicationError(f"publication lacks redistribution approval: {relative}")
@@ -127,7 +132,7 @@ def _validate_payload(payload: Mapping[str, Any]) -> None:
         raise PublicationError("unsupported publication schema_version")
     if payload.get("family") not in FAMILIES:
         raise PublicationError("family must be llm, vlm, or vla")
-    for field in ("port_id", "base_branch"):
+    for field in ("port_id",):
         if not isinstance(payload.get(field), str) or not payload[field]:
             raise PublicationError(f"{field} must be a non-empty string")
     actions = payload.get("remote_actions", [])
@@ -209,9 +214,7 @@ def prepare_publication(
     repository = repository.resolve()
     output_dir = output_dir.resolve()
     _validate_payload(payload)
-    changed = _require_safe_git_state(
-        repository, base_commit, str(payload["base_branch"])
-    )
+    changed = _require_safe_git_state(repository, base_commit)
     declarations = {item["path"]: item for item in payload["public_files"]}
     changed_names = {path.relative_to(repository).as_posix() for path in changed}
     if set(declarations) != changed_names:

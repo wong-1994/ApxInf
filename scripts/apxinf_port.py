@@ -2609,10 +2609,22 @@ def prepare_port_publication(args: argparse.Namespace) -> int:
         }
         qualified_tuples: set[tuple[str, str]] = set()
         port_dir = args.port_dir.resolve()
+        declarations = report.get("request_declarations", {})
+        request_source = declarations.get("source", {}).get("sha256")
+        request_checkpoint = declarations.get("checkpoint", {}).get("sha256")
+        request_path = port_dir / "request.json"
+        request_sha256 = file_sha256(request_path) if request_path.is_file() else None
         for name, envelope in report.get("artifacts", {}).items():
             if not name.startswith("qualification_") or not isinstance(envelope, dict):
                 continue
-            if envelope.get("state") != "current" or envelope.get("family") != declared_family:
+            if (
+                envelope.get("state") != "current"
+                or envelope.get("family") != declared_family
+                or envelope.get("stage") != "qualification"
+                or envelope.get("payload_schema") != "qualification-v1"
+                or envelope.get("explanation")
+                != {"changed_dependencies": [], "upstream_stale": []}
+            ):
                 continue
             relative = envelope.get("path")
             if not isinstance(relative, str):
@@ -2623,7 +2635,15 @@ def prepare_port_publication(args: argparse.Namespace) -> int:
             fingerprints = envelope.get("fingerprints", {})
             if fingerprints.get("content_sha256") != file_sha256(evidence_path):
                 continue
-            if not fingerprints.get("source_sha256") or not fingerprints.get("checkpoint_sha256"):
+            if (
+                not request_source
+                or not request_checkpoint
+                or fingerprints.get("source_sha256") != request_source
+                or fingerprints.get("checkpoint_sha256") != request_checkpoint
+                or fingerprints.get("upstream_sha256", {}).get("request") != request_sha256
+                or not fingerprints.get("upstream_sha256", {}).get("canonical_equivalence")
+                or not fingerprints.get("tool_sha256")
+            ):
                 continue
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
             candidates = evidence.get("tuples") if isinstance(evidence, dict) else None
@@ -2635,7 +2655,19 @@ def prepare_port_publication(args: argparse.Namespace) -> int:
                     if isinstance(item, dict)
                     else (None, None)
                 )
-                if pair in requested_tuples and item.get("status") == "release_qualified":
+                gates = item.get("gates", {}) if isinstance(item, dict) else {}
+                target_fingerprints = fingerprints.get("target_environment_sha256", {})
+                pair_key = f"{pair[0]}/{pair[1]}"
+                if (
+                    pair in requested_tuples
+                    and item.get("status") == "release_qualified"
+                    and item.get("deployment_complete") is True
+                    and item.get("waivers") == []
+                    and gates
+                    and all(gate.get("status") == "passed" for gate in gates.values())
+                    and isinstance(target_fingerprints.get(pair_key), str)
+                    and target_fingerprints[pair_key]
+                ):
                     qualified_tuples.add(pair)
         result = prepare_publication(
             args.repository,
