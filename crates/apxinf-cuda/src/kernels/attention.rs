@@ -410,6 +410,51 @@ pub fn vision(
     ))
 }
 
+/// BF16 full/cross attention with an optional key mask.
+#[allow(clippy::too_many_arguments)]
+pub fn cross(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    q_len: usize,
+    kv_len: usize,
+    n_heads: usize,
+    head_dim: usize,
+    key_mask: Option<&CudaBuffer>,
+    causal: bool,
+) -> Result<Tensor> {
+    let q_shape = [q_len, n_heads, head_dim];
+    let k_dims = k.shape().dims();
+    if k_dims.len() != 3 || k_dims[0] != kv_len || k_dims[2] != head_dim
+        || k_dims[1] == 0 || n_heads % k_dims[1] != 0 {
+        return Err(Error::Other("cross_sdpa requires Q heads divisible by KV heads".into()));
+    }
+    let n_kv_heads = k_dims[1];
+    let kv_shape = [kv_len, n_kv_heads, head_dim];
+    if q.dtype() != DType::BF16 || k.dtype() != DType::BF16 || v.dtype() != DType::BF16
+        || q.shape().dims() != q_shape || k.shape().dims() != kv_shape
+        || v.shape().dims() != kv_shape {
+        return Err(Error::Other("cross_sdpa requires compatible BF16 Q/K/V shapes".into()));
+    }
+    if key_mask.is_some_and(|mask| mask.len() < kv_len) {
+        return Err(Error::Other("cross_sdpa key mask is too short".into()));
+    }
+    let output = CudaBuffer::alloc_zeros(q_len * n_heads * head_dim * 2, ctx.device_id())
+        .map_err(Error::Cuda)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_cross_sdpa_bf16(
+            gpu_ptr(q)?, gpu_ptr(k)?, gpu_ptr(v)?,
+            key_mask.map_or(std::ptr::null(), |mask| mask.ptr() as *const _), output.ptr(),
+            q_len as u32, kv_len as u32, n_heads as u32, n_kv_heads as u32,
+            head_dim as u32, u32::from(causal),
+            1.0 / (head_dim as f32).sqrt(), ctx.stream().handle(),
+        )).map_err(Error::Cuda)?;
+    }
+    Ok(make_gpu_tensor(Shape::new(vec![q_len, n_heads * head_dim]),
+                       DType::BF16, ctx.device_id(), output))
+}
+
 /// Causal attention mask on CUDA. Dispatches on dtype.
 pub fn causal_mask(ctx: &CudaContext, input: &Tensor, kv_offset: u32) -> Result<Tensor> {
     let device_id = ctx.device_id();

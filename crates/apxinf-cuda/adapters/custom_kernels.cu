@@ -59,6 +59,38 @@ extern "C" cudaError_t apxinf_static_evict_l2(
   return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_cross_sdpa_bf16(
+    const void* q, const void* k, const void* v, const void* key_mask,
+    void* output, uint32_t q_len, uint32_t kv_len, uint32_t n_heads,
+    uint32_t n_kv_heads, uint32_t head_dim, uint32_t causal, float scale,
+    cudaStream_t stream) {
+  if (q == nullptr || k == nullptr || v == nullptr || output == nullptr ||
+      q_len == 0 || kv_len == 0 || n_heads == 0 || n_kv_heads == 0 ||
+      n_heads % n_kv_heads != 0 || head_dim == 0)
+    return cudaErrorInvalidValue;
+  dim3 grid(q_len, n_heads, 1);
+  cross_sdpa_bf16_kernel<<<grid, 32, (kv_len + 1) * sizeof(float), stream>>>(
+      static_cast<const __nv_bfloat16*>(q),
+      static_cast<const __nv_bfloat16*>(k),
+      static_cast<const __nv_bfloat16*>(v),
+      static_cast<const uint8_t*>(key_mask),
+      static_cast<__nv_bfloat16*>(output), q_len, kv_len, n_heads, n_kv_heads,
+      head_dim, causal != 0, scale);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_relu_bf16(
+    const void* input, void* output, uint32_t count, cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || count == 0)
+    return cudaErrorInvalidValue;
+  constexpr uint32_t threads = 256;
+  const uint32_t blocks = (count + threads - 1) / threads;
+  relu_bf16_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<__nv_bfloat16*>(output), count);
+  return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_static_quantize_f16_e4m3(
     const void* input, void* output, int64_t count, float scale,
     cudaStream_t stream) {

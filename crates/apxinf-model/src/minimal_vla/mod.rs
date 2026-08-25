@@ -175,6 +175,11 @@ impl VlaRuntime for MinimalVlaRuntime {
                 "minimal_vla supports exactly one token".into(),
             ));
         }
+        if spec.state_shape.is_some() || spec.image_grid_count != 0 || spec.has_attention_mask {
+            return Err(Error::Other(
+                "minimal_vla does not accept external conditioning".into(),
+            ));
+        }
         Ok(Box::new(MinimalPrepared {
             spec: *spec,
             cfg: self.cfg.clone(),
@@ -302,6 +307,7 @@ mod tests {
             },
             token_ids: vec![1],
             noise: Tensor::from_f32((1, 2), &[0.25, 0.5]).unwrap(),
+            conditioning: crate::vla::VlaConditioning::default(),
         };
         let prepared = runtime.prepare(&observation.inference_spec()).unwrap();
         assert_eq!(

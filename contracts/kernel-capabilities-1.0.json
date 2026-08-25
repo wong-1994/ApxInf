@@ -74,6 +74,32 @@
       "interface": "category_specific_mlp(input, embodiment) -> output"
     },
     {
+      "operation": "sdpa_semantic_variants",
+      "provenance": "kernel_workflow_return",
+      "classification": "existing_primitive",
+      "supported_dtypes": ["bf16"],
+      "supported_layouts": ["row_major"],
+      "target_shapes": [
+        [1, 16, 256, 64],
+        [1, 16, 82, 128],
+        [1, 8, 82, 128],
+        [1, 32, 82, 64],
+        [1, 32, 41, 48],
+        [1, 32, 82, 48]
+      ],
+      "interface": "sdpa_variants(q, k, v, causal_mask, padding_mask, encoder_mask) -> output",
+      "reference_validation": {
+        "passed": true,
+        "references": [
+          {"case": "libero-256/0", "tensor": "attention_replay.attention.variant.0.output"},
+          {"case": "libero-256/0", "tensor": "attention_replay.attention.variant.1.output"},
+          {"case": "libero-256/0", "tensor": "attention_replay.attention.variant.2.output"},
+          {"case": "libero-256/0", "tensor": "attention_replay.attention.variant.3.output"},
+          {"case": "libero-256/0", "tensor": "attention_replay.attention.variant.4.output"}
+        ]
+      }
+    },
+    {
       "operation": "euler_update",
       "provenance": "built_in",
       "classification": "existing_primitive",

@@ -2,8 +2,8 @@ use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
 use crate::buffer::CudaBuffer;
 use crate::context::CudaContext;
-use crate::kernels::activation::{gelu_tanh, silu};
-use crate::kernels::attention::{causal_mask, softmax, softmax_causal, vision};
+use crate::kernels::activation::{gelu_tanh, relu, silu};
+use crate::kernels::attention::{causal_mask, cross, softmax, softmax_causal, vision};
 use crate::kernels::cache::append;
 use crate::kernels::elementwise::{add, add_bias, mul, scale};
 use crate::kernels::embedding::lookup;
@@ -38,6 +38,16 @@ fn silu_bf16_matches_fp32_reference() {
     let actual = download_bf16_as_fp32(&bf_out).unwrap();
 
     assert_bf16_close_elementwise(&actual, &expected);
+}
+
+#[test]
+fn relu_bf16_matches_fp32_reference() {
+    let ctx = CudaContext::new(0).expect("CUDA device required");
+    let input = [-3.0, -0.0, 0.0, 0.25, 8.0];
+    let expected = [0.0, 0.0, 0.0, 0.25, 8.0];
+    let input = upload_fp32_as_bf16(&ctx, &input, vec![5]).unwrap();
+    let output = relu(&ctx, &input).unwrap();
+    assert_bf16_close_elementwise(&download_bf16_as_fp32(&output).unwrap(), &expected);
 }
 
 // ── Elementwise: add ──────────────────────────────────────────────
@@ -950,6 +960,73 @@ fn vision_sdpa_bf16_matches_reference() {
     assert_bf16_close_reduction(&download_bf16_as_fp32(&out).unwrap(), &expected);
 }
 
+#[test]
+fn cross_sdpa_bf16_matches_masked_fp32_reference() {
+    let ctx = CudaContext::new(0).expect("CUDA device required");
+    let (q_len, kv_len, heads, dim) = (3usize, 5usize, 2usize, 8usize);
+    let q: Vec<f32> = (0..q_len * heads * dim)
+        .map(|i| ((i as f32) * 0.07 - 0.8).sin())
+        .collect();
+    let k: Vec<f32> = (0..kv_len * heads * dim)
+        .map(|i| ((i as f32) * 0.05 + 0.2).cos())
+        .collect();
+    let v: Vec<f32> = (0..kv_len * heads * dim)
+        .map(|i| ((i as f32) * 0.03 - 0.4).tanh())
+        .collect();
+    let mask = [1u8, 1, 0, 1, 0];
+    let scale = 1.0 / (dim as f32).sqrt();
+    let mut expected = vec![0.0f32; q_len * heads * dim];
+    for qi in 0..q_len {
+        for head in 0..heads {
+            let mut scores = vec![f32::NEG_INFINITY; kv_len];
+            for ki in 0..kv_len {
+                if mask[ki] == 0 {
+                    continue;
+                }
+                scores[ki] = (0..dim)
+                    .map(|d| {
+                        q[(qi * heads + head) * dim + d]
+                            * k[(ki * heads + head) * dim + d]
+                    })
+                    .sum::<f32>()
+                    * scale;
+            }
+            let maximum = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let denominator = scores
+                .iter()
+                .map(|score| (*score - maximum).exp())
+                .sum::<f32>();
+            for d in 0..dim {
+                expected[(qi * heads + head) * dim + d] = (0..kv_len)
+                    .map(|ki| {
+                        (scores[ki] - maximum).exp() / denominator
+                            * v[(ki * heads + head) * dim + d]
+                    })
+                    .sum();
+            }
+        }
+    }
+    let q = upload_fp32_as_bf16(&ctx, &q, vec![q_len, heads, dim]).unwrap();
+    let k = upload_fp32_as_bf16(&ctx, &k, vec![kv_len, heads, dim]).unwrap();
+    let v = upload_fp32_as_bf16(&ctx, &v, vec![kv_len, heads, dim]).unwrap();
+    let mask_buffer = CudaBuffer::alloc(mask.len(), ctx.device_id()).unwrap();
+    mask_buffer.copy_from_host(&mask).unwrap();
+    let output = cross(
+        &ctx,
+        &q,
+        &k,
+        &v,
+        q_len,
+        kv_len,
+        heads,
+        dim,
+        Some(&mask_buffer),
+        false,
+    )
+    .unwrap();
+    assert_bf16_close_reduction(&download_bf16_as_fp32(&output).unwrap(), &expected);
+}
+
 // ── concat_2d (fused weight packing) ─────────────────────────────
 
 #[test]
@@ -995,6 +1072,19 @@ fn concat_2d_bf16_packs_qkv_correctly() {
         }
     }
     assert_bf16_close_elementwise(&out, &expected);
+}
+
+#[test]
+fn slice_2d_bf16_copies_nonzero_row_and_column_offsets() {
+    use crate::backend::CudaBackend;
+    use apxinf_core::Backend;
+    let backend = CudaBackend::new(0).expect("CUDA device required");
+    let values = (0..20).map(|x| half::bf16::from_f32(x as f32)).collect::<Vec<_>>();
+    let input = Tensor::from_bf16(vec![4, 5], &values).unwrap();
+    let input = backend.to_device(&input).unwrap();
+    let output = backend.slice_2d(&input, 1, 2, 2, 2).unwrap();
+    backend.synchronize().unwrap();
+    assert_eq!(backend.to_cpu(&output).unwrap().to_f32_vec().unwrap(), vec![7.0, 8.0, 12.0, 13.0]);
 }
 
 #[test]

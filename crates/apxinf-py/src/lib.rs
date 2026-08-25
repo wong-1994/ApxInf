@@ -37,8 +37,8 @@ use pyo3::prelude::*;
 use apxinf_core::{Device, Shape, Tensor};
 use apxinf_model::minimal_vla::MinimalVlaConfig;
 use apxinf_model::{
-    AutoModel, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation, Pi05Config,
-    SyntheticWeights, VisionObservation,
+    AutoModel, GrootConfig, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation, Pi05Config,
+    SyntheticWeights, VisionObservation, VlaConditioning,
 };
 
 /// Map any Rust error into a Python `RuntimeError`.
@@ -101,6 +101,7 @@ struct ModelContract {
     action_dim: usize,
     max_token_len: usize,
     patch_size: usize,
+    is_groot: bool,
 }
 
 impl From<&Pi05Config> for ModelContract {
@@ -112,6 +113,7 @@ impl From<&Pi05Config> for ModelContract {
             action_dim: config.action_dim,
             max_token_len: config.max_token_len,
             patch_size: config.patch_size,
+            is_groot: false,
         }
     }
 }
@@ -124,7 +126,14 @@ fn load_config(model: &str, checkpoint: &Path) -> PyResult<ModelContract> {
     };
     let config_path = root.join("config.json");
     if config_path.is_file() {
-        if model == "minimal_vla" {
+        if model == "Gr00tN1d7" || model == "groot" {
+            let config = GrootConfig::from_json_file(&config_path).map_err(runtime_err)?;
+            Ok(ModelContract {
+                num_views: 0, image_size: 0, action_horizon: config.action_horizon,
+                action_dim: config.max_action_dim, max_token_len: config.max_seq_len,
+                patch_size: 16, is_groot: true,
+            })
+        } else if model == "minimal_vla" {
             let config = MinimalVlaConfig::from_json_file(&config_path).map_err(runtime_err)?;
             Ok(ModelContract {
                 num_views: config.num_views,
@@ -133,6 +142,7 @@ fn load_config(model: &str, checkpoint: &Path) -> PyResult<ModelContract> {
                 action_dim: config.action_dim,
                 max_token_len: config.max_token_len,
                 patch_size: 1,
+                is_groot: false,
             })
         } else {
             let config = Pi05Config::from_json_file(&config_path).map_err(runtime_err)?;
@@ -431,6 +441,57 @@ impl Model {
             vision: VisionObservation::Patches(patch_tensor),
             token_ids: tokens,
             noise: noise_tensor,
+            conditioning: VlaConditioning::default(),
+        };
+        self.run(py, observation)
+    }
+
+    /// Bare GR00T N1.7 inference from Qwen processor outputs.
+    #[pyo3(name = "_infer_groot")]
+    #[allow(clippy::too_many_arguments)]
+    fn infer_groot<'py>(
+        &self,
+        py: Python<'py>,
+        pixel_values: PyReadonlyArray2<'py, f32>,
+        image_grid_thw: PyReadonlyArray2<'py, u32>,
+        token_ids: PyReadonlyArray1<'py, u32>,
+        attention_mask: PyReadonlyArray1<'py, u8>,
+        state: PyReadonlyArray2<'py, f32>,
+        embodiment_id: u32,
+        noise: PyReadonlyArray2<'py, f32>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        if !self.config.is_groot {
+            return Err(PyValueError::new_err("_infer_groot requires a GR00T model"));
+        }
+        let pixel_shape = pixel_values.shape();
+        if pixel_shape.len() != 2 || pixel_shape[1] != 1536 {
+            return Err(PyValueError::new_err(format!("pixel_values must be [patches,1536], got {pixel_shape:?}")));
+        }
+        let grid_shape = image_grid_thw.shape();
+        if grid_shape.len() != 2 || grid_shape[1] != 3 {
+            return Err(PyValueError::new_err(format!("image_grid_thw must be [images,3], got {grid_shape:?}")));
+        }
+        let tokens = token_ids.as_slice().map_err(|_| PyValueError::new_err("token_ids must be contiguous"))?.to_vec();
+        self.validate_tokens(&tokens)?;
+        let mask = attention_mask.as_slice().map_err(|_| PyValueError::new_err("attention_mask must be contiguous"))?.to_vec();
+        if mask.len() != tokens.len() { return Err(PyValueError::new_err("attention_mask length must equal token_ids")); }
+        let state_shape = state.shape();
+        if state_shape != [1, self.config.action_dim] {
+            return Err(PyValueError::new_err(format!("state must be [1,{}], got {state_shape:?}", self.config.action_dim)));
+        }
+        let pixels = Tensor::from_f32(pixel_shape.to_vec(), pixel_values.as_slice()
+            .map_err(|_| PyValueError::new_err("pixel_values must be contiguous"))?).map_err(runtime_err)?;
+        let state = Tensor::from_f32(state_shape.to_vec(), state.as_slice()
+            .map_err(|_| PyValueError::new_err("state must be contiguous"))?).map_err(runtime_err)?;
+        let observation = Observation {
+            vision: VisionObservation::Patches(pixels), token_ids: tokens,
+            noise: self.noise_tensor(noise)?,
+            conditioning: VlaConditioning {
+                state: Some(state), embodiment_id: Some(embodiment_id),
+                image_grid_thw: image_grid_thw.as_slice()
+                    .map_err(|_| PyValueError::new_err("image_grid_thw must be contiguous"))?.to_vec(),
+                attention_mask: mask,
+            },
         };
         self.run(py, observation)
     }
@@ -485,6 +546,7 @@ impl Model {
             vision: VisionObservation::RgbU8 { bytes, layout },
             token_ids: tokens,
             noise: noise_tensor,
+            conditioning: VlaConditioning::default(),
         };
         self.run(py, observation)
     }

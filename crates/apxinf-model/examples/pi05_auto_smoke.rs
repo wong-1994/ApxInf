@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use apxinf_core::{DType, Device, Tensor};
 use apxinf_model::{
     AutoModel, LoadOptions, ModelPrecision, Observation, Pi05Config, VisionObservation,
+    VlaConditioning,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -52,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )),
         token_ids: vec![0; token_count],
         noise: Tensor::zeros(vec![config.action_horizon, config.action_dim], DType::F32),
+        conditioning: VlaConditioning::default(),
     };
     let prepared = model.prepare(&observation.inference_spec())?;
     let prepared_action = prepared.run(&observation)?;

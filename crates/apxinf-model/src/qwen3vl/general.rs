@@ -210,13 +210,31 @@ impl GeneralQwen3VL {
     /// `token_ids` is the full chat-templated prompt (including image_pad tokens).
     /// `pixel_values` is `[N, 1536]` bf16 on CPU or the model device;
     /// `grid_thw` is `[[T, H, W]]`.
-    fn prefill_with_image(
+    pub fn encode_multimodal(
         &mut self,
         token_ids: &[u32],
         pixel_values: &Tensor,
         grid_thw: &[[u32; 3]],
     ) -> Result<Tensor> {
+        self.encode_multimodal_to_layer(token_ids, pixel_values, grid_thw, self.config.text.n_layers)
+    }
+
+    /// Multimodal encoding stopped after `layer_count` language layers.
+    /// GR00T N1.7 deliberately truncates Cosmos-Reason2 to its first 16
+    /// layers and consumes that final hidden state without the output norm.
+    pub(crate) fn encode_multimodal_to_layer(
+        &mut self,
+        token_ids: &[u32],
+        pixel_values: &Tensor,
+        grid_thw: &[[u32; 3]],
+        layer_count: usize,
+    ) -> Result<Tensor> {
         let _img_range = crate::profiling::trace::range("multimodal_forward");
+        if layer_count == 0 || layer_count > self.config.text.n_layers {
+            return Err(Error::Other(format!(
+                "Qwen3-VL layer_count {layer_count} is outside 1..={}", self.config.text.n_layers
+            )));
+        }
         let seq_len = token_ids.len();
         if seq_len == 0 {
             return Err(Error::Other("prefill: empty token_ids".into()));
@@ -303,7 +321,7 @@ impl GeneralQwen3VL {
 
         // Run layers 0..n_layers, injecting deepstack at layers 0, 1, 2.
         let _prefill_range = crate::profiling::trace::range("prefill");
-        for i in 0..self.config.text.n_layers {
+        for i in 0..layer_count {
             let _layer_range = crate::profiling::trace::range(&format!("layer_{i}"));
             x = self.forward_layer(&x, i, &pos_ids, 0)?;
             // Deepstack injection at layers 0, 1, 2.
@@ -314,12 +332,32 @@ impl GeneralQwen3VL {
 
         self.kv.advance(seq_len);
 
-        // Final norm + tied lm_head.
-        let x = self.backend.rms_norm(&x, &self.weights.output_norm_weight,
-                                      self.config.text.rms_norm_eps)?;
-        let logits = self.backend.matmul(&x, &self.lm_head)?;
+        self.backend.synchronize()?;
+        Ok(x)
+    }
+
+    fn prefill_with_image(
+        &mut self,
+        token_ids: &[u32],
+        pixel_values: &Tensor,
+        grid_thw: &[[u32; 3]],
+    ) -> Result<Tensor> {
+        let encoded = self.encode_multimodal(token_ids, pixel_values, grid_thw)?;
+        let normalized = self.backend.rms_norm(
+            &encoded,
+            &self.weights.output_norm_weight,
+            self.config.text.rms_norm_eps,
+        )?;
+        let logits = self.backend.matmul(&normalized, &self.lm_head)?;
         self.backend.synchronize()?;
         self.backend.to_cpu(&logits)
+    }
+
+    /// Clear the backbone KV state before an independent multimodal encoding.
+    pub fn reset_state(&mut self) -> Result<()> {
+        self.kv.clear()?;
+        self.rope_delta = 0;
+        Ok(())
     }
 
     /// Text-only mRoPE position IDs. For a token at index `t` (absolute

@@ -68,6 +68,10 @@ impl CudaBackend {
 }
 
 impl Backend for CudaBackend {
+    fn relu(&self, input: &Tensor) -> Result<Tensor> {
+        kernels::activation::relu(&self.ctx, input)
+    }
+
     fn rms_norm(&self, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
         kernels::norm::rms(&self.ctx, input, weight, eps)
     }
@@ -184,6 +188,31 @@ impl Backend for CudaBackend {
         kernels::attention::vision(&self.ctx, q, k, v, seq_len, n_heads, head_dim)
     }
 
+    fn cross_sdpa(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        q_len: usize,
+        kv_len: usize,
+        n_heads: usize,
+        head_dim: usize,
+        key_mask: Option<&[u8]>,
+        causal: bool,
+    ) -> Result<Tensor> {
+        let mask = key_mask
+            .map(|bytes| {
+                let buffer = CudaBuffer::alloc(bytes.len(), self.ctx.device_id())
+                    .map_err(Error::Cuda)?;
+                buffer.copy_from_host(bytes).map_err(Error::Cuda)?;
+                Ok::<_, Error>(buffer)
+            })
+            .transpose()?;
+        kernels::attention::cross(
+            &self.ctx, q, k, v, q_len, kv_len, n_heads, head_dim, mask.as_ref(), causal,
+        )
+    }
+
     fn concat_2d(&self, tensors: &[&Tensor]) -> Result<Tensor> {
         use apxinf_core::Shape;
         if tensors.is_empty() {
@@ -218,6 +247,7 @@ impl Backend for CudaBackend {
             crate::transfers::copy_tensor_2d_to_buffer(
                 &self.ctx,
                 t,
+                0,
                 &out_buf,
                 col_offset * elem,
                 dst_pitch,
@@ -228,6 +258,32 @@ impl Backend for CudaBackend {
             col_offset += cols;
         }
         Ok(out_buf.into_tensor(Shape::new(vec![rows, total_cols]), dtype))
+    }
+
+    fn concat_rows(&self, first: &Tensor, second: &Tensor) -> Result<Tensor> {
+        match first.dtype() {
+            apxinf_core::DType::BF16 => kernels::elementwise::concat_rows_bf16(&self.ctx, first, second),
+            apxinf_core::DType::F16 => kernels::elementwise::concat_rows_f16(&self.ctx, first, second),
+            dtype => Err(Error::Other(format!("concat_rows: unsupported dtype {dtype:?}"))),
+        }
+    }
+
+    fn slice_2d(&self, input: &Tensor, row_start: usize, row_count: usize,
+                col_start: usize, col_count: usize) -> Result<Tensor> {
+        use apxinf_core::Shape;
+        let dims = input.shape().dims();
+        if dims.len() != 2 || row_start + row_count > dims[0] || col_start + col_count > dims[1] {
+            return Err(Error::Other("slice_2d range is outside input".into()));
+        }
+        let elem = input.dtype().size_in_bytes();
+        let output = CudaBuffer::alloc_zeros(row_count * col_count * elem, self.ctx.device_id())
+            .map_err(Error::Cuda)?;
+        transfers::copy_tensor_2d_to_buffer(
+            &self.ctx, input, (row_start * dims[1] + col_start) * elem,
+            &output, 0, col_count * elem, dims[1] * elem,
+            col_count * elem, row_count,
+        )?;
+        Ok(output.into_tensor(Shape::new(vec![row_count, col_count]), input.dtype()))
     }
 
     fn embedding(&self, table: &Tensor, ids: &[u32]) -> Result<Tensor> {

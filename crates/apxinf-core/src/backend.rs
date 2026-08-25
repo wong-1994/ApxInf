@@ -69,6 +69,12 @@ pub trait Backend {
         Err(crate::Error::Other("gelu_tanh: not supported on this backend".into()))
     }
 
+    /// Elementwise ReLU. GR00T uses this between the two projections of its
+    /// embodiment-specific MLPs.
+    fn relu(&self, _input: &Tensor) -> Result<Tensor> {
+        Err(crate::Error::Other("relu: not supported on this backend".into()))
+    }
+
     /// Broadcast-add a `[cols]` bias vector over rows of a `[rows, cols]`
     /// activation. Used after every vision linear layer.
     /// Default: `Err(Unsupported)`. CUDA overrides.
@@ -96,12 +102,34 @@ pub trait Backend {
         Err(crate::Error::Other("concat_2d: not supported on this backend".into()))
     }
 
+    /// Concatenate two 2-D tensors along the row axis.
+    fn concat_rows(&self, _first: &Tensor, _second: &Tensor) -> Result<Tensor> {
+        Err(crate::Error::Other("concat_rows: not supported on this backend".into()))
+    }
+
+    /// Copy a rectangular slice from a contiguous 2-D tensor.
+    fn slice_2d(&self, _input: &Tensor, _row_start: usize, _row_count: usize,
+                _col_start: usize, _col_count: usize) -> Result<Tensor> {
+        Err(crate::Error::Other("slice_2d: not supported on this backend".into()))
+    }
+
     /// Non-causal full attention for the vision tower. Q/K/V each
     /// `[seq, n_heads, head_dim]`; returns `[seq, n_heads * head_dim]`.
     /// Default: `Err(Unsupported)`. CUDA overrides.
     fn vision_sdpa(&self, _q: &Tensor, _k: &Tensor, _v: &Tensor,
                    _seq_len: usize, _n_heads: usize, _head_dim: usize) -> Result<Tensor> {
         Err(crate::Error::Other("vision_sdpa: not supported on this backend".into()))
+    }
+
+    /// Non-causal attention with independent query and key/value lengths.
+    /// `key_mask`, when present, has one byte per key (`0` means masked).
+    /// Q/K/V use `[tokens, heads, head_dim]` row-major layout. K/V may use
+    /// fewer heads than Q when the Q head count is an integer multiple.
+    fn cross_sdpa(&self, _q: &Tensor, _k: &Tensor, _v: &Tensor,
+                  _q_len: usize, _kv_len: usize, _n_heads: usize,
+                  _head_dim: usize, _key_mask: Option<&[u8]>,
+                  _causal: bool) -> Result<Tensor> {
+        Err(crate::Error::Other("cross_sdpa: not supported on this backend".into()))
     }
 
     /// Embedding lookup: table[ids] -> output [seq_len, embed_dim]

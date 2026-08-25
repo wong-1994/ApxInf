@@ -7,6 +7,50 @@ use crate::kv_cache::{CpuKVCache, KvCache};
 pub struct CpuBackend;
 
 impl Backend for CpuBackend {
+    fn concat_rows(&self, first: &Tensor, second: &Tensor) -> Result<Tensor> {
+        let a = first.shape().dims();
+        let b = second.shape().dims();
+        if a.len() != 2 || b.len() != 2 || a[1] != b[1] || first.dtype() != second.dtype() {
+            return Err(Error::Other("concat_rows requires matching 2-D tensors".into()));
+        }
+        let mut values = first.to_f32_vec()?;
+        values.extend(second.to_f32_vec()?);
+        Tensor::from_f32(vec![a[0] + b[0], a[1]], &values)
+    }
+
+    fn slice_2d(&self, input: &Tensor, row_start: usize, row_count: usize,
+                col_start: usize, col_count: usize) -> Result<Tensor> {
+        let dims = input.shape().dims();
+        if dims.len() != 2 || row_start + row_count > dims[0] || col_start + col_count > dims[1] {
+            return Err(Error::Other("slice_2d range is outside input".into()));
+        }
+        let source = input.to_f32_vec()?;
+        let mut values = Vec::with_capacity(row_count * col_count);
+        for row in row_start..row_start + row_count {
+            values.extend_from_slice(&source[row * dims[1] + col_start..row * dims[1] + col_start + col_count]);
+        }
+        Tensor::from_f32(vec![row_count, col_count], &values)
+    }
+
+    fn relu(&self, input: &Tensor) -> Result<Tensor> {
+        Tensor::from_f32(
+            input.shape().clone(),
+            &input.as_f32()?.iter().map(|value| value.max(0.0)).collect::<Vec<_>>(),
+        )
+    }
+
+    fn add_bias(&self, input: &Tensor, bias: &Tensor) -> Result<Tensor> {
+        let dims = input.shape().dims();
+        if dims.len() != 2 || bias.shape().dims() != [dims[1]] {
+            return Err(Error::Other("add_bias requires input [rows,cols] and bias [cols]".into()));
+        }
+        let bias = bias.as_f32()?;
+        let output = input.as_f32()?.iter().enumerate()
+            .map(|(index, value)| value + bias[index % dims[1]])
+            .collect::<Vec<_>>();
+        Tensor::from_f32(input.shape().clone(), &output)
+    }
+
     fn rms_norm(&self, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
         let data = input.as_f32()?;
         let w = weight.as_f32()?;
@@ -100,6 +144,56 @@ impl Backend for CpuBackend {
                 .copy_from_slice(&table_data[src_offset..src_offset + embed_dim]);
         }
         Tensor::from_f32(vec![seq_len, embed_dim], &out)
+    }
+
+    fn cross_sdpa(&self, q: &Tensor, k: &Tensor, v: &Tensor,
+                  q_len: usize, kv_len: usize, n_heads: usize,
+                  head_dim: usize, key_mask: Option<&[u8]>, causal: bool) -> Result<Tensor> {
+        let expected_q = [q_len, n_heads, head_dim];
+        let k_dims = k.shape().dims();
+        if k_dims.len() != 3 || k_dims[0] != kv_len || k_dims[2] != head_dim
+            || n_heads % k_dims[1] != 0 {
+            return Err(Error::Other("cross_sdpa requires Q heads divisible by KV heads".into()));
+        }
+        let n_kv_heads = k_dims[1];
+        let expected_kv = [kv_len, n_kv_heads, head_dim];
+        if q.shape().dims() != expected_q || v.shape().dims() != expected_kv {
+            return Err(Error::Other("cross_sdpa received inconsistent shapes".into()));
+        }
+        if key_mask.is_some_and(|mask| mask.len() != kv_len) {
+            return Err(Error::Other("cross_sdpa key mask has the wrong length".into()));
+        }
+        let (q_data, k_data, v_data) = (q.as_f32()?, k.as_f32()?, v.as_f32()?);
+        let mut output = vec![0.0f32; q_len * n_heads * head_dim];
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        for qi in 0..q_len {
+            for head in 0..n_heads {
+                let kv_head = head / (n_heads / n_kv_heads);
+                let mut scores = vec![f32::NEG_INFINITY; kv_len];
+                for ki in 0..kv_len {
+                    if key_mask.is_some_and(|mask| mask[ki] == 0) || (causal && ki > qi) { continue; }
+                    let mut dot = 0.0;
+                    for dim in 0..head_dim {
+                        dot += q_data[(qi * n_heads + head) * head_dim + dim]
+                            * k_data[(ki * n_kv_heads + kv_head) * head_dim + dim];
+                    }
+                    scores[ki] = dot * scale;
+                }
+                let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                if !max.is_finite() {
+                    return Err(Error::Other("cross_sdpa mask excludes every key".into()));
+                }
+                let sum = scores.iter().map(|score| (*score - max).exp()).sum::<f32>();
+                for ki in 0..kv_len {
+                    let probability = (scores[ki] - max).exp() / sum;
+                    for dim in 0..head_dim {
+                        output[(qi * n_heads + head) * head_dim + dim] += probability
+                            * v_data[(ki * n_kv_heads + kv_head) * head_dim + dim];
+                    }
+                }
+            }
+        }
+        Tensor::from_f32(vec![q_len, n_heads * head_dim], &output)
     }
 
     fn sdpa_decode(&self, q: &Tensor, kv: &mut dyn KvCache,

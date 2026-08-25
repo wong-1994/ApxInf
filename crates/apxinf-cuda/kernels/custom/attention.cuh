@@ -313,6 +313,64 @@ __global__ void vision_sdpa_bf16_kernel(
     out_row[d1] = __float2bfloat16(acc1);
 }
 
+// General full/cross attention used by diffusion transformers. Unlike the
+// vision-specialized kernel above, Q and K/V may have different sequence
+// lengths and head_dim need not equal 64. A byte mask is optional.
+__global__ void cross_sdpa_bf16_kernel(
+    const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat16* v,
+    const uint8_t* key_mask, __nv_bfloat16* out, uint32_t q_len,
+    uint32_t kv_len, uint32_t n_heads, uint32_t n_kv_heads,
+    uint32_t head_dim, bool causal, float scale) {
+    const uint32_t head = blockIdx.y;
+    const uint32_t kv_head = head / (n_heads / n_kv_heads);
+    const uint32_t qi = blockIdx.x;
+    const int lane = threadIdx.x;
+    extern __shared__ float scores[];
+
+    for (uint32_t ki = 0; ki < kv_len; ++ki) {
+        float dot = 0.0f;
+        for (uint32_t d = lane; d < head_dim; d += 32) {
+            dot += __bfloat162float(q[(qi * n_heads + head) * head_dim + d])
+                 * __bfloat162float(k[(ki * n_kv_heads + kv_head) * head_dim + d]);
+        }
+        for (int offset = 16; offset > 0; offset >>= 1)
+            dot += __shfl_xor_sync(0xffffffff, dot, offset);
+        if (lane == 0)
+            scores[ki] = (key_mask == nullptr || key_mask[ki] != 0)
+                && (!causal || ki <= qi)
+                ? dot * scale : -INFINITY;
+    }
+    __syncthreads();
+
+    float maximum = -INFINITY;
+    for (uint32_t ki = lane; ki < kv_len; ki += 32)
+        maximum = fmaxf(maximum, scores[ki]);
+    for (int offset = 16; offset > 0; offset >>= 1)
+        maximum = fmaxf(maximum, __shfl_xor_sync(0xffffffff, maximum, offset));
+    if (lane == 0) scores[kv_len] = maximum;
+    __syncthreads();
+
+    float sum = 0.0f;
+    for (uint32_t ki = lane; ki < kv_len; ki += 32) {
+        const float probability = expf(scores[ki] - scores[kv_len]);
+        scores[ki] = probability;
+        sum += probability;
+    }
+    for (int offset = 16; offset > 0; offset >>= 1)
+        sum += __shfl_xor_sync(0xffffffff, sum, offset);
+    if (lane == 0) scores[kv_len] = sum;
+    __syncthreads();
+
+    for (uint32_t d = lane; d < head_dim; d += 32) {
+        float value = 0.0f;
+        for (uint32_t ki = 0; ki < kv_len; ++ki) {
+            value += scores[ki] / scores[kv_len]
+                * __bfloat162float(v[(ki * n_kv_heads + kv_head) * head_dim + d]);
+        }
+        out[(qi * n_heads + head) * head_dim + d] = __float2bfloat16(value);
+    }
+}
+
 
 
 // ── Flash Attention decode (bf16) — single-kernel online-softmax ────────
@@ -870,6 +928,3 @@ __global__ void mha_bf16_kernel(
         __float2bfloat16(accumulator);
   }
 }
-
-
-

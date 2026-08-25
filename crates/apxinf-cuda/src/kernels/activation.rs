@@ -10,6 +10,31 @@ use crate::buffer::CudaBuffer;
 use crate::context::CudaContext;
 use crate::ffi;
 
+/// ReLU activation on a BF16 CUDA tensor.
+pub fn relu(ctx: &CudaContext, input: &Tensor) -> Result<Tensor> {
+    if input.dtype() != DType::BF16 {
+        return Err(Error::Other("relu: only BF16 supported".into()));
+    }
+    let count = u32::try_from(input.numel())
+        .map_err(|_| Error::Other("relu element count exceeds u32".into()))?;
+    let output = CudaBuffer::alloc_zeros(input.size_in_bytes(), ctx.device_id())
+        .map_err(Error::Cuda)?;
+    check_cuda(unsafe {
+        ffi::apxinf_relu_bf16(
+            gpu_ptr(input)?,
+            output.ptr(),
+            count,
+            ctx.stream().handle(),
+        )
+    })?;
+    Ok(make_gpu_tensor(
+        input.shape().clone(),
+        DType::BF16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
 /// Allocation-free SiLU into caller-owned decode storage.
 pub fn silu_into(
     ctx: &CudaContext,

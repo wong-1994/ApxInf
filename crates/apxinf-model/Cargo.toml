@@ -36,3 +36,11 @@ required-features = ["cuda"]
 [[example]]
 name = "pi05_auto_smoke"
 required-features = ["cuda"]
+
+[[example]]
+name = "groot_load_smoke"
+required-features = ["cuda"]
+
+[[example]]
+name = "groot_operator_replay"
+required-features = ["cuda"]

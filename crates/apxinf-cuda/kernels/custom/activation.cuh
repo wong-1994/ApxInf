@@ -10,6 +10,15 @@ struct alignas(8) Bf16x4 {
 
 // ── SiLU ──────────────────────────────────────────────────────────────────
 
+__global__ void relu_bf16_kernel(
+    const __nv_bfloat16* input, __nv_bfloat16* output, uint32_t count)
+{
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= count) return;
+    float value = __bfloat162float(input[gid]);
+    output[gid] = __float2bfloat16(fmaxf(value, 0.0f));
+}
+
 __global__ void silu_f32_kernel(
     const float* input, float* output, uint32_t count)
 {

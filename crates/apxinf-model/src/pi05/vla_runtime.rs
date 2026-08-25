@@ -422,6 +422,12 @@ where
 impl Pi05VlaRuntime {
     fn build_prepared(&self, spec: &InferenceSpec) -> Result<Pi05PreparedInference> {
         spec.validate()?;
+        if spec.state_shape.is_some() || spec.image_grid_count != 0 || spec.has_attention_mask {
+            return Err(Error::Other(
+                "PI0.5 does not accept external state, image-grid, or attention-mask conditioning"
+                    .into(),
+            ));
+        }
         if spec.token_count > self.config.max_token_len {
             return Err(Error::Other(format!(
                 "PI0.5 token count {} exceeds maximum {}",
