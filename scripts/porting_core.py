@@ -63,6 +63,7 @@ class FamilyPack:
     integration_contract: str
     serving_contract: str
     performance_contract: str
+    equivalence_observables: tuple[tuple[str, str], ...]
     payload_schema: Callable[[Path, Any], str]
     report_defaults: Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -596,11 +597,60 @@ VLA_FAMILY_PACK = FamilyPack(
     integration_contract="observation-to-action",
     serving_contract="action-serving",
     performance_contract="vla-control-step-1.0",
+    equivalence_observables=(
+        ("normalized_actions", "output.actions"),
+        ("postprocessed_actions", "postprocessed.actions"),
+    ),
     payload_schema=_vla_payload_schema,
     report_defaults=_vla_report_defaults,
 )
 
-FAMILY_PACKS = {VLA_FAMILY_PACK.family: VLA_FAMILY_PACK}
+LLM_FAMILY_PACK = FamilyPack(
+    family="llm",
+    contract_family="canonical_transformer_llm",
+    default_contract_version="1.0",
+    supported_tuples=HARDWARE_MATRIX,
+    required_capabilities=frozenset(
+        {
+            "shape_profiles",
+            "tokenizer_chat_templates",
+            "embeddings",
+            "attention",
+            "masks",
+            "position_encodings",
+            "normalization",
+            "activations",
+            "kv_cache",
+            "generation_state",
+            "sampling",
+            "control_flow",
+        }
+    ),
+    reference_contract="llm-reference-adapter-1.0",
+    canonicalization_contract="llm-canonicalization-1.0",
+    verification_contract="llm-equivalence-1.0",
+    integration_contract="language-generation",
+    serving_contract="text-generation-serving",
+    performance_contract="llm-generation-1.0",
+    equivalence_observables=(
+        ("tokenizer_output", "inputs.token_ids"),
+        ("representative_layers", "intermediates.layer_output"),
+        ("prefill_logits", "output.prefill_logits"),
+        ("decode_logits", "output.decode_logits"),
+        ("kv_cache", "output.kv_cache"),
+        ("kv_cache_positions", "output.kv_positions"),
+        ("reset_behavior", "output.reset_state"),
+        ("generated_tokens", "postprocessed.generated_tokens"),
+        ("eos_handling", "postprocessed.eos_handling"),
+    ),
+    payload_schema=_vla_payload_schema,
+    report_defaults=_vla_report_defaults,
+)
+
+FAMILY_PACKS = {
+    VLA_FAMILY_PACK.family: VLA_FAMILY_PACK,
+    LLM_FAMILY_PACK.family: LLM_FAMILY_PACK,
+}
 
 
 def select_family_pack(family: Any) -> FamilyPack:

@@ -189,7 +189,12 @@
       ],
       "properties": {
         "scope": {
-          "enum": ["preprocessed_inputs", "intermediates", "normalized_actions", "postprocessed_actions"]
+          "enum": [
+            "preprocessed_inputs", "intermediates", "normalized_actions",
+            "postprocessed_actions", "tokenizer_output", "representative_layers",
+            "prefill_logits", "decode_logits", "kv_cache", "kv_cache_positions",
+            "reset_behavior", "generated_tokens", "eos_handling"
+          ]
         },
         "source_path": {"type": "string", "minLength": 1},
         "canonical_path": {"type": "string", "minLength": 1},

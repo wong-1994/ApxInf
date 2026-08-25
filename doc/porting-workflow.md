@@ -20,8 +20,8 @@ python3 scripts/apxinf_port.py init \
 
 Every request explicitly selects `llm`, `vlm`, or `vla`. The selected Family
 Pack and its exact Capability Contract version are pinned before trusted source
-code can execute. The VLA Family Pack is the first registered implementation;
-LLM and VLM requests are recognized but rejected until their packs are added.
+code can execute. The VLA and LLM Family Packs are registered; VLM requests are
+recognized but rejected until that pack is added.
 
 `--source`, `--source-revision`, and `--checkpoint` may be supplied during
 initialization or left blank in the draft. When paths are supplied,
@@ -54,10 +54,13 @@ schedules, custom operators, and dynamic branches; an empty list is the explicit
 declaration that a list-valued feature is absent.
 
 `describe()` also supplies `capability_facts`, with one explicit observation for
-each required semantic dimension: shape profiles, attention, masks, position
-encodings, normalization, activations, conditioning, action heads, schedules,
-and control flow. Values are compared to the machine-readable contract rather
-than inferred from model names. Preflight reconciles these declarations with
+each required semantic dimension. VLA covers shape profiles, attention, masks,
+positions, normalization, activations, conditioning, action heads, schedules,
+and control flow. LLM covers text shape profiles, tokenizer/chat templates,
+embeddings, attention and masks, positions, normalization, activations, KV
+cache, generation state, sampling, and control flow. Values are compared to the
+machine-readable contract rather than inferred from model names. Preflight
+reconciles these declarations with
 the captured input schemas, `normalization.model`, each schedule `kind`, each
 dynamic-branch `kind`, and any `operator_traces[].semantic_capabilities`
 annotations, so contradictory raw inventory cannot pass by assertion alone.
@@ -84,7 +87,8 @@ access by trusted code and is not a sandbox for malicious code.
 ## Prove canonical equivalence
 
 Every source that passes capability classification emits the same versioned
-Canonical VLA trace contract. A source whose semantics are already canonical
+named-tensor canonical trace contract with its selected family. A source whose
+semantics are already canonical
 uses direct mode and does not create a Canonical Adapter. A source with one or
 more `canonicalizable` capabilities must additionally expose
 `canonicalize(model)`, `canonical_preprocess(profile)`,
@@ -108,9 +112,11 @@ The gate requires at least two distinct representative profiles and explicit
 absolute and relative thresholds. It resets Python, NumPy, PyTorch, and an
 optional source `set_seed(seed)` hook for seeds 0 and 1. It compares canonical
 preprocessing against the declared source-to-canonical input transform, then
-compares selected intermediates, normalized actions, and deployable
-postprocessed actions for every profile/seed case. An incomplete manifest or
-failed comparison blocks Preflight with a private Canonical VLA Gap Report.
+compares family-required checkpoints and final outputs for every profile/seed
+case. For LLM this includes tokenizer output, representative layers, prefill and
+decode logits, KV-cache values and positions, reset state, generated tokens, and
+EOS handling. An incomplete manifest or failed comparison blocks Preflight with
+a private canonicalization Gap Report.
 
 ## Run Intake and Preflight
 

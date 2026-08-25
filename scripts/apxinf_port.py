@@ -83,8 +83,8 @@ def canonical_adapter_template() -> Path:
     return repository_root() / "scripts" / "canonical_adapter_template.py"
 
 
-def default_capability_contract(version: str) -> Path:
-    return repository_root() / "contracts" / f"vla-capability-contract-{version}.json"
+def default_capability_contract(version: str, family: str = "vla") -> Path:
+    return repository_root() / "contracts" / f"{family}-capability-contract-{version}.json"
 
 
 def default_kernel_capabilities() -> Path:
@@ -789,7 +789,7 @@ def artifact_record(
     contract_path = (extra_upstream or {}).get("capability_contract")
     if contract_path is None:
         contract_path = default_capability_contract(
-            request["capability_contract_version"]
+            request["capability_contract_version"], request["model_family"]
         )
     contract_sha = (
         file_sha256(contract_path)
@@ -907,7 +907,8 @@ def resume_port(args: argparse.Namespace) -> int:
                 "capability_contract",
                 str(
                     default_capability_contract(
-                        request["capability_contract_version"]
+                        request["capability_contract_version"],
+                        request["model_family"],
                     )
                 ),
             )
@@ -981,6 +982,27 @@ def canonical_input_issue(
     return None
 
 
+def family_reference_issue(
+    pack: FamilyPack, capture: dict[str, Any]
+) -> dict[str, str] | None:
+    """Require every family checkpoint in every deterministic reference case."""
+
+    for case_index, case in enumerate(capture.get("profiles", [])):
+        for observable, path in pack.equivalence_observables:
+            current: Any = case
+            for component in path.split("."):
+                if not isinstance(current, dict) or component not in current:
+                    return {
+                        "path": f"reference_capture.profiles[{case_index}].{path}",
+                        "message": (
+                            f"{pack.family} Reference Adapter must capture "
+                            f"{observable} at {path}"
+                        ),
+                    }
+                current = current[component]
+    return None
+
+
 def write_direct_canonical_evidence(
     port_dir: Path,
     request: dict[str, Any],
@@ -991,7 +1013,8 @@ def write_direct_canonical_evidence(
     upstream_paths: dict[str, Path],
 ) -> tuple[dict[str, int], dict[str, dict[str, Any]]]:
     trace = canonical_trace_document(
-        request["port_id"], "direct", classification, capture["profiles"], inventory
+        request["port_id"], request["model_family"], "direct", classification,
+        capture["profiles"], inventory
     )
     trace_path = port_dir / "private" / "canonical_trace.json"
     write_json(trace_path, trace)
@@ -1008,10 +1031,8 @@ def write_direct_canonical_evidence(
                 "mismatch_reason": None,
             }
             for scope, source_path in (
-                ("preprocessed_inputs", "inputs"),
-                ("intermediates", "intermediates"),
-                ("normalized_actions", "output.actions"),
-                ("postprocessed_actions", "postprocessed.actions"),
+                (("preprocessed_inputs", "inputs"), ("intermediates", "intermediates"))
+                + select_family_pack(request["model_family"]).equivalence_observables
             )
         ]
         cases.append(
@@ -1061,11 +1082,13 @@ def write_direct_canonical_evidence(
     return evidence["summary"], artifacts
 
 
-def previous_capability_contract_path(path: Path, version: str) -> Path:
+def previous_capability_contract_path(
+    path: Path, version: str, family: str
+) -> Path:
     candidates = (
-        path.parent / f"vla-capability-contract-{version}.json",
+        path.parent / f"{family}-capability-contract-{version}.json",
         path.parent / f"capability-contract-{version}.json",
-        default_capability_contract(version),
+        default_capability_contract(version, family),
     )
     for candidate in candidates:
         if candidate != path and candidate.is_file():
@@ -1155,7 +1178,7 @@ def load_capability_contract(
         raise ValueError(
             "capability contract version does not match the exact request pin"
         )
-    published_path = default_capability_contract(expected_version)
+    published_path = default_capability_contract(expected_version, pack.family)
     if published_path.is_file() and path.resolve() != published_path.resolve():
         published = json.loads(
             published_path.read_text(encoding="utf-8"),
@@ -1267,9 +1290,11 @@ def load_capability_contract(
                 f"removed capability {capability} must not remain declared"
             )
     if kind != "initial":
-        previous_path = previous_capability_contract_path(path, previous_version)
+        previous_path = previous_capability_contract_path(
+            path, previous_version, pack.family
+        )
         previous_contract = load_capability_contract(
-            previous_path, previous_version
+            previous_path, previous_version, pack
         )
         validate_contract_delta(previous_contract, contract)
     return contract
@@ -1492,7 +1517,11 @@ def classify_capabilities(
         if (
             capability == "shape_profiles"
             and evidence_values == {"finite"}
-            and set(string_values) in ({"static"}, {"finite"})
+            and set(string_values) in (
+                {"static"},
+                {"finite"},
+                {"finite_prompt_output_batch"},
+            )
         ):
             evidence_matches = True
         if evidence_values and not evidence_matches:
@@ -1541,7 +1570,7 @@ def classify_capabilities(
                         or (
                             capability == "shape_profiles"
                             and evidence_value == "finite"
-                            and observed == "static"
+                            and observed in {"static", "finite_prompt_output_batch"}
                         )
                     ],
                 )
@@ -1865,6 +1894,19 @@ def run_canonical_verification(
     profiles_path = private_dir / "reference_profiles.json"
     thresholds_path = private_dir / "correctness_thresholds.json"
     write_json(thresholds_path, request["correctness_thresholds"])
+    family_path = private_dir / "family_equivalence.json"
+    write_json(
+        family_path,
+        {
+            "family": request["model_family"],
+            "observables": [
+                {"scope": scope, "path": path}
+                for scope, path in select_family_pack(
+                    request["model_family"]
+                ).equivalence_observables
+            ],
+        },
+    )
     trace_path = private_dir / "canonical_trace.json"
     evidence_path = private_dir / "canonical_equivalence.json"
     result_path = private_dir / "canonical_results" / f"{secrets.token_hex(12)}.json"
@@ -1901,6 +1943,8 @@ def run_canonical_verification(
         str(result_path),
         "--port-id",
         request["port_id"],
+        "--family-equivalence",
+        str(family_path),
     ]
     try:
         completed = subprocess.run(
@@ -2046,7 +2090,9 @@ def run_port(args: argparse.Namespace) -> int:
     contract_path = (
         args.capability_contract.resolve()
         if args.capability_contract is not None
-        else default_capability_contract(request["capability_contract_version"])
+        else default_capability_contract(
+            request["capability_contract_version"], request["model_family"]
+        )
     )
     contract = None
     if request["reference"].get("entrypoint") is not None:
@@ -2264,6 +2310,8 @@ def run_port(args: argparse.Namespace) -> int:
                 issue = None
             capture_path = port_dir / artifacts["private_capture"]["path"]
             capture = json.loads(capture_path.read_text(encoding="utf-8"))
+            if issue is None:
+                issue = family_reference_issue(family_pack, capture)
             if issue is None:
                 issue = canonical_input_issue(inventory, capture)
             if issue is not None:

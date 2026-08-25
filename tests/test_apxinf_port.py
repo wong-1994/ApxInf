@@ -61,7 +61,12 @@ class PortIntakeTest(unittest.TestCase):
             self.assertEqual(unknown.returncode, 3)
             self.assertFalse((root / "unknown").exists())
 
-            for family in ("llm", "vlm"):
+            registered = self.run_port(
+                "init", "--family", "llm", "--port-dir", str(root / "llm")
+            )
+            self.assertEqual(registered.returncode, 0, registered.stderr)
+
+            for family in ("vlm",):
                 unavailable = self.run_port(
                     "init",
                     "--family",
@@ -71,6 +76,100 @@ class PortIntakeTest(unittest.TestCase):
                 )
                 self.assertEqual(unavailable.returncode, 3)
                 self.assertFalse((root / family).exists())
+
+    def test_minimal_synthetic_text_source_passes_llm_preflight_end_to_end(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "trusted-text-source"
+            source.mkdir()
+            checkpoint = root / "model.ckpt"
+            checkpoint.write_bytes(b"synthetic text weights")
+            (source / "requirements.lock").write_text("", encoding="utf-8")
+            (source / "reference.py").write_text(
+                '''
+class Model:
+    def named_modules(self): return [("", self)]
+    def named_parameters(self, remove_duplicate=False): return []
+    def named_buffers(self, remove_duplicate=False): return []
+
+def load(path): return Model()
+def preprocess(profile):
+    token = 1 if profile["name"] == "short" else 2
+    return {"token_ids": [[token, 3]]}
+def infer(model, inputs):
+    token = inputs["token_ids"][0][0]
+    return {
+        "prefill_logits": [[0.1, float(token)]],
+        "decode_logits": [[0.2, float(token + 1)]],
+        "kv_cache": {"keys": [[[float(token)]]], "values": [[[0.5]]]},
+        "kv_positions": [0, 1],
+        "reset_state": {"position": 0, "cache_length": 0},
+    }
+def capture_intermediates(model, inputs):
+    return {"layer_output": [[0.25, float(inputs["token_ids"][0][0])]]}
+def postprocess(output):
+    return {"generated_tokens": [4, 2], "eos_handling": {"eos_token": 2, "stopped": True}}
+def describe():
+    return {
+        "operator_traces": [{
+            "id": "lm_head", "operation": "aten.linear",
+            "semantics": {"equation": "logits = hidden W^T", "family_role": "lm head"},
+            "references": [{"case": "short/0", "tensor": "output.prefill_logits"}],
+            "dtype": "bf16", "layout": "row_major", "shapes": [[1, 2], [2, 2]],
+            "tolerances": {"absolute": 0.001, "relative": 0.01},
+            "golden_tensors": ["private/captures/inspection.json#profiles"],
+            "frequency": {"calls_per_inference": 2},
+            "performance_impact": {"estimated_latency_fraction": 0.2},
+            "expected_interface": "linear(input, weight) -> output"
+        }],
+        "preprocessing": {"text": "utf8"},
+        "tokenization": {"kind": "synthetic_chat_template"},
+        "normalization": {"model": "rms_norm"},
+        "stochastic_inputs": [], "schedules": [], "custom_operators": [],
+        "dynamic_branches": [],
+        "capability_facts": {
+            "shape_profiles": ["finite_prompt_output_batch"],
+            "tokenizer_chat_templates": ["chat_template_token_ids"],
+            "embeddings": ["token_embedding"], "attention": ["scaled_dot_product"],
+            "masks": ["causal"], "position_encodings": ["rotary"],
+            "normalization": ["rms_norm"], "activations": ["silu"],
+            "kv_cache": ["contiguous_layer_major_prefill_decode"],
+            "generation_state": ["token_position_eos_reset"],
+            "sampling": ["greedy"],
+            "control_flow": ["static"]
+        }
+    }
+'''.lstrip(),
+                encoding="utf-8",
+            )
+            port = root / "private-port"
+            initialized = self.run_port(
+                "init", "--family", "llm", "--source", str(source),
+                "--source-revision", "0123456789abcdef", "--checkpoint", str(checkpoint),
+                "--reference-entrypoint", "reference.py", "--dependency-lock", "requirements.lock",
+                "--port-dir", str(port),
+            )
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            request_path = port / "request.json"
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            request["representative_profiles"] = [
+                {"name": "short", "inputs": {"tokens": [1, 2]}},
+                {"name": "long", "inputs": {"tokens": [1, 4]}},
+            ]
+            request["requested_targets"] = [{"target": "thor", "precision": "bf16", "latency_goal": {"p50_ms": 5.0, "p95_ms": 8.0}}]
+            request["correctness_thresholds"] = {"absolute": 0.001, "relative": 0.01}
+            request["tuning_budgets"] = [{"target": "thor", "seconds": 30}]
+            request_path.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+
+            result = self.run_port("run", "--port-dir", str(port))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((port / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["stages"]["preflight"], "passed")
+            self.assertEqual(report["capability_assessment"]["supported"], 12)
+            trace = json.loads((port / report["artifacts"]["canonical_trace"]["path"]).read_text(encoding="utf-8"))
+            self.assertEqual(trace["family"], "llm")
+            self.assertNotIn("actions", json.dumps(trace))
 
     def test_vla_request_and_artifacts_pin_the_family_pack(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

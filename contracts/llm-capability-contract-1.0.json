@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "contract_version": "1.0",
+  "family": "canonical_transformer_llm",
+  "revision": {"kind": "initial", "previous_version": null, "changes": []},
+  "capabilities": {
+    "shape_profiles": {"required": true, "cardinality": "exactly_one", "supported": ["finite_prompt_output_batch"], "canonicalizable": {"bounded_dynamic_text": "finite_prompt_output_batch"}},
+    "tokenizer_chat_templates": {"required": true, "cardinality": "exactly_one", "supported": ["token_ids", "chat_template_token_ids"], "canonicalizable": {"training_wrapper_chat_template": "chat_template_token_ids"}},
+    "embeddings": {"required": true, "cardinality": "exactly_one", "supported": ["token_embedding", "tied_token_embedding"], "canonicalizable": {"training_embedding_wrapper": "token_embedding"}},
+    "attention": {"required": true, "cardinality": "exactly_one", "supported": ["scaled_dot_product", "grouped_query"], "canonicalizable": {"separate_qkv_scaled_dot_product": "scaled_dot_product"}},
+    "masks": {"required": true, "cardinality": "exactly_one", "supported": ["causal", "causal_and_padding"], "canonicalizable": {"additive_causal": "causal"}},
+    "position_encodings": {"required": true, "cardinality": "exactly_one", "supported": ["rotary", "learned_absolute", "sinusoidal"], "canonicalizable": {"separate_sin_cos_rotary": "rotary"}},
+    "normalization": {"required": true, "cardinality": "exactly_one", "supported": ["rms_norm", "layer_norm"], "canonicalizable": {"explicit_rms_formula": "rms_norm"}},
+    "activations": {"required": true, "cardinality": "exactly_one", "supported": ["gelu", "silu", "swiglu"], "canonicalizable": {"gelu_tanh_approximation": "gelu"}},
+    "kv_cache": {"required": true, "cardinality": "exactly_one", "supported": ["contiguous_layer_major_prefill_decode", "contiguous_batch_major_prefill_decode"], "canonicalizable": {"transposed_kv_layout": "contiguous_layer_major_prefill_decode"}},
+    "generation_state": {"required": true, "cardinality": "exactly_one", "supported": ["token_position_eos", "token_position_eos_reset"], "canonicalizable": {"wrapper_generation_state": "token_position_eos_reset"}},
+    "sampling": {"required": true, "cardinality": "exactly_one", "supported": ["greedy"], "canonicalizable": {}},
+    "control_flow": {"required": true, "cardinality": "exactly_one", "supported": ["static", "finite_profile_dispatch"], "canonicalizable": {"bounded_training_wrapper": "static"}}
+  }
+}

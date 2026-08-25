@@ -527,6 +527,15 @@ def mapped_value(root: Any, path: str) -> Any:
     return value
 
 
+def case_value(case: dict[str, Any], path: str) -> Any:
+    value: Any = case
+    for part in path.split("."):
+        if not isinstance(value, dict) or part not in value:
+            raise ValueError(f"family observable path does not exist: {path}")
+        value = value[part]
+    return value
+
+
 def verify(args: argparse.Namespace) -> None:
     support = load_reference_support()
     support.disable_runtime_network()
@@ -543,6 +552,9 @@ def verify(args: argparse.Namespace) -> None:
         classification = json.loads(args.classification.read_text(encoding="utf-8"))
         profiles = json.loads(args.profiles.read_text(encoding="utf-8"))
         thresholds = json.loads(args.thresholds.read_text(encoding="utf-8"))
+        family_equivalence = json.loads(
+            args.family_equivalence.read_text(encoding="utf-8")
+        )
         canonical_parameter_values = support.named_values(
             canonical_model, "named_parameters"
         )
@@ -622,6 +634,18 @@ def verify(args: argparse.Namespace) -> None:
                 canonical_postprocessed_json = support.json_capture(
                     canonical_postprocessed
                 )
+                source_case = {
+                    "inputs": support.json_capture(source_inputs),
+                    "output": source_output_json,
+                    "intermediates": source_intermediates_json,
+                    "postprocessed": source_postprocessed_json,
+                }
+                canonical_case = {
+                    "inputs": canonical_inputs_json,
+                    "output": canonical_output_json,
+                    "intermediates": canonical_intermediates_json,
+                    "postprocessed": canonical_postprocessed_json,
+                }
 
                 expected_canonical_inputs_json = support.json_capture(
                     expected_canonical_inputs
@@ -655,23 +679,15 @@ def verify(args: argparse.Namespace) -> None:
                 comparisons.extend(
                     [
                         comparison(
-                            "normalized_actions",
-                            "output.actions",
-                            "output.actions",
-                            source_output_json["actions"],
-                            canonical_output_json["actions"],
+                            observable["scope"],
+                            observable["path"],
+                            observable["path"],
+                            case_value(source_case, observable["path"]),
+                            case_value(canonical_case, observable["path"]),
                             absolute,
                             relative,
-                        ),
-                        comparison(
-                            "postprocessed_actions",
-                            "postprocessed.actions",
-                            "postprocessed.actions",
-                            source_postprocessed_json["actions"],
-                            canonical_postprocessed_json["actions"],
-                            absolute,
-                            relative,
-                        ),
+                        )
+                        for observable in family_equivalence["observables"]
                     ]
                 )
                 trace_cases.append(
@@ -694,7 +710,8 @@ def verify(args: argparse.Namespace) -> None:
                 )
 
         trace = support.canonical_trace_document(
-            args.port_id, "canonicalized", classification, trace_cases, inventory
+            args.port_id, family_equivalence["family"], "canonicalized",
+            classification, trace_cases, inventory
         )
         evidence = support.canonical_evidence_document(
             port_id=args.port_id,
@@ -776,6 +793,7 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--evidence", type=Path, required=True)
     command.add_argument("--result", type=Path, required=True)
     command.add_argument("--port-id", required=True)
+    command.add_argument("--family-equivalence", type=Path, required=True)
     return command
 
 

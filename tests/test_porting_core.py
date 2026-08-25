@@ -12,13 +12,62 @@ from porting_core import (  # noqa: E402
     INVALID_INPUT,
     SUCCESS,
     ArtifactStore,
+    LLM_FAMILY_PACK,
     PortingCore,
     VLA_FAMILY_PACK,
+    select_family_pack,
     resume_report,
 )
 
 
 class PortingCoreTest(unittest.TestCase):
+    def test_llm_family_pack_declares_text_generation_preflight_contract(self) -> None:
+        pack = select_family_pack("llm")
+
+        self.assertIs(pack, LLM_FAMILY_PACK)
+        self.assertEqual(pack.integration_contract, "language-generation")
+        self.assertEqual(
+            pack.required_capabilities,
+            frozenset(
+                {
+                    "shape_profiles",
+                    "tokenizer_chat_templates",
+                    "embeddings",
+                    "attention",
+                    "masks",
+                    "position_encodings",
+                    "normalization",
+                    "activations",
+                    "kv_cache",
+                    "generation_state",
+                    "sampling",
+                    "control_flow",
+                }
+            ),
+        )
+        self.assertEqual(
+            [item[0] for item in pack.equivalence_observables],
+            [
+                "tokenizer_output",
+                "representative_layers",
+                "prefill_logits",
+                "decode_logits",
+                "kv_cache",
+                "kv_cache_positions",
+                "reset_behavior",
+                "generated_tokens",
+                "eos_handling",
+            ],
+        )
+
+    def test_vla_family_pack_payload_and_report_contract_remain_unchanged(self) -> None:
+        self.assertEqual(VLA_FAMILY_PACK.contract_family, "canonical_transformer_vla")
+        self.assertEqual(VLA_FAMILY_PACK.reference_contract, "vla-reference-adapter-1.0")
+        self.assertEqual(VLA_FAMILY_PACK.canonicalization_contract, "vla-canonicalization-1.0")
+        self.assertEqual(VLA_FAMILY_PACK.integration_contract, "observation-to-action")
+        self.assertEqual(VLA_FAMILY_PACK.serving_contract, "action-serving")
+        self.assertEqual(VLA_FAMILY_PACK.performance_contract, "vla-control-step-1.0")
+
     def request(self) -> dict:
         return {
             "schema_version": "1.0",

@@ -246,6 +246,7 @@ def json_capture(value: Any) -> Any:
 
 def canonical_trace_document(
     port_id: str,
+    family: str,
     mode: str,
     classification: dict[str, Any],
     cases: list[dict[str, Any]],
@@ -253,7 +254,7 @@ def canonical_trace_document(
 ) -> dict[str, Any]:
     return {
         "schema_version": "1.0",
-        "family": "vla",
+        "family": family,
         "port_id": port_id,
         "mode": mode,
         "contract": classification["contract"],
