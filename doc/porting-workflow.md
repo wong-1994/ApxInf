@@ -9,6 +9,12 @@ temporary programs are tools for collecting evidence, not a workflow engine.
 The repository accepts a port only when the implementation and its independent
 verification evidence agree.
 
+Before implementation, read [Adding a New Model](adding-a-new-model.md). Use
+[the model-layer architecture](model-layer-architecture.md) to decide ownership
+and refactoring boundaries. When coverage is missing, switch explicitly to
+[Adding New Kernels](adding-new-kernels.md) and return here after the kernel has
+been replayed against the original model evidence.
+
 ## 1. Define the port
 
 Before editing code, record outside the repository:
@@ -111,6 +117,11 @@ repeat coverage analysis. A returned implementation is not accepted merely
 because it builds or passes a synthetic unit test.
 
 ## 6. Implement the model
+
+Follow [Adding a New Model](adding-a-new-model.md), including its separate model
+directory, runtime-contract choice, and YAGNI rules. Consult
+[the model-layer architecture](model-layer-architecture.md) before extracting
+shared code or moving behavior across the model/backend boundary.
 
 Keep model code responsible for model structure, weight mapping, scheduling,
 and composition. Model code may call safe model-neutral operators; it must not
