@@ -29,7 +29,8 @@ class AcceptanceCheck:
     command: tuple[str, ...]
 
 def acceptance_checks(
-    python: str, cargo: str, runtime_python: str, *, controlled_hardware: bool
+    python: str, cargo: str, runtime_python: str, *, controlled_hardware: bool,
+    environment_python: str | None = None, environment_pythonpath: str | None = None,
 ) -> tuple[AcceptanceCheck, ...]:
     """Return executable evidence checks; no lifecycle stage self-reports."""
     software = (
@@ -47,8 +48,13 @@ def acceptance_checks(
     )
     if not controlled_hardware:
         return software
+    environment_command = (
+        ("env", f"PYTHONPATH={environment_pythonpath}", environment_python or runtime_python, "scripts/thor_environment.py")
+        if environment_pythonpath else
+        (environment_python or runtime_python, "scripts/thor_environment.py")
+    )
     return software + (
-        AcceptanceCheck("thor_identity", ("controlled_hardware_identity",), (runtime_python, "scripts/thor_environment.py")),
+        AcceptanceCheck("thor_identity", ("controlled_hardware_identity",), environment_command),
         AcceptanceCheck("thor_bf16_performance", ("controlled_hardware_performance",), (runtime_python, "scripts/bench_pi05.py", "--random-weights", "--layer", "l0", "--precision", "bf16", "--device", "cuda:0", "--warmup", "1", "--samples", "3")),
     )
 
@@ -194,12 +200,14 @@ def _pi05_core_replay(repository: Path, subject: Mapping[str, str], result: Mapp
 def run_acceptance(
     manifest: Mapping[str, Any], repository: Path, *, python: str = sys.executable,
     cargo: str = "cargo", runtime_python: str | None = None,
-    controlled_hardware: bool = False,
+    controlled_hardware: bool = False, environment_python: str | None = None,
+    environment_pythonpath: str | None = None,
 ) -> dict[str, Any]:
     requested = validate_manifest(manifest, repository)
     selected = acceptance_checks(
         python, cargo, runtime_python or python,
-        controlled_hardware=controlled_hardware,
+        controlled_hardware=controlled_hardware, environment_python=environment_python,
+        environment_pythonpath=environment_pythonpath,
     )
     results: list[dict[str, Any]] = []
     stages: dict[str, str] = {}
@@ -232,7 +240,7 @@ def run_acceptance(
     pi05_result = next(result for result in results if result["name"] == "pi05_replay")
     replay = _pi05_core_replay(repository, manifest["acceptance_subject"], pi05_result)
     status = "accepted" if controlled_hardware else "software-validated"
-    return {"schema_version": "1.0", "status": status, "family": "vla", "acceptance_subject": dict(manifest["acceptance_subject"]), "requested_tuples": [{"target": t, "precision": p} for t, p in sorted(requested)], "unrequested_tuples": [{"target": t, "precision": p} for t, p in sorted(SUPPORTED_TUPLES - requested)], "stages": stages, "checks": results, "lifecycle_artifacts": lifecycle, "existing_vla_core_replay": replay, "provenance": {"git_commit": commit, "public_file_sha256": public_files, "python": python, "cargo": cargo, "runtime_python": runtime_python or python, "controlled_hardware": controlled_hardware, "platform": platform.platform()}}
+    return {"schema_version": "1.0", "status": status, "family": "vla", "acceptance_subject": dict(manifest["acceptance_subject"]), "requested_tuples": [{"target": t, "precision": p} for t, p in sorted(requested)], "unrequested_tuples": [{"target": t, "precision": p} for t, p in sorted(SUPPORTED_TUPLES - requested)], "stages": stages, "checks": results, "lifecycle_artifacts": lifecycle, "existing_vla_core_replay": replay, "provenance": {"git_commit": commit, "public_file_sha256": public_files, "python": python, "cargo": cargo, "runtime_python": runtime_python or python, "environment_python": environment_python or runtime_python or python, "controlled_hardware": controlled_hardware, "platform": platform.platform()}}
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -241,10 +249,12 @@ def main() -> None:
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--cargo", default="cargo")
     parser.add_argument("--runtime-python")
+    parser.add_argument("--environment-python")
+    parser.add_argument("--environment-pythonpath")
     parser.add_argument("--controlled-hardware", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    result = run_acceptance(json.loads(args.manifest.read_text(encoding="utf-8")), args.repository.resolve(), python=args.python, cargo=args.cargo, runtime_python=args.runtime_python, controlled_hardware=args.controlled_hardware)
+    result = run_acceptance(json.loads(args.manifest.read_text(encoding="utf-8")), args.repository.resolve(), python=args.python, cargo=args.cargo, runtime_python=args.runtime_python, controlled_hardware=args.controlled_hardware, environment_python=args.environment_python, environment_pythonpath=args.environment_pythonpath)
     encoded = json.dumps(result, sort_keys=True, indent=2) + "\n"
     if args.output:
         args.output.write_text(encoded, encoding="utf-8")

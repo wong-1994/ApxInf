@@ -18,8 +18,12 @@ def main() -> None:
     driver_path = Path("/proc/driver/nvidia/version")
     driver = driver_path.read_text(encoding="utf-8").strip()
     power_mode = command("nvpmodel", "-q")
-    telemetry = command("tegrastats", "--interval", "100", "--count", "1")
-    if "@" not in telemetry or "GR3D_FREQ" not in telemetry:
+    telemetry_run = subprocess.run(
+        ("timeout", "1", "tegrastats", "--interval", "100"),
+        text=True, capture_output=True, timeout=3,
+    )
+    telemetry = telemetry_run.stdout.strip().splitlines()[-1] if telemetry_run.stdout.strip() else ""
+    if "@" not in telemetry or "CPU [" not in telemetry:
         raise RuntimeError("tegrastats did not report temperature and clocks")
     print(json.dumps({
         "available": torch.cuda.is_available(), "device": properties.name,
