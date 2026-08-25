@@ -37,6 +37,15 @@ class VlaFamilyPackAcceptanceTest(unittest.TestCase):
         self.assertTrue(all(status == "passed" for status in result["stages"].values()))
         self.assertEqual(result["requested_tuples"], [{"target": "thor", "precision": "bf16"}])
         self.assertEqual(result["acceptance_subject"]["port_id"], "synthetic-minimal-vla-v1")
+        lifecycle = result["lifecycle_artifacts"]
+        self.assertEqual({item["port_id"] for item in lifecycle}, {"synthetic-minimal-vla-v1"})
+        self.assertEqual(lifecycle[0]["upstream_sha256"], __import__("hashlib").sha256(json.dumps(self.manifest["acceptance_subject"], sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+        for previous, current in zip(lifecycle, lifecycle[1:]):
+            self.assertEqual(current["upstream_sha256"], previous["artifact_sha256"])
+        replay = result["existing_vla_core_replay"]
+        self.assertEqual(replay["family"], "vla")
+        self.assertEqual(replay["stage"], "existing_vla_replay")
+        self.assertEqual(replay["payload_schema"], "vla-core-replay-v1.schema.json")
 
     @mock.patch("vla_family_pack_acceptance.subprocess.run")
     def test_command_failure_fails_closed_with_check_name(self, run) -> None:

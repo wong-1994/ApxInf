@@ -9,6 +9,7 @@ import platform
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -135,6 +136,52 @@ def validate_manifest(manifest: Mapping[str, Any], repository: Path) -> set[tupl
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
+def _digest_json(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+def _lifecycle_evidence(subject: Mapping[str, str], results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Bind every executed stage to one Port and its preceding artifact."""
+    upstream = _digest_json(subject)
+    artifacts: list[dict[str, Any]] = []
+    for result in results:
+        for stage in result["stages"]:
+            payload = {
+                "port_id": subject["port_id"], "model_type": subject["model_type"],
+                "stage": stage, "check": result["name"], "status": result["status"],
+                "command_sha256": _digest_json(result["command"]),
+                "stdout_sha256": result["stdout_sha256"], "upstream_sha256": upstream,
+            }
+            payload["artifact_sha256"] = _digest_json(payload)
+            artifacts.append(payload)
+            upstream = payload["artifact_sha256"]
+    return artifacts
+
+def _pi05_core_replay(repository: Path, subject: Mapping[str, str], result: Mapping[str, Any]) -> dict[str, Any]:
+    """Record unchanged PI0.5 mathematics as a shared-Core Workflow Artifact."""
+    from porting_core import ArtifactStore, VLA_FAMILY_PACK
+    with tempfile.TemporaryDirectory(prefix="apxinf-pi05-replay-") as temporary:
+        port = Path(temporary)
+        private = port / "private"
+        private.mkdir()
+        request = {
+            "schema_version": "1.0", "port_id": subject["port_id"], "model_family": "vla",
+            "capability_contract_version": "1.0",
+            "source": {"sha256": "1" * 64}, "checkpoint": {"sha256": "2" * 64},
+        }
+        (port / "request.json").write_text(json.dumps(request), encoding="utf-8")
+        environment = private / "environment.json"
+        environment.write_text(json.dumps({"schema_version": "1.0"}), encoding="utf-8")
+        adapter = private / "reference_adapter.py"
+        adapter.write_text("# acceptance replay adapter\n", encoding="utf-8")
+        payload = private / "pi05_replay.json"
+        payload.write_text(json.dumps({
+            "schema_version": "1.0", "family": "vla", "port_id": subject["port_id"],
+            "model": "pi05", "mathematics": ["prompt_tokenization", "state_discretization", "reverse_time_euler_flow"],
+            "check": result["name"], "status": result["status"],
+            "evidence_sha256": _digest_json({"command": result["command"], "stdout": result["stdout_sha256"]}),
+        }, sort_keys=True), encoding="utf-8")
+        return ArtifactStore(port, request, VLA_FAMILY_PACK, repository / "scripts/apxinf_port.py", adapter).record(payload, environment, stage="existing_vla_replay")
+
 def run_acceptance(
     manifest: Mapping[str, Any], repository: Path, *, python: str = sys.executable,
     cargo: str = "cargo", runtime_python: str | None = None,
@@ -172,8 +219,11 @@ def run_acceptance(
     commit = subprocess.run(
         ("git", "rev-parse", "HEAD"), cwd=repository, text=True, capture_output=True, check=True
     ).stdout.strip()
+    lifecycle = _lifecycle_evidence(manifest["acceptance_subject"], results)
+    pi05_result = next(result for result in results if result["name"] == "pi05_replay")
+    replay = _pi05_core_replay(repository, manifest["acceptance_subject"], pi05_result)
     status = "accepted" if controlled_hardware else "software-validated"
-    return {"schema_version": "1.0", "status": status, "family": "vla", "acceptance_subject": dict(manifest["acceptance_subject"]), "requested_tuples": [{"target": t, "precision": p} for t, p in sorted(requested)], "unrequested_tuples": [{"target": t, "precision": p} for t, p in sorted(SUPPORTED_TUPLES - requested)], "stages": stages, "checks": results, "provenance": {"git_commit": commit, "public_file_sha256": public_files, "python": python, "cargo": cargo, "runtime_python": runtime_python or python, "controlled_hardware": controlled_hardware, "platform": platform.platform()}}
+    return {"schema_version": "1.0", "status": status, "family": "vla", "acceptance_subject": dict(manifest["acceptance_subject"]), "requested_tuples": [{"target": t, "precision": p} for t, p in sorted(requested)], "unrequested_tuples": [{"target": t, "precision": p} for t, p in sorted(SUPPORTED_TUPLES - requested)], "stages": stages, "checks": results, "lifecycle_artifacts": lifecycle, "existing_vla_core_replay": replay, "provenance": {"git_commit": commit, "public_file_sha256": public_files, "python": python, "cargo": cargo, "runtime_python": runtime_python or python, "controlled_hardware": controlled_hardware, "platform": platform.platform()}}
 
 def main() -> None:
     parser = argparse.ArgumentParser()

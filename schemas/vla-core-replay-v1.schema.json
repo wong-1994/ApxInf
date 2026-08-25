@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apxinf.dev/schemas/vla-core-replay-v1.schema.json",
+  "title": "VLA existing-model Core replay evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "family", "port_id", "model", "mathematics", "check", "status", "evidence_sha256"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "family": {"const": "vla"},
+    "port_id": {"type": "string", "minLength": 1},
+    "model": {"const": "pi05"},
+    "mathematics": {
+      "type": "array",
+      "minItems": 3,
+      "items": {"enum": ["prompt_tokenization", "state_discretization", "reverse_time_euler_flow"]}
+    },
+    "check": {"type": "string", "minLength": 1},
+    "status": {"const": "passed"},
+    "evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

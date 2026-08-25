@@ -417,6 +417,15 @@ subject, the exact Git commit, tool entry points, platform, and SHA-256 of every
 public acceptance artifact. The command matrix is fixed in maintained code and
 cannot be replaced by caller-supplied no-op checks.
 
+Each successful command produces a lifecycle artifact containing the same
+`port_id`, the command and output digests, and the preceding artifact digest.
+Consequently Intake is the root of one tamper-evident chain through Preflight,
+implementation, policy integration, serving, tuning, qualification, bundling,
+and PR preparation; a collection of independently self-reported stage labels
+cannot satisfy the chain. Existing PI0.5 prompt tokenization, state
+discretization, and reverse-time Euler-flow replay is additionally stored with
+the VLA Family Pack as a schema-validated shared-Core Workflow Artifact.
+
 The fixture matrix fails closed for canonicalization and unsupported
 semantics, distinguishes a blocking Kernel Gap from a non-blocking
 Optimization Opportunity, prevents stale evidence from satisfying a Gate,

@@ -98,6 +98,7 @@ def _vla_payload_schema(path: Path, payload: Any) -> str:
         "capability_gap_report.json": "capability-gap-report-v1.schema.json",
         "kernel_coverage.json": "kernel-coverage-v1.schema.json",
         "kernel_gap_handoff.json": "kernel-gap-handoff-v1.schema.json",
+        "pi05_replay.json": "vla-core-replay-v1.schema.json",
     }
     if path.suffix == ".py":
         return "python-reference-adapter-v1"
