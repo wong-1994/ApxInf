@@ -11,7 +11,6 @@ from typing import Any, Mapping
 
 MAX_PUBLIC_FILE_BYTES = 1024 * 1024
 FAMILIES = frozenset({"llm", "vlm", "vla"})
-QUALIFYING_STATUSES = frozenset({"release_qualified"})
 REMOTE_ACTIONS = frozenset({"push", "create_pr", "create_issue", "link_issue"})
 FORBIDDEN_NAME_PARTS = (
     "reference_adapter",
@@ -29,8 +28,9 @@ FORBIDDEN_SUFFIXES = frozenset(
     {".ckpt", ".env", ".onnx", ".pt", ".pth", ".safetensors"}
 )
 SENSITIVE_CONTENT = re.compile(
-    rb"(?i)(api[_-]?key|access[_-]?token|secret|password|private[_-]?key)\s*[:=]\s*[^\s,}]+"
+    rb"(?i)(api[_-]?key|access[_-]?key(?:_id)?|access[_-]?token|secret(?:_access_key)?|password|private[_-]?key)\s*[:=]\s*[^\s,}]+"
 )
+PRIVATE_KEY_BLOCK = re.compile(rb"-----BEGIN (?:OPENSSH |RSA |EC |DSA )?PRIVATE KEY-----")
 
 
 class PublicationError(ValueError):
@@ -54,7 +54,7 @@ def _git(repo: Path, *arguments: str) -> str:
 
 def _require_safe_git_state(
     repo: Path, base_commit: str, base_branch: str
-) -> list[Path]:
+) -> dict[Path, str]:
     if not repo.is_dir() or _git(repo, "rev-parse", "--show-toplevel") != str(
         repo.resolve()
     ):
@@ -65,19 +65,28 @@ def _require_safe_git_state(
     branch = _git(repo, "branch", "--show-current")
     if not branch or branch == base_branch:
         raise PublicationError("publication requires a dedicated non-base branch")
+    base_ref = f"refs/heads/{base_branch}"
+    _git(repo, "rev-parse", "--verify", base_ref)
+    merge_base = _git(repo, "merge-base", base_ref, "HEAD")
+    if merge_base != _git(repo, "rev-parse", base_commit):
+        raise PublicationError("base_commit must be the merge base of the dedicated branch")
     commits = _git(repo, "rev-list", "--count", f"{base_commit}..HEAD")
     if commits == "0":
         raise PublicationError("publication requires at least one local stage commit")
-    names = _git(
-        repo, "diff", "--name-only", "--diff-filter=ACMRT", f"{base_commit}...HEAD"
-    )
-    return [repo / name for name in names.splitlines() if name]
+    names = _git(repo, "diff", "--name-status", f"{base_commit}...HEAD")
+    changed: dict[Path, str] = {}
+    for line in names.splitlines():
+        fields = line.split("\t")
+        status = fields[0][0]
+        name = fields[-1]
+        changed[repo / name] = status
+    return changed
 
 
 def _check_public_files(
-    repo: Path, paths: list[Path], declarations: Mapping[str, Mapping[str, Any]]
+    repo: Path, paths: Mapping[Path, str], declarations: Mapping[str, Mapping[str, Any]]
 ) -> None:
-    for path in paths:
+    for path, status in paths.items():
         relative = path.relative_to(repo).as_posix()
         declaration = declarations.get(relative)
         if declaration is None:
@@ -100,12 +109,14 @@ def _check_public_files(
             raise PublicationError(
                 f"publication rejects private or original material: {relative}"
             )
+        if status == "D":
+            continue
         if not path.is_file():
             raise PublicationError(f"publication candidate is not a regular file: {relative}")
         if path.stat().st_size > MAX_PUBLIC_FILE_BYTES:
             raise PublicationError(f"publication rejects oversized artifact: {relative}")
         content = path.read_bytes()
-        if SENSITIVE_CONTENT.search(content):
+        if SENSITIVE_CONTENT.search(content) or PRIVATE_KEY_BLOCK.search(content):
             raise PublicationError(f"publication rejects sensitive content: {relative}")
         if b"redistribution_approved=false" in content.replace(b" ", b"").lower():
             raise PublicationError(f"publication lacks redistribution approval: {relative}")
@@ -132,12 +143,24 @@ def _validate_payload(payload: Mapping[str, Any]) -> None:
         "deferred",
     }:
         raise PublicationError("every Port requires a none or deferred refactor assessment")
-    if assessment["status"] == "none" and not assessment.get("summary"):
-        raise PublicationError("a none refactor assessment requires a summary")
-    if assessment["status"] == "deferred" and not all(
-        assessment.get(field) for field in ("title", "evidence", "proposal")
+    if assessment["status"] == "none" and (
+        not isinstance(assessment.get("summary"), str)
+        or not assessment["summary"].strip()
     ):
-        raise PublicationError("deferred refactor debt requires title, evidence, and proposal")
+        raise PublicationError("a none refactor assessment requires a summary")
+    if assessment["status"] == "deferred":
+        if not all(
+            isinstance(assessment.get(field), str) and assessment[field].strip()
+            for field in ("title", "proposal")
+        ) or (
+            not isinstance(assessment.get("evidence"), list)
+            or not assessment["evidence"]
+            or any(
+                not isinstance(item, str) or not item.strip()
+                for item in assessment["evidence"]
+            )
+        ):
+            raise PublicationError("deferred refactor debt requires string title/proposal and evidence strings")
     files = payload.get("public_files")
     if not isinstance(files, list) or not files:
         raise PublicationError("public_files must declare every publication candidate")
@@ -150,23 +173,20 @@ def _validate_payload(payload: Mapping[str, Any]) -> None:
         raise PublicationError("public_files paths must be unique")
 
 
-def _supported_tuples(payload: Mapping[str, Any]) -> list[dict[str, str]]:
+def _supported_tuples(
+    payload: Mapping[str, Any],
+    requested_tuples: set[tuple[str, str]],
+    qualified_tuples: set[tuple[str, str]],
+) -> list[dict[str, str]]:
     requested = {
-        (item.get("target"), item.get("precision"), item.get("evidence"))
+        (item.get("target"), item.get("precision"))
         for item in payload.get("supported_tuples", [])
         if isinstance(item, dict)
-        and all(isinstance(item.get(field), str) for field in ("target", "precision", "evidence"))
-    }
-    qualified = {
-        (item.get("target"), item.get("precision"), item.get("evidence"))
-        for item in payload.get("qualification", [])
-        if isinstance(item, dict)
-        and item.get("status") in QUALIFYING_STATUSES
-        and all(isinstance(item.get(field), str) for field in ("target", "precision", "evidence"))
+        and all(isinstance(item.get(field), str) for field in ("target", "precision"))
     }
     return [
         {"target": target, "precision": precision}
-        for target, precision, _ in sorted(requested & qualified)
+        for target, precision in sorted(requested & requested_tuples & qualified_tuples)
         if isinstance(target, str) and isinstance(precision, str)
     ]
 
@@ -180,6 +200,9 @@ def prepare_publication(
     base_commit: str,
     payload: Mapping[str, Any],
     output_dir: Path,
+    *,
+    requested_tuples: set[tuple[str, str]],
+    qualified_tuples: set[tuple[str, str]],
 ) -> Path:
     """Validate a Port and prepare local review text without remote side effects."""
 
@@ -202,7 +225,7 @@ def prepare_publication(
         raise PublicationError("publication output already exists")
     output_dir.mkdir(parents=True)
 
-    tuples = _supported_tuples(payload)
+    tuples = _supported_tuples(payload, requested_tuples, qualified_tuples)
     support = {
         "schema_version": "1.0",
         "port_id": payload["port_id"],

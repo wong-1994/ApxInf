@@ -2600,8 +2600,50 @@ def prepare_port_publication(args: argparse.Namespace) -> int:
             raise PublicationError("publication port_id does not match the Port report")
         if payload.get("family") != declared_family:
             raise PublicationError("publication family does not match the Port report")
+        requested_tuples = {
+            (item.get("target"), item.get("precision"))
+            for item in report.get("request_declarations", {}).get("requested_targets", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("target"), str)
+            and isinstance(item.get("precision"), str)
+        }
+        qualified_tuples: set[tuple[str, str]] = set()
+        port_dir = args.port_dir.resolve()
+        for name, envelope in report.get("artifacts", {}).items():
+            if not name.startswith("qualification_") or not isinstance(envelope, dict):
+                continue
+            if envelope.get("state") != "current" or envelope.get("family") != declared_family:
+                continue
+            relative = envelope.get("path")
+            if not isinstance(relative, str):
+                continue
+            evidence_path = (port_dir / relative).resolve()
+            if not evidence_path.is_relative_to(port_dir) or not evidence_path.is_file():
+                continue
+            fingerprints = envelope.get("fingerprints", {})
+            if fingerprints.get("content_sha256") != file_sha256(evidence_path):
+                continue
+            if not fingerprints.get("source_sha256") or not fingerprints.get("checkpoint_sha256"):
+                continue
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            candidates = evidence.get("tuples") if isinstance(evidence, dict) else None
+            if not isinstance(candidates, list):
+                candidates = [evidence]
+            for item in candidates:
+                pair = (
+                    (item.get("target"), item.get("precision"))
+                    if isinstance(item, dict)
+                    else (None, None)
+                )
+                if pair in requested_tuples and item.get("status") == "release_qualified":
+                    qualified_tuples.add(pair)
         result = prepare_publication(
-            args.repository, args.base_commit, payload, args.output
+            args.repository,
+            args.base_commit,
+            payload,
+            args.output,
+            requested_tuples=requested_tuples,
+            qualified_tuples=qualified_tuples,
         )
         report["refactor_assessment"] = payload["refactor_assessment"]
         write_json(report_path, report)

@@ -94,7 +94,7 @@ class PortingCoreTest(unittest.TestCase):
         self.assertEqual(core.report["stages"], {"intake": "passed", "preflight": "running"})
         self.assertEqual(core.report["gates"]["capability"]["status"], "passed")
         self.assertEqual(core.report["exit"]["category"], "success")
-        self.assertEqual(core.report["refactor_assessment"]["status"], "none")
+        self.assertEqual(core.report["refactor_assessment"]["status"], "pending")
         requested = [
             item
             for item in core.report["target_precisions"]

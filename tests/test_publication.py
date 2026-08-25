@@ -13,6 +13,16 @@ from publication import PublicationError, prepare_publication  # noqa: E402
 
 
 class PublicationTest(unittest.TestCase):
+    def prepare(self, repo: Path, base: str, payload: dict, output: Path) -> Path:
+        return prepare_publication(
+            repo,
+            base,
+            payload,
+            output,
+            requested_tuples={("thor", "bf16"), ("orin", "int8_w8a8")},
+            qualified_tuples={("thor", "bf16")},
+        )
+
     def make_repo(self, root: Path) -> tuple[Path, str]:
         repo = root / "repo"
         repo.mkdir()
@@ -86,7 +96,7 @@ class PublicationTest(unittest.TestCase):
             with self.subTest(family=family), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 repo, base = self.make_repo(root)
-                output = prepare_publication(repo, base, self.payload(family), root / "out")
+                output = self.prepare(repo, base, self.payload(family), root / "out")
                 support = json.loads((output / "support-metadata.json").read_text())
                 self.assertEqual(support["family"], family)
                 self.assertEqual(
@@ -101,7 +111,7 @@ class PublicationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repo, base = self.make_repo(root)
-            output = prepare_publication(
+            output = self.prepare(
                 repo, base, self.payload("vla", True), root / "out"
             )
             self.assertIn("Share cache layout", (output / "refactor-issue.md").read_text())
@@ -113,7 +123,7 @@ class PublicationTest(unittest.TestCase):
             repo, base = self.make_repo(root)
             (repo / "uncommitted.txt").write_text("mine", encoding="utf-8")
             with self.assertRaisesRegex(PublicationError, "clean"):
-                prepare_publication(repo, base, self.payload("vla"), root / "out")
+                self.prepare(repo, base, self.payload("vla"), root / "out")
 
     def test_rejects_private_sensitive_unapproved_and_oversized_material(self) -> None:
         forbidden = {
@@ -133,7 +143,7 @@ class PublicationTest(unittest.TestCase):
                 subprocess.run(["git", "add", name], cwd=repo, check=True)
                 subprocess.run(["git", "commit", "-qm", "bad material"], cwd=repo, check=True)
                 with self.assertRaises(PublicationError):
-                    prepare_publication(repo, base, self.payload("vla"), root / "out")
+                    self.prepare(repo, base, self.payload("vla"), root / "out")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repo, base = self.make_repo(root)
@@ -150,7 +160,7 @@ class PublicationTest(unittest.TestCase):
                 }
             )
             with self.assertRaisesRegex(PublicationError, "oversized"):
-                prepare_publication(repo, base, payload, root / "out")
+                self.prepare(repo, base, payload, root / "out")
 
     def test_remote_publication_requires_explicit_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -158,7 +168,58 @@ class PublicationTest(unittest.TestCase):
             repo, base = self.make_repo(root)
             payload = self.payload("vla") | {"remote_actions": ["push"]}
             with self.assertRaisesRegex(PublicationError, "authorization"):
-                prepare_publication(repo, base, payload, root / "out")
+                self.prepare(repo, base, payload, root / "out")
+
+    def test_support_metadata_requires_report_backed_requested_and_qualified_tuples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo, base = self.make_repo(root)
+            output = prepare_publication(
+                repo,
+                base,
+                self.payload("vla"),
+                root / "out",
+                requested_tuples={("thor", "bf16")},
+                qualified_tuples=set(),
+            )
+            support = json.loads((output / "support-metadata.json").read_text())
+            self.assertEqual(support["supported_tuples"], [])
+
+    def test_rejects_deleted_undeclared_files_and_false_base_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo, base = self.make_repo(root)
+            subprocess.run(["git", "rm", "model.rs"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-qm", "delete model"], cwd=repo, check=True)
+            undeclared = self.payload("vla")
+            undeclared["public_files"][0]["path"] = "different.rs"
+            with self.assertRaisesRegex(PublicationError, "exactly match"):
+                self.prepare(repo, base, undeclared, root / "out")
+            payload = self.payload("vla")
+            payload["base_branch"] = "port/example"
+            with self.assertRaisesRegex(PublicationError, "non-base"):
+                self.prepare(repo, base, payload, root / "out")
+
+    def test_rejects_private_key_blocks_and_malformed_refactor_debt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo, base = self.make_repo(root)
+            (repo / "model.rs").write_text(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "add", "model.rs"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-qm", "bad secret"], cwd=repo, check=True)
+            with self.assertRaisesRegex(PublicationError, "sensitive"):
+                self.prepare(repo, base, self.payload("vla"), root / "out")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo, base = self.make_repo(root)
+            payload = self.payload("vla")
+            payload["refactor_assessment"] = {
+                "status": "deferred", "title": "Debt", "evidence": "model.rs:1", "proposal": "Fix later"
+            }
+            with self.assertRaisesRegex(PublicationError, "evidence strings"):
+                self.prepare(repo, base, payload, root / "out")
 
 
 if __name__ == "__main__":

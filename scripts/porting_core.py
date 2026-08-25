@@ -502,8 +502,8 @@ class PortingCore:
             "warnings": warnings,
             "artifacts": {},
             "refactor_assessment": {
-                "status": "none",
-                "summary": "No shared architectural debt has been identified.",
+                "status": "pending",
+                "summary": "Assessment occurs after deployment completion.",
             },
         }
         report.update(self.pack.report_defaults(request))
