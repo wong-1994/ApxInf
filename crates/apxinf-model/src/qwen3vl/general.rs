@@ -306,7 +306,7 @@ impl GeneralQwen3VL {
                 "image_pad count {} != vision primary tokens {}",
                 img_positions.len(), n_img_tokens)));
         }
-        x = scatter_add(&x, &img_positions, &vis.primary, &*self.backend)?;
+        x = scatter_replace(&x, &img_positions, &vis.primary, &*self.backend)?;
 
         // mRoPE position IDs (3D for image tokens).
         let pos_ids = self.get_rope_index(token_ids, grid_thw);
@@ -658,6 +658,33 @@ fn scatter_add(
         }
         dtype => Err(Error::Other(format!("Qwen3-VL scatter does not support {dtype}"))),
     }
+}
+
+fn scatter_replace(
+    x: &Tensor, positions: &[usize], src: &Tensor, backend: &dyn Backend,
+) -> Result<Tensor> {
+    let x_cpu = backend.to_cpu(x)?;
+    let src_cpu = backend.to_cpu(src)?;
+    let dims = x_cpu.shape().dims().to_vec();
+    let hidden = dims[dims.len() - 1];
+    if src_cpu.shape().dims() != [positions.len(), hidden] {
+        return Err(Error::Other("Qwen3-VL scatter replacement shape mismatch".into()));
+    }
+    let mut data = x_cpu.to_f32_vec()?;
+    let src_data = src_cpu.to_f32_vec()?;
+    for (index, &position) in positions.iter().enumerate() {
+        data[position * hidden..(position + 1) * hidden]
+            .copy_from_slice(&src_data[index * hidden..(index + 1) * hidden]);
+    }
+    let output = match x_cpu.dtype() {
+        apxinf_core::DType::F32 => Tensor::from_f32(dims, &data)?,
+        apxinf_core::DType::BF16 => Tensor::from_bf16(
+            dims,
+            &data.into_iter().map(half::bf16::from_f32).collect::<Vec<_>>(),
+        )?,
+        dtype => return Err(Error::Other(format!("Qwen3-VL scatter does not support {dtype}"))),
+    };
+    backend.to_device(&output)
 }
 
 // The GenerationProfile trait sits on LlmTrait's default `generate_streaming`

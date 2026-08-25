@@ -11,6 +11,7 @@ import numpy as np
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--capture", type=Path, required=True)
+    parser.add_argument("--inspection", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     arrays = np.load(args.capture)
@@ -44,6 +45,13 @@ def main() -> None:
     linear("decoder2", "action_head.action_decoder.layer2")
     emit("state_output", arrays["module.action_head.state_encoder.output"].reshape(-1, 1536))
     emit("decoder_output", arrays["module.action_head.action_decoder.output"].reshape(-1, 132))
+    if args.inspection is not None:
+        inspection = json.loads(args.inspection.read_text())
+        case = next(item for item in inspection["profiles"] if item["profile"] == "libero-256" and item["seed"] == 0)
+        for name in ("input_ids", "attention_mask", "pixel_values", "image_grid_thw", "state"):
+            emit(f"observation_{name}", np.asarray(case["inputs"][name]["data"]))
+        emit("observation_noise", arrays["flow.step.0.action_input"].reshape(40, 132))
+        emit("observation_reference_actions", arrays["normalized_actions"].reshape(40, 132))
     manifest = {"schema_version": "1.0", "embodiment": embodiment, "arrays": exported}
     (args.output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest, indent=2))

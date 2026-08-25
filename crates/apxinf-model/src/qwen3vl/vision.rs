@@ -8,7 +8,7 @@
 //! add_bias, rope_vision_2d, vision_sdpa). No KV cache — vision attention
 //! is a single non-causal forward over the full patch sequence.
 
-use apxinf_core::{Backend, Error, Result, Tensor};
+use apxinf_core::{Backend, Result, Tensor};
 
 use super::config::Qwen3VLConfig;
 use super::vision_weights::Qwen3VLVisionWeights;
@@ -63,7 +63,14 @@ fn forward_impl(
 
     let dims = pixel_values.shape().dims();
     let n_patches = dims[0];           // e.g. 400
-    let (t, h, width) = (grid_thw[0][0] as usize, grid_thw[0][1] as usize, grid_thw[0][2] as usize);
+    let image_patch_counts = grid_thw.iter().map(|grid| {
+        (grid[0] as usize) * (grid[1] as usize) * (grid[2] as usize)
+    }).collect::<Vec<_>>();
+    if image_patch_counts.iter().sum::<usize>() != n_patches {
+        return Err(apxinf_core::Error::Other(format!(
+            "vision grid patch count {} != pixel rows {n_patches}", image_patch_counts.iter().sum::<usize>()
+        )));
+    }
 
     // ── Patch embedding: pixel_values @ W^T + bias → [N, 1024] ──────
     // patch_embed_weight is [1536, 1024] (already transposed). matmul
@@ -73,13 +80,22 @@ fn forward_impl(
     if let Some(d) = dump { dump_tensor(b, &x, &format!("{d}_post_patch_embed"))?; }
 
     // ── Positional embedding (bilinear-interpolated, permuted) ──────
-    let pos_embeds = compute_pos_embeds(cfg, b, &w.pos_embed, t, h, width, merge, hidden)?;
+    let mut per_image_pos = Vec::with_capacity(grid_thw.len());
+    for &[t, h, width] in grid_thw {
+        per_image_pos.push(compute_pos_embeds(
+            cfg, b, &w.pos_embed, t as usize, h as usize, width as usize, merge, hidden,
+        )?);
+    }
+    let mut pos_embeds = per_image_pos[0].clone();
+    for image in &per_image_pos[1..] { pos_embeds = b.concat_rows(&pos_embeds, image)?; }
     if let Some(d) = dump { dump_tensor(b, &pos_embeds, &format!("{d}_pos_embeds"))?; }
     x = b.add(&x, &pos_embeds)?;
     if let Some(d) = dump { dump_tensor(b, &x, &format!("{d}_post_add_pos"))?; }
 
     // ── Vision 2D-RoPE position IDs ─────────────────────────────────
-    let pos_ids = compute_vision_pos_ids(t, h, width, merge);
+    let pos_ids = grid_thw.iter().flat_map(|grid| {
+        compute_vision_pos_ids(grid[0] as usize, grid[1] as usize, grid[2] as usize, merge)
+    }).collect::<Vec<_>>();
 
     // ── 24 vision blocks ────────────────────────────────────────────
     let mut deepstack_hidden_states: Vec<Tensor> = Vec::with_capacity(3);
@@ -108,7 +124,20 @@ fn forward_impl(
         let k = b.rope_vision_2d(&k, n_heads, head_dim, 10000.0, &pos_ids)?;
 
         // Non-causal full attention
-        let attn_out = b.vision_sdpa(&q, &k, &v, n_patches, n_heads, head_dim)?;
+        let q2 = q.reshape(vec![n_patches, hidden])?;
+        let k2 = k.reshape(vec![n_patches, hidden])?;
+        let v2 = v.reshape(vec![n_patches, hidden])?;
+        let mut offset = 0usize;
+        let mut pieces = Vec::with_capacity(image_patch_counts.len());
+        for &count in &image_patch_counts {
+            let qi = b.slice_2d(&q2, offset, count, 0, hidden)?.reshape(vec![count, n_heads, head_dim])?;
+            let ki = b.slice_2d(&k2, offset, count, 0, hidden)?.reshape(vec![count, n_heads, head_dim])?;
+            let vi = b.slice_2d(&v2, offset, count, 0, hidden)?.reshape(vec![count, n_heads, head_dim])?;
+            pieces.push(b.vision_sdpa(&qi, &ki, &vi, count, n_heads, head_dim)?);
+            offset += count;
+        }
+        let mut attn_out = pieces[0].clone();
+        for image in &pieces[1..] { attn_out = b.concat_rows(&attn_out, image)?; }
         // Output projection + residual
         let attn_out = b.matmul(&attn_out, &blk.proj_w)?;
         let attn_out = b.add_bias(&attn_out, &blk.proj_b)?;
@@ -183,79 +212,26 @@ fn merge_deepstack(
 }
 
 /// Reshape [N, hidden] → [N/merge², hidden*merge²] by concatenating
-/// merge² consecutive rows. This is the spatial-merge shuffle. Done on
-/// CPU (round-trip through to_cpu/to_device) since it's a one-time copy
-/// per image and the Backend trait has no strided-reshape op.
+/// merge² consecutive rows. The preceding permutation makes each group
+/// contiguous, so the operation is a zero-copy metadata reshape.
 fn reshape_merge(
-    b: &dyn Backend, x: &Tensor, n_patches: usize, hidden: usize, merge: usize,
+    _b: &dyn Backend, x: &Tensor, n_patches: usize, hidden: usize, merge: usize,
 ) -> Result<Tensor> {
     let merge_sq = merge * merge;  // 4
     let out_rows = n_patches / merge_sq;
     let out_cols = hidden * merge_sq;  // 4096
-    let cpu = b.to_cpu(x)?;
-    let out = match cpu.dtype() {
-        apxinf_core::DType::F32 => {
-            let data = cpu.as_f32()?;
-            let mut o = vec![0.0f32; out_rows * out_cols];
-            for r in 0..out_rows {
-                for s in 0..merge_sq {
-                    for c in 0..hidden {
-                        o[r * out_cols + s * hidden + c] = data[r * merge_sq * hidden + s * hidden + c];
-                    }
-                }
-            }
-            Tensor::from_f32(vec![out_rows, out_cols], &o)?
-        }
-        apxinf_core::DType::BF16 => {
-            let data = cpu.as_bf16()?;
-            let mut o = vec![half::bf16::from_f32(0.0); out_rows * out_cols];
-            for r in 0..out_rows {
-                for s in 0..merge_sq {
-                    for c in 0..hidden {
-                        o[r * out_cols + s * hidden + c] = data[r * merge_sq * hidden + s * hidden + c];
-                    }
-                }
-            }
-            Tensor::from_bf16(vec![out_rows, out_cols], &o)?
-        }
-        dtype => return Err(Error::Other(format!("Qwen3-VL merge reshape does not support {dtype}"))),
-    };
-    b.to_device(&out)
+    x.reshape(vec![out_rows, out_cols])
 }
 
 /// Extract a contiguous slice `qkv[:, col_start..col_start+width]` and
 /// reshape to `[N, n_heads, head_dim]`. The qkv tensor is `[N, 3*hidden]`
-/// in row-major; slicing columns is a strided gather. Done on CPU for now.
+/// in row-major; the backend performs the strided device-to-device copy.
 fn slice_and_reshape(
     b: &dyn Backend, qkv: &Tensor, col_start: usize, width: usize,
     n_patches: usize, n_heads: usize, head_dim: usize,
 ) -> Result<Tensor> {
-    let cpu = b.to_cpu(qkv)?;
-    let total_cols = 3 * width;  // 3 * hidden
-    let out = match cpu.dtype() {
-        apxinf_core::DType::F32 => {
-            let data = cpu.as_f32()?;
-            let mut o = vec![0.0f32; n_patches * width];
-            for n in 0..n_patches {
-                for c in 0..width {
-                    o[n * width + c] = data[n * total_cols + col_start + c];
-                }
-            }
-            Tensor::from_f32(vec![n_patches, n_heads, head_dim], &o)?
-        }
-        apxinf_core::DType::BF16 => {
-            let data = cpu.as_bf16()?;
-            let mut o = vec![half::bf16::from_f32(0.0); n_patches * width];
-            for n in 0..n_patches {
-                for c in 0..width {
-                    o[n * width + c] = data[n * total_cols + col_start + c];
-                }
-            }
-            Tensor::from_bf16(vec![n_patches, n_heads, head_dim], &o)?
-        }
-        dtype => return Err(Error::Other(format!("Qwen3-VL vision slice does not support {dtype}"))),
-    };
-    b.to_device(&out)
+    b.slice_2d(qkv, 0, n_patches, col_start, width)?
+        .reshape(vec![n_patches, n_heads, head_dim])
 }
 
 /// Compute the bilinear-interpolated, permuted positional embeddings.

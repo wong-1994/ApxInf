@@ -44,3 +44,7 @@ required-features = ["cuda"]
 [[example]]
 name = "groot_operator_replay"
 required-features = ["cuda"]
+
+[[example]]
+name = "groot_infer_replay"
+required-features = ["cuda"]

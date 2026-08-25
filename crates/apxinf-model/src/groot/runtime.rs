@@ -2,7 +2,7 @@ use std::{cell::RefCell, collections::HashMap, path::Path, sync::Arc};
 
 use apxinf_core::{Backend, DType, Device, Error, Result, Tensor};
 
-use crate::{accelerator::create_backend, qwen3vl::{GeneralQwen3VL, Qwen3VLConfig}, vla::{Action, InferenceSpec, Observation, PreparedInference, VisionObservation, VlaRuntime}};
+use crate::{accelerator::create_backend, debug::DebugCapture, qwen3vl::{GeneralQwen3VL, Qwen3VLConfig}, vla::{Action, InferenceSpec, Observation, PreparedInference, VisionObservation, VlaRuntime}};
 
 use super::{four_step_schedule, weights::{Attention, DitBlock, GrootActionWeights, Linear, VlBlock}, GrootConfig};
 
@@ -37,7 +37,7 @@ impl GrootRuntime {
         Ok(Self { config, qwen: RefCell::new(qwen), weights, backend, norm_w, norm_b })
     }
 
-    fn run(&self, observation: &Observation) -> Result<Tensor> {
+    fn run(&self, observation: &Observation, mut debug: Option<&mut DebugCapture>) -> Result<Tensor> {
         observation.validate()?;
         let VisionObservation::Patches(pixels) = &observation.vision else {
             return Err(Error::Other("GR00T expects Qwen-preprocessed image patches".into()));
@@ -60,11 +60,17 @@ impl GrootRuntime {
         qwen.reset_state()?;
         let mut vl = qwen.encode_multimodal_to_layer(&observation.token_ids, &pixels, &grid, self.config.select_layer)?;
         drop(qwen);
+        self.capture(&mut debug, "backbone.hidden", &vl)?;
         vl = self.backend.layer_norm(&vl, &self.weights.vlln_w, &self.weights.vlln_b, 1e-5)?;
-        for block in &self.weights.vl_blocks { vl = self.vl_block(&vl, block)?; }
+        self.capture(&mut debug, "backbone.vlln", &vl)?;
+        for (index, block) in self.weights.vl_blocks.iter().enumerate() {
+            vl = self.vl_block(&vl, block)?;
+            self.capture(&mut debug, &format!("backbone.vl_block.{index}"), &vl)?;
+        }
 
         let state = self.upload_bf16(state)?;
         let state_features = self.weights.state.forward(&state, embodiment)?;
+        self.capture(&mut debug, "state.embedding", &state_features)?;
         let mut actions = self.upload_bf16(&observation.noise)?;
         let full_mask = if observation.conditioning.attention_mask.is_empty() {
             vec![1; observation.token_ids.len()]
@@ -77,22 +83,43 @@ impl GrootRuntime {
             let encoded = self.action_encode(&actions, step.bucket, embodiment)?;
             let position = self.backend.slice_2d(&self.weights.position, 0, self.config.action_horizon, 0, self.config.input_embedding_dim)?;
             let encoded = self.backend.add(&encoded, &position)?;
+            self.capture(&mut debug, &format!("flow.step.{}.action.embedding", step.index), &encoded)?;
             let mut hidden = self.backend.concat_rows(&state_features, &encoded)?;
             let temb = self.timestep_embedding(step.bucket)?;
+            self.capture(&mut debug, &format!("flow.step.{}.timestep.embedding", step.index), &temb)?;
             for (index, block) in self.weights.dit_blocks.iter().enumerate() {
                 let mask = if index % 4 == 0 { Some(text_mask.as_slice()) }
                     else if index % 2 == 0 { Some(image_mask.as_slice()) } else { None };
                 hidden = self.dit_block(&hidden, &vl, &temb, block, mask, index % 2 == 1)?;
+                self.capture(&mut debug, &format!("flow.step.{}.dit.block.{index}", step.index), &hidden)?;
             }
             let style = linear(&*self.backend, &self.backend.silu(&temb)?, &self.weights.out_style)?;
-            hidden = self.adaptive_norm(&hidden, &style, 1e-6)?;
+            hidden = self.adaptive_norm(&hidden, &style, 1e-6, false)?;
             let output = linear(&*self.backend, &hidden, &self.weights.out)?;
+            self.capture(&mut debug, &format!("flow.step.{}.velocity.predecode", step.index), &output)?;
             let velocity = self.weights.decoder.forward(&output, embodiment)?;
+            self.capture(&mut debug, &format!("flow.step.{}.velocity.decoded", step.index), &velocity)?;
             let velocity = self.backend.slice_2d(&velocity, 1, self.config.action_horizon, 0, self.config.max_action_dim)?;
             actions = self.backend.add(&actions, &self.backend.scale(&velocity, step.dt)?)?;
         }
         self.backend.synchronize()?;
         Ok(actions)
+    }
+
+    fn capture(&self, debug: &mut Option<&mut DebugCapture>, name: &str, tensor: &Tensor) -> Result<()> {
+        if let Some(capture) = debug.as_deref_mut() {
+            let host = self.backend.to_cpu(tensor)?;
+            capture.capture(name, &host.to_f32_vec()?, tensor.shape().dims());
+        }
+        Ok(())
+    }
+
+    pub fn infer_host_f32_with_debug(
+        &self,
+        observation: &Observation,
+        debug: &mut DebugCapture,
+    ) -> Result<Vec<f32>> {
+        self.backend.to_cpu(&self.run(observation, Some(debug))?)?.to_f32_vec()
     }
 
     fn upload_bf16(&self, tensor: &Tensor) -> Result<Tensor> {
@@ -128,11 +155,12 @@ impl GrootRuntime {
         linear(&*self.backend, &hidden, &self.weights.timestep_2)
     }
 
-    fn adaptive_norm(&self, input: &Tensor, style: &Tensor, eps: f32) -> Result<Tensor> {
+    fn adaptive_norm(&self, input: &Tensor, style: &Tensor, eps: f32, scale_first: bool) -> Result<Tensor> {
         let rows = input.shape().dims()[0];
         let width = input.shape().dims()[1];
-        let shift = self.backend.slice_2d(style, 0, 1, 0, width)?;
-        let scale = self.backend.slice_2d(style, 0, 1, width, width)?;
+        let first = self.backend.slice_2d(style, 0, 1, 0, width)?;
+        let second = self.backend.slice_2d(style, 0, 1, width, width)?;
+        let (scale, shift) = if scale_first { (first, second) } else { (second, first) };
         let shift = repeat_rows(&*self.backend, &shift, rows)?;
         let scale = repeat_rows(&*self.backend, &scale, rows)?;
         let normalized = self.backend.layer_norm(input, &self.norm_w, &self.norm_b, eps)?;
@@ -143,7 +171,7 @@ impl GrootRuntime {
     fn dit_block(&self, hidden: &Tensor, vl: &Tensor, temb: &Tensor, block: &DitBlock,
                  mask: Option<&[u8]>, self_attention: bool) -> Result<Tensor> {
         let style = linear(&*self.backend, &self.backend.silu(temb)?, &block.ada)?;
-        let norm = self.adaptive_norm(hidden, &style, 1e-5)?;
+        let norm = self.adaptive_norm(hidden, &style, 1e-5, true)?;
         let attended = if self_attention {
             self.attention(&norm, &norm, &block.attention, None, false, 32, 48)?
         } else { self.attention(&norm, vl, &block.attention, mask, false, 32, 48)? };
@@ -165,12 +193,12 @@ impl GrootRuntime {
 }
 
 impl VlaRuntime for GrootRuntime {
-    fn infer(&self, observation: &Observation) -> Result<Action> { Ok(Action::new(self.run(observation)?)) }
+    fn infer(&self, observation: &Observation) -> Result<Action> { Ok(Action::new(self.run(observation, None)?)) }
     fn prepare(&self, _spec: &InferenceSpec) -> Result<Box<dyn PreparedInference>> {
         Err(Error::Other("GR00T prepared graph capture is not implemented yet".into()))
     }
     fn infer_host_f32(&self, observation: &Observation) -> Result<Vec<f32>> {
-        self.backend.to_cpu(&self.run(observation)?)?.to_f32_vec()
+        self.backend.to_cpu(&self.run(observation, None)?)?.to_f32_vec()
     }
 }
 
