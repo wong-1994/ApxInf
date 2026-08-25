@@ -141,6 +141,7 @@ class QualificationEngine:
         )
         return {
             "family": self.profile.family,
+            "representative_real_inputs": representative,
             "status": status,
             "deployment_complete": deployment_complete,
             "performance_pending": performance_pending,

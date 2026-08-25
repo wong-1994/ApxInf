@@ -238,7 +238,8 @@ when no shared architectural debt was found. Concrete debt is recorded as
 implemented as part of the Port.
 
 After the maintained implementation has been committed on a clean dedicated
-branch or worktree, `prepare-publication` validates the complete three-dot diff
+branch named `port/<port-id>` (which may back a dedicated worktree),
+`prepare-publication` validates the complete three-dot diff
 from its pinned base commit. It rejects source/reference adapters, checkpoints,
 real inputs, credentials, sensitive content, files without redistribution
 approval, and files larger than 1 MiB. It neither stashes nor resets work.

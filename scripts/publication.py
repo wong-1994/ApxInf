@@ -34,7 +34,6 @@ PRIVATE_KEY_BLOCK = re.compile(rb"-----BEGIN (?:OPENSSH |RSA |EC |DSA )?PRIVATE 
 TOKEN_SIGNATURE = re.compile(
     rb"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"
 )
-DEDICATED_BRANCH_PREFIXES = ("port/", "feat/")
 
 
 class PublicationError(ValueError):
@@ -56,7 +55,9 @@ def _git(repo: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
-def _require_safe_git_state(repo: Path, base_commit: str) -> dict[Path, str]:
+def _require_safe_git_state(
+    repo: Path, base_commit: str, port_id: str
+) -> dict[Path, str]:
     if not repo.is_dir() or _git(repo, "rev-parse", "--show-toplevel") != str(
         repo.resolve()
     ):
@@ -65,9 +66,9 @@ def _require_safe_git_state(repo: Path, base_commit: str) -> dict[Path, str]:
     if _git(repo, "status", "--porcelain"):
         raise PublicationError("publication preparation requires a clean worktree")
     branch = _git(repo, "branch", "--show-current")
-    if not branch or not branch.startswith(DEDICATED_BRANCH_PREFIXES):
+    if branch != f"port/{port_id}":
         raise PublicationError(
-            "publication requires a dedicated port/ or feat/ branch or worktree"
+            f"publication requires dedicated branch port/{port_id}"
         )
     if _git(repo, "merge-base", base_commit, "HEAD") != _git(repo, "rev-parse", base_commit):
         raise PublicationError("base_commit must be an ancestor of the dedicated branch")
@@ -214,7 +215,7 @@ def prepare_publication(
     repository = repository.resolve()
     output_dir = output_dir.resolve()
     _validate_payload(payload)
-    changed = _require_safe_git_state(repository, base_commit)
+    changed = _require_safe_git_state(repository, base_commit, str(payload["port_id"]))
     declarations = {item["path"]: item for item in payload["public_files"]}
     changed_names = {path.relative_to(repository).as_posix() for path in changed}
     if set(declarations) != changed_names:

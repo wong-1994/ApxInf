@@ -845,14 +845,9 @@ def artifact_record(
     return store.record(path, environment_path, extra_upstream)
 
 
-def resume_port(args: argparse.Namespace) -> int:
-    port_dir = args.port_dir.resolve()
-    try:
-        request = json.loads((port_dir / "request.json").read_text(encoding="utf-8"))
-        report = json.loads((port_dir / "report.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        print(f"cannot resume Port: {error}", file=sys.stderr)
-        return MISSING_INPUT.code
+def refreshed_artifacts(
+    port_dir: Path, request: dict[str, Any], report: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
     current: dict[str, dict[str, Any]] = {}
     for name, recorded in report.get("artifacts", {}).items():
         refreshed = copy.deepcopy(recorded)
@@ -939,6 +934,18 @@ def resume_port(args: argparse.Namespace) -> int:
                     file_sha256(dependency_path) if dependency_path.is_file() else None
                 )
         current[name] = refreshed
+    return current
+
+
+def resume_port(args: argparse.Namespace) -> int:
+    port_dir = args.port_dir.resolve()
+    try:
+        request = json.loads((port_dir / "request.json").read_text(encoding="utf-8"))
+        report = json.loads((port_dir / "report.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"cannot resume Port: {error}", file=sys.stderr)
+        return MISSING_INPUT.code
+    current = refreshed_artifacts(port_dir, request, report)
     resumed = resume_report(report, current)
     write_json(port_dir / "report.json", resumed)
     print(port_dir / "report.json")
@@ -2595,6 +2602,12 @@ def prepare_port_publication(args: argparse.Namespace) -> int:
         payload = json.loads(args.publication.read_text(encoding="utf-8"))
         report_path = args.port_dir.resolve() / "report.json"
         report = json.loads(report_path.read_text(encoding="utf-8"))
+        request = json.loads(
+            (args.port_dir.resolve() / "request.json").read_text(encoding="utf-8")
+        )
+        report = resume_report(
+            report, refreshed_artifacts(args.port_dir.resolve(), request, report)
+        )
         declared_family = report.get("request_declarations", {}).get("model_family")
         if payload.get("port_id") != report.get("port_id"):
             raise PublicationError("publication port_id does not match the Port report")
@@ -2614,6 +2627,11 @@ def prepare_port_publication(args: argparse.Namespace) -> int:
         request_checkpoint = declarations.get("checkpoint", {}).get("sha256")
         request_path = port_dir / "request.json"
         request_sha256 = file_sha256(request_path) if request_path.is_file() else None
+        canonical = report.get("artifacts", {}).get("canonical_equivalence", {})
+        canonical_sha256 = canonical.get("fingerprints", {}).get("content_sha256")
+        canonical_current = canonical.get("state") == "current" and isinstance(
+            canonical_sha256, str
+        )
         for name, envelope in report.get("artifacts", {}).items():
             if not name.startswith("qualification_") or not isinstance(envelope, dict):
                 continue
@@ -2641,11 +2659,21 @@ def prepare_port_publication(args: argparse.Namespace) -> int:
                 or fingerprints.get("source_sha256") != request_source
                 or fingerprints.get("checkpoint_sha256") != request_checkpoint
                 or fingerprints.get("upstream_sha256", {}).get("request") != request_sha256
-                or not fingerprints.get("upstream_sha256", {}).get("canonical_equivalence")
+                or not canonical_current
+                or fingerprints.get("upstream_sha256", {}).get("canonical_equivalence")
+                != canonical_sha256
                 or not fingerprints.get("tool_sha256")
             ):
                 continue
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(evidence, dict)
+                or evidence.get("family") != declared_family
+                or evidence.get("status") != "release_qualified"
+                or evidence.get("release_qualified") is not True
+                or evidence.get("representative_real_inputs") is not True
+            ):
+                continue
             candidates = evidence.get("tuples") if isinstance(evidence, dict) else None
             if not isinstance(candidates, list):
                 candidates = [evidence]

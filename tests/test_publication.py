@@ -52,7 +52,7 @@ class PublicationTest(unittest.TestCase):
     def payload(self, family: str, debt: bool = False) -> dict:
         return {
             "schema_version": "1.0",
-            "port_id": f"{family}-example",
+            "port_id": "example",
             "family": family,
             "base_branch": "main",
             "public_files": [
