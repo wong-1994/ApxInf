@@ -81,7 +81,12 @@ class KernelCoverageTest(unittest.TestCase):
                     computation["operator_replay"] = {
                         "passed": True,
                         "references": computation["references"],
-                        "comparisons": [{"max_absolute": 0.0005, "max_relative": 0.005}],
+                        "comparisons": [{
+                            "passed": True,
+                            "max_absolute": 0.0005,
+                            "max_relative": 0.005,
+                            "max_tolerance_excess": -0.0005,
+                        }],
                     }
                 result = analyze_kernel_coverage(
                     self.trace(computations=[computation]),
@@ -112,7 +117,12 @@ class KernelCoverageTest(unittest.TestCase):
         computation["operator_replay"] = {
             "passed": True,
             "references": computation["references"],
-            "comparisons": [{"max_absolute": 0.0005, "max_relative": 0.005}],
+            "comparisons": [{
+                "passed": True,
+                "max_absolute": 0.0005,
+                "max_relative": 0.005,
+                "max_tolerance_excess": -0.0005,
+            }],
         }
         result = analyze_kernel_coverage(
             self.trace(computations=[computation]),
@@ -137,6 +147,25 @@ class KernelCoverageTest(unittest.TestCase):
                     result["classifications"][0]["classification"],
                     "missing_required_capability",
                 )
+
+    def test_replay_uses_combined_absolute_and_relative_tolerance(self) -> None:
+        computation = self.computation()
+        computation["operator_replay"] = {
+            "passed": True,
+            "references": computation["references"],
+            "comparisons": [{
+                "passed": True,
+                "max_absolute": 0.015625,
+                "max_relative": 0.12,
+                "max_tolerance_excess": -0.004375,
+            }],
+        }
+        result = analyze_kernel_coverage(
+            self.trace(computations=[computation]),
+            [self.capability("correct_fallback")],
+            [{"target": "thor", "precision": "bf16"}],
+        )
+        self.assertEqual(result["status"], "passed")
 
     def test_returned_capability_must_be_revalidated_against_original_references(self) -> None:
         returned = self.capability(

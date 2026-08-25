@@ -30,10 +30,12 @@
           "minItems": 1,
           "items": {
             "type": "object",
-            "required": ["max_absolute", "max_relative"],
+            "required": ["passed", "max_absolute", "max_relative", "max_tolerance_excess"],
             "properties": {
+              "passed": {"const": true},
               "max_absolute": {"type": "number", "minimum": 0},
-              "max_relative": {"type": "number", "minimum": 0}
+              "max_relative": {"type": "number", "minimum": 0},
+              "max_tolerance_excess": {"type": "number", "maximum": 0}
             }
           }
         }

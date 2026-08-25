@@ -183,8 +183,10 @@ correct fallback becomes a non-blocking Optimization Opportunity.
 
 Layout-only rewrites and correct fallbacks require operator-replay evidence in
 the canonical computation. The replay must cite the computation's original
-family references and report absolute and relative errors within its declared
-tolerances. A catalog entry alone cannot establish either classification;
+family references and report absolute and relative errors. Pass/fail uses the
+same combined tolerance as canonical comparison:
+`abs(actual-reference) <= absolute + relative * abs(reference)` for every
+value. A catalog entry alone cannot establish either classification;
 missing, mismatched, self-failed, or out-of-tolerance replay becomes a blocking
 Kernel Gap. Existing primitives still require complete semantic matching in the
 catalog; broad operator-name similarity is not evidence that masks, layouts, or

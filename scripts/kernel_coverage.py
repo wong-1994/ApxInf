@@ -86,16 +86,17 @@ def _operator_replay_passed(computation: Mapping[str, Any]) -> bool:
     if not isinstance(comparisons, list) or not comparisons:
         return False
     tolerances = computation["tolerances"]
-    absolute = tolerances.get("absolute")
-    relative = tolerances.get("relative")
-    if not isinstance(absolute, (int, float)) or not isinstance(relative, (int, float)):
+    if not isinstance(tolerances.get("absolute"), (int, float)) or not isinstance(
+        tolerances.get("relative"), (int, float)
+    ):
         return False
     return all(
         isinstance(item, dict)
+        and item.get("passed") is True
         and isinstance(item.get("max_absolute"), (int, float))
         and isinstance(item.get("max_relative"), (int, float))
-        and item["max_absolute"] <= absolute
-        and item["max_relative"] <= relative
+        and isinstance(item.get("max_tolerance_excess"), (int, float))
+        and item["max_tolerance_excess"] <= 0
         for item in comparisons
     )
 
