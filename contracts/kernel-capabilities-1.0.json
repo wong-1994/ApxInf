@@ -75,7 +75,7 @@
     },
     {
       "operation": "sdpa_semantic_variants",
-      "provenance": "kernel_workflow_return",
+      "provenance": "built_in",
       "classification": "existing_primitive",
       "supported_dtypes": ["bf16"],
       "supported_layouts": ["row_major"],
@@ -87,17 +87,7 @@
         [1, 32, 41, 48],
         [1, 32, 82, 48]
       ],
-      "interface": "sdpa_variants(q, k, v, causal_mask, padding_mask, encoder_mask) -> output",
-      "reference_validation": {
-        "passed": true,
-        "references": [
-          {"case": "libero-256/0", "tensor": "attention_replay.attention.variant.0.output"},
-          {"case": "libero-256/0", "tensor": "attention_replay.attention.variant.1.output"},
-          {"case": "libero-256/0", "tensor": "attention_replay.attention.variant.2.output"},
-          {"case": "libero-256/0", "tensor": "attention_replay.attention.variant.3.output"},
-          {"case": "libero-256/0", "tensor": "attention_replay.attention.variant.4.output"}
-        ]
-      }
+      "interface": "sdpa_variants(q, k, v, causal_mask, padding_mask, encoder_mask) -> output"
     },
     {
       "operation": "euler_update",
