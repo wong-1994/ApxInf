@@ -18,9 +18,23 @@ pub fn register_builtin_models() {
     registry::register("qwen3_vl", load_qwen3vl);
     registry::register("qwen3vl", load_qwen3vl);
     registry::register("minimal_vla", crate::minimal_vla::load);
+    registry::register("Gr00tN1d7", load_groot);
+    registry::register("groot", load_groot);
 
     #[cfg(feature = "cuda")]
     crate::pi05::register_builtin();
+}
+
+fn load_groot(
+    path: &Path,
+    _device: Device,
+    backend: Arc<dyn Backend>,
+    _options: &LoadOptions,
+) -> Result<LoadedModel> {
+    let model_dir = if path.is_dir() { path } else { path.parent().unwrap_or_else(|| Path::new(".")) };
+    Ok(LoadedModel::Vla(Box::new(crate::groot::GrootRuntime::from_dir_with_backend(
+        model_dir, backend,
+    )?)))
 }
 fn load_llama(
     path: &Path,

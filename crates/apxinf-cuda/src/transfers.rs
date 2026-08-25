@@ -100,6 +100,7 @@ pub(crate) fn copy_device_to_host(
 pub(crate) fn copy_tensor_2d_to_buffer(
     ctx: &CudaContext,
     source: &Tensor,
+    source_offset: usize,
     destination: &CudaBuffer,
     destination_offset: usize,
     destination_pitch: usize,
@@ -132,8 +133,10 @@ pub(crate) fn copy_tensor_2d_to_buffer(
         .storage()
         .as_gpu()
         .ok_or_else(|| Error::Other("expected CUDA source tensor".into()))?;
-    let source_required = rows
+    let source_required = source_offset.checked_add(rows.saturating_sub(1)
         .checked_mul(source_pitch)
+        .and_then(|offset| offset.checked_add(width))
+        .ok_or_else(|| Error::Other("2D CUDA source size overflow".into()))?)
         .ok_or_else(|| Error::Other("2D CUDA source size overflow".into()))?;
     if source_required > source.len {
         return Err(Error::Other(format!(
@@ -163,7 +166,7 @@ pub(crate) fn copy_tensor_2d_to_buffer(
                 .add(destination_offset)
                 .cast(),
             destination_pitch,
-            source.ptr as *const std::ffi::c_void,
+            (source.ptr as *const u8).add(source_offset).cast(),
             source_pitch,
             width,
             rows,
