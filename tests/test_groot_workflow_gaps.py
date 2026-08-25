@@ -17,6 +17,20 @@ import kernel_coverage  # noqa: E402
 
 
 class GrootWorkflowGapTest(unittest.TestCase):
+    def test_model_port_docs_route_discovered_gaps_back_into_kernel_workflow(self) -> None:
+        agent_instructions = (ROOT / "AGENTS.md").read_text()
+        workflow = (ROOT / "doc/porting-workflow.md").read_text()
+        normalized_agent_instructions = " ".join(agent_instructions.split())
+
+        self.assertIn(
+            "implementation reveals that a passed capability",
+            normalized_agent_instructions,
+        )
+        self.assertIn("Recover when implementation invalidates Preflight", workflow)
+        self.assertIn("absence of the old artifact does not end the Port", workflow)
+        self.assertIn("Finding more work is progress, not completion", workflow)
+        self.assertIn("observation-to-output path passes", workflow)
+
     def test_internal_stochastic_input_may_be_observed_in_output(self) -> None:
         inventory = {"stochastic_inputs": [{"name": "action_noise"}]}
         capture = {

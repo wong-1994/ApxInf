@@ -203,6 +203,42 @@ and reruns the same Port after the returned capability is reference-validated.
 A Kernel Gap is a workflow transition, not a reason to ask the user what to do,
 unless implementation needs new authority or unavailable hardware.
 
+### Recover when implementation invalidates Preflight
+
+Preflight is provisional until maintained implementation exercises the claimed
+ApxInf interfaces. If source inspection, operator replay, Backend inspection, or
+model implementation shows that a passed computation was omitted,
+misclassified, bound to an unrelated tensor, or cannot be realized by the
+claimed ApxInf capability, invalidate the affected coverage result immediately.
+This discovery is an evidence transition even when the previous report contains
+no `kernel_gap_handoff.json`.
+
+Continue the same task in this order:
+
+1. Mark the affected Preflight evidence stale and correct the Family Adapter's
+   operator trace with operation-local inputs, parameters, outputs, semantics,
+   dtype, layout, and concrete shapes.
+2. Build the operator gap table required by `adding-new-kernels.md`. Classify
+   each computation as directly reusable, expressible by existing primitives,
+   missing a Backend operation, or requiring a new hardware implementation.
+3. Rerun kernel coverage to materialize the corrected
+   `private/kernel_gap_handoff.json`. If the current tooling cannot materialize
+   the handoff, record the same required fields in the private Port and repair
+   that workflow seam; absence of the old artifact does not end the Port.
+4. Execute `adding-new-kernels.md` immediately for every genuine gap, validate
+   the returned capability against the original operation-local reference
+   tensors, and rerun the same Port.
+5. Resume maintained model implementation and repeat this recovery loop whenever
+   later layer or end-to-end comparisons invalidate another capability claim.
+
+Finding more work is progress, not completion. A model-port request completes
+only when the maintained observation-to-output path passes target-hardware
+layerwise and end-to-end differential validation plus its requested serving
+smoke tests, or when progress requires new authority or unavailable hardware.
+In the latter case, report the concrete external blocker and the last passing
+evidence. A discovered Kernel Gap, missing Backend API, failed implementation,
+or absent handoff remains executable work inside the current task.
+
 Configured inspection generates only private Port artifacts:
 
 - `private/reference_adapter.py`: the generated stable adapter contract
