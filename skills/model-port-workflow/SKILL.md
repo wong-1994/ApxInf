@@ -51,3 +51,10 @@ Stop with a concrete blocker when the reference cannot run, semantics remain
 unknown, canonical equivalence fails, a required kernel has no correct path, or
 the maintained public integration cannot be exercised. Report unmet
 performance goals separately from correctness.
+
+A partial foundation is not a completion condition. While safe in-scope work
+remains, continue through the runtime, public integration, and end-to-end
+reference comparison instead of ending with a list of unfinished components.
+Stop early only when the next required action depends on unavailable external
+information, authority, hardware, or artifacts, and state that dependency
+precisely.

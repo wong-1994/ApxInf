@@ -182,6 +182,11 @@ private reproducibility evidence in the review description.
 
 ## Completion criteria
 
+Do not hand off a partial runtime as a completed port. A compilable foundation,
+operator subset, checkpoint loader, or list of remaining components is an
+intermediate milestone. Continue while the next required step is possible with
+the available repository, reference implementation, hardware, and artifacts.
+
 A port is complete only when:
 
 - reference inputs and semantics are understood;
