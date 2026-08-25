@@ -47,12 +47,13 @@ def _require_computation(computation: Any, index: int) -> Mapping[str, Any]:
 
 
 def _capability_matches(computation: Mapping[str, Any], capability: Any) -> bool:
+    target_shapes = capability.get("target_shapes", []) if isinstance(capability, dict) else []
     return (
         isinstance(capability, dict)
         and capability.get("operation") == computation["operation"]
         and computation["dtype"] in capability.get("supported_dtypes", [])
         and computation["layout"] in capability.get("supported_layouts", [])
-        and all(shape in capability.get("target_shapes", []) for shape in computation["shapes"])
+        and ("*" in target_shapes or all(shape in target_shapes for shape in computation["shapes"]))
         and capability.get("interface") == computation["expected_interface"]
     )
 

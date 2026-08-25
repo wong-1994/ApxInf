@@ -31,9 +31,9 @@
       "additionalProperties": false,
       "required": ["kind", "environment_id", "system_site_packages"],
       "properties": {
-        "kind": {"const": "venv"},
+        "kind": {"enum": ["venv", "agent_prepared"]},
         "environment_id": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
-        "system_site_packages": {"const": false}
+        "system_site_packages": {"type": "boolean"}
       }
     },
     "installed_distributions": {

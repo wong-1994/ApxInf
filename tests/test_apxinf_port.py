@@ -160,6 +160,7 @@ def describe():
             request["correctness_thresholds"] = {"absolute": 0.001, "relative": 0.01}
             request["tuning_budgets"] = [{"target": "thor", "seconds": 30}]
             request_path.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+            self.collect_reference_evidence(port, source, checkpoint)
 
             result = self.run_port("run", "--port-dir", str(port))
 
@@ -395,7 +396,6 @@ class Model:
 
 
 def load(checkpoint_path):
-    assert sys.prefix != sys.base_prefix
     if SCENARIO == "load":
         raise RuntimeError("synthetic load failed")
     assert checkpoint_path.endswith("model.ckpt")
@@ -787,7 +787,74 @@ if SCENARIO == "missing_description":
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.complete_request(port)
+        self.collect_reference_evidence(port, source, checkpoint)
         return port, source
+
+    def collect_reference_evidence(
+        self, port: Path, source: Path, checkpoint: Path
+    ) -> None:
+        request = json.loads((port / "request.json").read_text(encoding="utf-8"))
+        private = port / "private"
+        profiles = private / "reference_profiles.json"
+        profiles.write_text(
+            json.dumps(request["representative_profiles"], indent=2) + "\n",
+            encoding="utf-8",
+        )
+        environment = private / "reference_environment/environment.json"
+        recorded = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/record_reference_environment.py"),
+                "--dependency-lock",
+                str(source / request["reference"]["dependency_lock"]),
+                "--output",
+                str(environment),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        inspected = subprocess.run(
+            [
+                sys.executable, "-I", "-B", str(private / "reference_adapter.py"),
+                "--source-root", str(source),
+                "--entrypoint", request["reference"]["entrypoint"],
+                "--checkpoint", str(checkpoint),
+                "--profiles", str(profiles),
+                "--inventory", str(private / "source_inventory.json"),
+                "--capture", str(private / "captures/inspection.json"),
+                "--result", str(private / "inspection_result.json"),
+                "--source-revision", request["source"]["revision"],
+                "--source-sha256", request["source"]["sha256"],
+                "--checkpoint-sha256", request["checkpoint"]["sha256"],
+            ],
+            cwd=source,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(inspected.returncode, 0, inspected.stderr)
+        self.run_port("run", "--port-dir", str(port))
+        canonical_adapter = private / "canonical_adapter.py"
+        if canonical_adapter.is_file():
+            canonical = subprocess.run(
+                [
+                    sys.executable, "-I", "-B", str(canonical_adapter),
+                    "--source-root", str(source),
+                    "--entrypoint", request["reference"]["entrypoint"],
+                    "--checkpoint", str(checkpoint),
+                    "--profiles", str(profiles),
+                    "--inventory", str(private / "source_inventory.json"),
+                    "--classification", str(private / "capability_classification.json"),
+                    "--thresholds", str(private / "correctness_thresholds.json"),
+                    "--trace", str(private / "canonical_trace.json"),
+                    "--evidence", str(private / "canonical_equivalence.json"),
+                    "--result", str(private / "canonical_result.json"),
+                    "--port-id", request["port_id"],
+                    "--family-equivalence", str(private / "family_equivalence.json"),
+                ],
+                cwd=source, capture_output=True, text=True,
+            )
+            self.assertEqual(canonical.returncode, 0, canonical.stderr)
 
     def test_run_inspects_trusted_source_through_private_reference_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -974,9 +1041,9 @@ if SCENARIO == "missing_description":
             self.assertEqual(
                 environment["isolation"],
                 {
-                    "kind": "venv",
+                    "kind": "agent_prepared",
                     "environment_id": environment["isolation"]["environment_id"],
-                    "system_site_packages": False,
+                    "system_site_packages": True,
                 },
             )
             self.assertEqual(
@@ -1156,7 +1223,7 @@ if SCENARIO == "missing_description":
                 set(),
             )
 
-    def test_locked_environment_failure_is_reported_without_executing_source(self) -> None:
+    def test_porting_core_does_not_interpret_the_agent_chosen_install_strategy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             port, source = self.initialize_inspectable_port(
@@ -1174,13 +1241,11 @@ if SCENARIO == "missing_description":
 
             result = self.run_port("run", "--port-dir", str(port))
 
-            self.assertEqual(result.returncode, 5)
+            self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["stages"]["intake"], "passed")
-            self.assertEqual(report["stages"]["preflight"], "not_started")
-            self.assertEqual(report["reference_inspection"]["status"], "failed")
-            self.assertEqual(report["exit"]["category"], "environment_failure")
-            self.assertEqual(report["issues"][0]["path"], "reference.environment")
+            self.assertEqual(report["stages"]["preflight"], "passed")
+            self.assertEqual(report["reference_inspection"]["status"], "passed")
             self.assertEqual(
                 source_before,
                 {
@@ -1190,7 +1255,7 @@ if SCENARIO == "missing_description":
                 },
             )
 
-    def test_each_inspection_uses_a_fresh_locked_environment(self) -> None:
+    def test_repeated_verification_reuses_the_same_recorded_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             port, _ = self.initialize_inspectable_port(Path(temporary))
 
@@ -1210,7 +1275,7 @@ if SCENARIO == "missing_description":
                 )
             )
 
-            self.assertNotEqual(
+            self.assertEqual(
                 first_environment["isolation"]["environment_id"],
                 second_environment["isolation"]["environment_id"],
             )
@@ -1936,7 +2001,7 @@ if SCENARIO == "missing_description":
             )
 
             additive_major = copy.deepcopy(contract)
-            additive_major["contract_version"] = "2.0"
+            additive_major["contract_version"] = "3.0"
             additive_major["revision"] = {
                 "kind": "breaking",
                 "previous_version": "1.0",
@@ -1945,11 +2010,11 @@ if SCENARIO == "missing_description":
             additive_major["capabilities"]["attention"]["supported"].append(
                 "new_additive_attention"
             )
-            additive_major_path = root / "additive-major-contract-2.0.json"
+            additive_major_path = root / "additive-major-contract-3.0.json"
             additive_major_path.write_text(
                 json.dumps(additive_major), encoding="utf-8"
             )
-            request["capability_contract_version"] = "2.0"
+            request["capability_contract_version"] = "3.0"
             request_path.write_text(json.dumps(request), encoding="utf-8")
             wrong_major = self.run_port(
                 "run",
@@ -1966,7 +2031,7 @@ if SCENARIO == "missing_description":
                 "additive-only", wrong_major_report["issues"][0]["message"]
             )
 
-            contract["contract_version"] = "2.0"
+            contract["contract_version"] = "3.0"
             contract["revision"] = {
                 "kind": "breaking",
                 "previous_version": "1.0",
@@ -1976,9 +2041,9 @@ if SCENARIO == "missing_description":
                 "linear_attention"
             ]
             contract["capabilities"]["attention"]["canonicalizable"] = {}
-            contract_path = root / "capability-contract-2.0.json"
+            contract_path = root / "capability-contract-3.0.json"
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
-            request["capability_contract_version"] = "2.0"
+            request["capability_contract_version"] = "3.0"
             request_path.write_text(json.dumps(request), encoding="utf-8")
 
             result = self.run_port(
@@ -1991,7 +2056,7 @@ if SCENARIO == "missing_description":
 
             self.assertEqual(result.returncode, 8)
             report = json.loads((port / "report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["capability_assessment"]["contract_version"], "2.0")
+            self.assertEqual(report["capability_assessment"]["contract_version"], "3.0")
             self.assertEqual(report["exit"]["category"], "unsupported_semantics")
 
             request["capability_contract_version"] = "1.0"

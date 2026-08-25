@@ -10,10 +10,8 @@ import json
 import math
 import os
 import platform
-import secrets
 import subprocess
 import sys
-import venv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -106,6 +104,28 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def path_sha256(path: Path) -> str:
+    """Hash a checkpoint file or a deterministic directory manifest."""
+    if path.is_file():
+        return file_sha256(path)
+    if not path.is_dir():
+        raise FileNotFoundError(path)
+    digest = hashlib.sha256()
+    children = sorted(
+        path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()
+    )
+    for child in children:
+        relative = child.relative_to(path).as_posix().encode("utf-8")
+        if child.is_symlink():
+            digest.update(
+                b"L\0" + relative + b"\0" + os.readlink(child).encode("utf-8")
+            )
+        elif child.is_file():
+            digest.update(b"F\0" + relative + b"\0")
+            digest.update(file_sha256(child).encode("ascii"))
+    return digest.hexdigest()
+
+
 def source_sha256(root: Path) -> str:
     digest = hashlib.sha256()
     paths = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())
@@ -130,9 +150,11 @@ def apxinf_source_sha256() -> str:
     result = subprocess.run(
         ["git", "ls-files", "-z"],
         cwd=repository_root(),
-        check=True,
+        check=False,
         capture_output=True,
     )
+    if result.returncode != 0:
+        return source_sha256(repository_root())
     for relative_bytes in result.stdout.split(b"\0"):
         if not relative_bytes:
             continue
@@ -166,7 +188,7 @@ def initialize(args: argparse.Namespace) -> int:
     if source is not None and not source.is_dir():
         print(f"source directory does not exist: {source}", file=sys.stderr)
         return MISSING_INPUT.code
-    if checkpoint is not None and not checkpoint.is_file():
+    if checkpoint is not None and not (checkpoint.is_file() or checkpoint.is_dir()):
         print(f"checkpoint does not exist: {checkpoint}", file=sys.stderr)
         return MISSING_INPUT.code
     if port_dir_is_unsafe(port_dir, source):
@@ -208,7 +230,7 @@ def initialize(args: argparse.Namespace) -> int:
         },
         "checkpoint": {
             "path": str(checkpoint) if checkpoint is not None else None,
-            "sha256": file_sha256(checkpoint) if checkpoint is not None else None,
+            "sha256": path_sha256(checkpoint) if checkpoint is not None else None,
         },
         "reference": {
             "entrypoint": args.reference_entrypoint,
@@ -758,14 +780,14 @@ def provenance_issues(
                 "message": "source content no longer matches its pinned SHA-256",
             }
         )
-    if checkpoint is not None and not checkpoint.is_file():
+    if checkpoint is not None and not (checkpoint.is_file() or checkpoint.is_dir()):
         missing.append(
             {"path": "checkpoint.path", "message": "checkpoint no longer exists"}
         )
     elif (
         checkpoint is not None
         and checkpoint_digest
-        and file_sha256(checkpoint) != checkpoint_digest
+        and path_sha256(checkpoint) != checkpoint_digest
     ):
         invalid.append(
             {
@@ -866,7 +888,7 @@ def refreshed_artifacts(
             )
         if fingerprints.get("checkpoint_sha256") is not None:
             fingerprints["checkpoint_sha256"] = (
-                file_sha256(Path(checkpoint_path)) if checkpoint_path else None
+                path_sha256(Path(checkpoint_path)) if checkpoint_path else None
             )
         fingerprints["apxinf_source_sha256"] = apxinf_source_sha256()
         for tool_name in list(fingerprints.get("tool_sha256", {})):
@@ -973,13 +995,16 @@ def canonical_input_issue(
             ),
         }
     if inventory.get("stochastic_inputs"):
-        seeded_inputs_differ = any(
-            value_sha256(cases[index].get("inputs"))
-            != value_sha256(cases[index + 1].get("inputs"))
+        seeded_execution_differ = any(
+            any(
+                value_sha256(cases[index].get(field))
+                != value_sha256(cases[index + 1].get(field))
+                for field in ("inputs", "output", "intermediates", "postprocessed")
+            )
             for index in range(0, len(cases) - 1, 2)
             if cases[index].get("seed") == 0 and cases[index + 1].get("seed") == 1
         )
-        if not seeded_inputs_differ:
+        if not seeded_execution_differ:
             return {
                 "path": "stochastic_inputs",
                 "message": (
@@ -1281,8 +1306,10 @@ def load_capability_contract(
             )
         if not isinstance(rule.get("required"), bool):
             raise ValueError(f"capability {name} required must be boolean")
-        if rule.get("cardinality") != "exactly_one":
-            raise ValueError(f"capability {name} cardinality must be exactly_one")
+        if rule.get("cardinality") not in {"exactly_one", "one_or_more"}:
+            raise ValueError(
+                f"capability {name} cardinality must be exactly_one or one_or_more"
+            )
         if name in pack.required_capabilities and not rule["required"]:
             raise ValueError(f"core capability {name} must remain required")
     for change in changes:
@@ -1508,7 +1535,7 @@ def classify_capabilities(
                     "capability observations must be non-empty strings",
                 )
             )
-        if len(set(string_values)) != 1:
+        if rule["cardinality"] == "exactly_one" and len(set(string_values)) != 1:
             classifications.append(
                 classification_record(
                     f"capability_facts.{capability}",
@@ -1521,6 +1548,8 @@ def classify_capabilities(
             )
         evidence_values = {value for _, value in capability_evidence}
         evidence_matches = evidence_values == set(string_values)
+        if rule["cardinality"] == "one_or_more":
+            evidence_matches = evidence_values <= set(string_values)
         if (
             capability == "shape_profiles"
             and evidence_values == {"finite"}
@@ -1582,15 +1611,32 @@ def classify_capabilities(
                     ],
                 )
             )
+    trace_operations = {
+        trace.get("operation")
+        for trace in inventory.get("operator_traces", [])
+        if isinstance(trace, dict)
+    }
     for index, observed in enumerate(inventory.get("custom_operators", [])):
+        name = observed.get("name") if isinstance(observed, dict) else None
+        explained = (
+            isinstance(name, str)
+            and bool(name)
+            and isinstance(observed.get("semantics"), str)
+            and bool(observed["semantics"])
+            and name in trace_operations
+        )
         classifications.append(
             classification_record(
                 f"custom_operators[{index}]",
                 "custom_operators",
                 observed,
-                "unsupported",
+                "supported" if explained else "unsupported",
                 None,
-                "unexplained custom operator is outside the contract",
+                (
+                    "custom operator semantics are delegated to kernel coverage"
+                    if explained
+                    else "custom operator requires a matching operator trace"
+                ),
             )
         )
     counts = {
@@ -1614,42 +1660,10 @@ def classify_capabilities(
     }
 
 
-def offline_environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    for name in (
-        "ALL_PROXY",
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "all_proxy",
-        "https_proxy",
-        "http_proxy",
-        "PIP_CONFIG_FILE",
-        "PIP_EXTRA_INDEX_URL",
-        "PIP_FIND_LINKS",
-        "PIP_INDEX_URL",
-        "PIP_TRUSTED_HOST",
-    ):
-        environment.pop(name, None)
-    environment.update(
-        {
-            "APXINF_REFERENCE_NETWORK": "disabled",
-            "HF_HUB_OFFLINE": "1",
-            "TRANSFORMERS_OFFLINE": "1",
-            "WANDB_MODE": "offline",
-            "PIP_NO_INDEX": "1",
-            "PIP_CONFIG_FILE": os.devnull,
-            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-            "PYTHONDONTWRITEBYTECODE": "1",
-        }
-    )
-    return environment
-
-
 def run_reference_inspection(
     port_dir: Path, request: dict[str, Any]
 ) -> tuple[IntakeOutcome, list[dict[str, str]], dict[str, dict[str, Any]]]:
     source = Path(request["source"]["path"])
-    checkpoint = Path(request["checkpoint"]["path"])
     reference = request["reference"]
     entrypoint = reference["entrypoint"]
     dependency_lock = reference["dependency_lock"]
@@ -1672,162 +1686,31 @@ def run_reference_inspection(
         }
         return MISSING_INPUT, [issue], {}
 
-    environment_dir = private_dir / "reference_environment"
-    environment_id = secrets.token_hex(12)
-    virtual_environment = environment_dir / "venvs" / environment_id
-    environment_path = environment_dir / "environment.json"
-    try:
-        venv.EnvBuilder(with_pip=True).create(virtual_environment)
-        python = virtual_environment / (
-            "Scripts/python.exe" if os.name == "nt" else "bin/python"
-        )
-        lock_text = lock_path.read_text(encoding="utf-8")
-        requirements = [
-            line
-            for line in lock_text.splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
-        ]
-        active_lock_text = "\n".join(requirements).lower()
-        if "http://" in active_lock_text or "https://" in active_lock_text:
-            raise RuntimeError("dependency lock contains a network URL")
-        if requirements:
-            installed = subprocess.run(
-                [
-                    str(python),
-                    "-m",
-                    "pip",
-                    "install",
-                    "--no-index",
-                    "--require-hashes",
-                    "--disable-pip-version-check",
-                    "--no-input",
-                    "-r",
-                    str(lock_path),
-                ],
-                cwd=source,
-                env=offline_environment(),
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=300,
-            )
-            if installed.returncode != 0:
-                message = installed.stderr.strip() or installed.stdout.strip()
-                raise RuntimeError(f"locked dependency installation failed: {message}")
-        listed = subprocess.run(
-            [
-                str(python),
-                "-m",
-                "pip",
-                "list",
-                "--format=json",
-                "--disable-pip-version-check",
-            ],
-            cwd=source,
-            env=offline_environment(),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
-        )
-        if listed.returncode != 0:
-            message = listed.stderr.strip() or listed.stdout.strip()
-            raise RuntimeError(f"could not inventory locked environment: {message}")
-        installed_distributions = sorted(
-            json.loads(listed.stdout), key=lambda distribution: distribution["name"].lower()
-        )
-        environment = {
-            "schema_version": "1.0",
-            "python": platform.python_version(),
-            "dependency_lock": {
-                "path": dependency_lock,
-                "sha256": file_sha256(lock_path),
-            },
-            "isolation": {
-                "kind": "venv",
-                "environment_id": environment_id,
-                "system_site_packages": False,
-            },
-            "installed_distributions": installed_distributions,
-            "runtime_network_access": False,
-            "network_enforcement": ["offline_environment", "python_socket_guard"],
-        }
-        write_json(environment_path, environment)
-    except (
-        OSError,
-        json.JSONDecodeError,
-        subprocess.SubprocessError,
-        RuntimeError,
-    ) as error:
-        issue = {
-            "path": "reference.environment",
-            "message": f"could not prepare locked reference environment: {error}",
-        }
-        return ENVIRONMENT_FAILURE, [issue], {}
-
+    environment_path = private_dir / "reference_environment" / "environment.json"
     profiles_path = private_dir / "reference_profiles.json"
     inventory_path = private_dir / "source_inventory.json"
     capture_path = private_dir / "captures" / "inspection.json"
-    result_path = (
-        private_dir / "inspection_results" / f"{secrets.token_hex(12)}.json"
-    )
+    result_path = private_dir / "inspection_result.json"
     profiles_path.write_text(
         json.dumps(request["representative_profiles"], indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
     )
-    command = [
-        str(python),
-        "-I",
-        "-B",
-        str(adapter_path),
-        "--source-root",
-        str(source),
-        "--entrypoint",
-        entrypoint,
-        "--checkpoint",
-        str(checkpoint),
-        "--profiles",
-        str(profiles_path),
-        "--inventory",
-        str(inventory_path),
-        "--capture",
-        str(capture_path),
-        "--result",
-        str(result_path),
-        "--source-revision",
-        request["source"]["revision"],
-        "--source-sha256",
-        request["source"]["sha256"],
-        "--checkpoint-sha256",
-        request["checkpoint"]["sha256"],
-    ]
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=source,
-            env=offline_environment(),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=300,
-        )
-        if completed.returncode != 0:
-            detail = completed.stderr.strip() or completed.stdout.strip()
-            raise RuntimeError(f"reference process exited {completed.returncode}: {detail}")
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, subprocess.SubprocessError, RuntimeError) as error:
+    required = (environment_path, result_path)
+    missing = [path.relative_to(port_dir).as_posix() for path in required if not path.is_file()]
+    if missing:
         issue = {
-            "path": "reference.environment",
-            "message": f"could not execute Reference Adapter: {error}",
+            "path": "reference.evidence",
+            "message": "Agent-prepared reference evidence is missing: " + ", ".join(missing),
         }
-        return ENVIRONMENT_FAILURE, [issue], {
-            "reference_adapter": artifact_record(
-                port_dir, adapter_path, request, environment_path
-            ),
-            "reference_environment": artifact_record(
-                port_dir, environment_path, request, environment_path
-            ),
+        return MISSING_INPUT, [issue], {}
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        issue = {
+            "path": "reference.evidence",
+            "message": f"could not read Agent-prepared reference evidence: {error}",
         }
+        return INVALID_INPUT, [issue], {}
 
     status = result.get("status")
     def record(path: Path) -> dict[str, Any]:
@@ -1916,68 +1799,39 @@ def run_canonical_verification(
     )
     trace_path = private_dir / "canonical_trace.json"
     evidence_path = private_dir / "canonical_equivalence.json"
-    result_path = private_dir / "canonical_results" / f"{secrets.token_hex(12)}.json"
-    environment = json.loads(environment_path.read_text(encoding="utf-8"))
-    environment_id = environment["isolation"]["environment_id"]
-    virtual_environment = environment_path.parent / "venvs" / environment_id
-    python = virtual_environment / (
-        "Scripts/python.exe" if os.name == "nt" else "bin/python"
-    )
-    command = [
-        str(python),
-        "-I",
-        "-B",
-        str(adapter_path),
-        "--source-root",
-        request["source"]["path"],
-        "--entrypoint",
-        request["reference"]["entrypoint"],
-        "--checkpoint",
-        request["checkpoint"]["path"],
-        "--profiles",
-        str(profiles_path),
-        "--inventory",
-        str(inventory_path),
-        "--classification",
-        str(classification_path),
-        "--thresholds",
-        str(thresholds_path),
-        "--trace",
-        str(trace_path),
-        "--evidence",
-        str(evidence_path),
-        "--result",
-        str(result_path),
-        "--port-id",
-        request["port_id"],
-        "--family-equivalence",
-        str(family_path),
-    ]
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=Path(request["source"]["path"]),
-            env=offline_environment(),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=300,
-        )
-        if completed.returncode != 0:
-            detail = completed.stderr.strip() or completed.stdout.strip()
-            raise RuntimeError(
-                f"Canonical Adapter exited {completed.returncode}: {detail}"
-            )
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, subprocess.SubprocessError, RuntimeError) as error:
+    result_path = private_dir / "canonical_result.json"
+    required = (result_path,)
+    missing = [path.relative_to(port_dir).as_posix() for path in required if not path.is_file()]
+    if missing:
         issue = {
-            "path": "canonicalization.environment",
-            "message": f"could not execute Canonical Adapter: {error}",
+            "path": "canonicalization.evidence",
+            "message": "Agent-prepared canonical evidence is missing: " + ", ".join(missing),
         }
-        return ENVIRONMENT_FAILURE, [issue], {}, {
+        return MISSING_INPUT, [issue], {}, {
+            "cases": 0, "comparisons": 0, "failures": 0
+        }, []
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        issue = {
+            "path": "canonicalization.evidence",
+            "message": f"could not read Agent-prepared canonical evidence: {error}",
+        }
+        return INVALID_INPUT, [issue], {}, {
             "cases": 0,
             "comparisons": 0,
             "failures": 1,
+        }, []
+
+    if result.get("status") == "success" and (
+        not trace_path.is_file() or not evidence_path.is_file()
+    ):
+        issue = {
+            "path": "canonicalization.evidence",
+            "message": "successful canonical result requires trace and equivalence evidence",
+        }
+        return INVALID_INPUT, [issue], {}, {
+            "cases": 0, "comparisons": 0, "failures": 1
         }, []
 
     upstream = {

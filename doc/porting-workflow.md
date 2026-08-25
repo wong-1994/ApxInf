@@ -78,11 +78,37 @@ python3 scripts/apxinf_port.py init \
   --port-dir /private/path/my-port
 ```
 
-The dependency lock is installed with pip's `--require-hashes` and `--no-index`
-inside a Port-local virtual environment. Empty locks are valid for sources that
-use only the Python standard library. Runtime source execution receives offline
-library settings and a Python socket guard; this protects against accidental
-access by trusted code and is not a sandbox for malicious code.
+The Agent prepares the reference environment; `apxinf_port.py` does not choose
+an installer, create a venv, start a container, or decide whether network access
+is appropriate. Prefer, in order: a previously verified target container or
+venv, an offline install from available caches, then a lock-respecting install
+with explicitly authorized network access. Record the selected environment with
+`scripts/record_reference_environment.py`, executed by that environment's
+Python. The recorder hashes the lock and inventories the interpreter and
+installed distributions; it does not install or mutate anything.
+
+Run `apxinf_port.py run` once after completing the request to materialize
+`private/reference_profiles.json`; a missing-evidence result is an instruction
+to the Agent, not a failed Port. The Agent then invokes the generated private
+`reference_adapter.py` with its selected Python and writes these fixed evidence
+paths:
+
+- `private/reference_environment/environment.json`
+- `private/source_inventory.json`
+- `private/captures/inspection.json`
+- `private/inspection_result.json`
+
+The adapter command takes `--source-root`, `--entrypoint`, `--checkpoint`,
+`--profiles`, the three output paths, and the source/checkpoint revision and
+digest values pinned in `request.json`. Environment-specific asset paths and
+container mounts are Agent decisions and remain outside the request schema.
+After evidence exists, rerun `apxinf_port.py run`; it only validates provenance,
+schemas, capability facts, numerical evidence, and Gates.
+
+If offline preparation lacks a wheel or model asset, diagnose the missing item
+and continue with another existing environment or request authorization for a
+lock-respecting download. Do not encode the encountered package manager or
+machine layout as a new Porting Core branch.
 
 ## Prove canonical equivalence
 
@@ -97,6 +123,12 @@ more `canonicalizable` capabilities must additionally expose
 `canonical_postprocess(output)`, and `canonicalization_manifest()` from its
 trusted entrypoint. The generic Canonical Adapter wrapper is copied into the
 private Port directory only for that case.
+
+The Porting Core does not execute it. A missing-canonical-evidence result tells
+the Agent to run `private/canonical_adapter.py` with the already selected
+reference environment, then rerun the Gate. The fixed outputs are
+`private/canonical_trace.json`, `private/canonical_equivalence.json`, and
+`private/canonical_result.json`.
 
 The manifest consumes every named source and canonical parameter exactly once,
 with shape, dtype, alias, and tied-weight checks, and declares all transpose,
@@ -156,6 +188,11 @@ tolerances, golden tensors, requested targets, frequency, performance impact,
 and expected interface. A capability returned by that workflow must record
 successful revalidation against the original family references before a rerun
 can pass Preflight.
+
+The Agent consumes that handoff immediately, follows `adding-new-kernels.md`,
+and reruns the same Port after the returned capability is reference-validated.
+A Kernel Gap is a workflow transition, not a reason to ask the user what to do,
+unless implementation needs new authority or unavailable hardware.
 
 Configured inspection generates only private Port artifacts:
 

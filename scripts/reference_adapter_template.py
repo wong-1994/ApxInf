@@ -349,16 +349,43 @@ def storage_key(value: Any) -> tuple[str, int]:
 
 
 def tensor_record(name: str, value: Any) -> dict[str, Any]:
-    captured = json_capture(value)
-    encoded = json.dumps(
-        captured, sort_keys=True, separators=(",", ":"), allow_nan=False
-    ).encode("utf-8")
+    digest = hashlib.sha256()
+    detached = value.detach() if callable(getattr(value, "detach", None)) else value
+    contiguous = (
+        detached.contiguous()
+        if callable(getattr(detached, "contiguous", None))
+        else detached
+    )
+    view = getattr(contiguous, "view", None)
+    flatten = getattr(contiguous, "flatten", None)
+    if callable(view) and callable(flatten):
+        try:
+            tensor_module = importlib.import_module(type(value).__module__.split(".")[0])
+            byte_values = flatten().view(tensor_module.uint8)
+            total = int(byte_values.numel())
+            for offset in range(0, total, 8 * 1024 * 1024):
+                chunk = byte_values[offset : offset + 8 * 1024 * 1024]
+                chunk = chunk.cpu() if callable(getattr(chunk, "cpu", None)) else chunk
+                numpy = getattr(chunk, "numpy", None)
+                if not callable(numpy):
+                    raise TypeError("tensor byte view requires numpy()")
+                digest.update(numpy().tobytes())
+        except (TypeError, RuntimeError, ValueError, AttributeError):
+            captured = json_capture(value)
+            digest.update(json.dumps(
+                captured, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8"))
+    else:
+        captured = json_capture(value)
+        digest.update(json.dumps(
+            captured, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8"))
     return {
         "name": name,
         "shape": tensor_shape(value) or [],
         "dtype": str(getattr(value, "dtype", type(value).__name__)),
         "requires_grad": bool(getattr(value, "requires_grad", False)),
-        "data_sha256": hashlib.sha256(encoded).hexdigest(),
+        "data_sha256": digest.hexdigest(),
     }
 
 
