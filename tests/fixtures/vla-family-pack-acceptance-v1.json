@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "family": "vla",
+  "contracts": {
+    "capability": "contracts/vla-capability-contract-1.0.json",
+    "reference": "doc/porting-workflow.md",
+    "canonicalization": "schemas/canonical-equivalence-v1.schema.json",
+    "verification": "schemas/workflow-artifact-envelope-v1.schema.json",
+    "integration": "crates/apxinf-model/src/vla/mod.rs",
+    "serving": "scripts/pi05_openpi_websocket_server.py",
+    "benchmark": "scripts/vla_qualification.py"
+  },
+  "requested_tuples": [
+    {"target": "thor", "precision": "bf16"}
+  ],
+  "public_artifacts": [
+    {"path": "crates/apxinf-model/src/minimal_vla/mod.rs", "kind": "maintained_source"},
+    {"path": "tests/fixtures/vla-family-pack-acceptance-v1.json", "kind": "synthetic_fixture"}
+  ],
+  "next_production_model": null,
+  "independent_family_development": {"llm": true, "vlm": true}
+}

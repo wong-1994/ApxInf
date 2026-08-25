@@ -382,3 +382,32 @@ Correctness and performance waivers must be scoped to a requested tuple, cite
 evidence, carry an ISO expiration date, and include explicit maintainer
 approval. A waiver records an accepted deviation but cannot turn waived
 evidence into Release-qualified evidence.
+
+## VLA Family Pack acceptance
+
+The VLA Family Pack binds seven explicit contracts to the shared Core:
+capability classification, private reference capture, canonicalization,
+named-tensor verification, the maintained `VlaRuntime` integration, action
+serving, and the control-step benchmark profile. The deterministic public
+acceptance fixture is validated with:
+
+```bash
+python3 scripts/vla_family_pack_acceptance.py \
+  tests/fixtures/vla-family-pack-acceptance-v1.json
+```
+
+Acceptance replays the existing PI0.5 prompt, state-discretization,
+reverse-time Euler-flow, policy-postprocessing, and serving behavior without
+changing their mathematics. It also records a minimal synthetic external VLA
+passing Intake, Preflight, maintained implementation, policy integration,
+serving, tuning, qualification, bundling, and local PR preparation.
+
+The fixture matrix fails closed for canonicalization and unsupported
+semantics, distinguishes a blocking Kernel Gap from a non-blocking
+Optimization Opportunity, prevents stale evidence from satisfying a Gate,
+qualifies only requested target/precision tuples, and applies publication
+safety. Public acceptance evidence contains only maintained source and
+reviewed synthetic fixtures—never external source, private adapters,
+checkpoints, real inputs, planning documents, or transient Port state.
+Acceptance deliberately names no future production model and creates no
+dependency from independently developed LLM or VLM Family Packs back to VLA.
