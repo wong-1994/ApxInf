@@ -46,20 +46,44 @@ class VlaFamilyPackAcceptanceTest(unittest.TestCase):
 
     @mock.patch("vla_family_pack_acceptance.subprocess.run")
     def test_controlled_hardware_is_required_for_accepted_status(self, run) -> None:
-        run.side_effect = lambda command, **kwargs: mock.Mock(
-            returncode=0,
-            stdout="deadbeef\n" if tuple(command) == ("git", "rev-parse", "HEAD") else "",
-            stderr="",
-        )
+        def completed(command, **kwargs):
+            command = tuple(command)
+            stdout = ""
+            if command == ("git", "rev-parse", "HEAD"):
+                stdout = "deadbeef\n"
+            elif command[1:3] == ("-c", "import json,torch; p=torch.cuda.get_device_properties(0); print(json.dumps({'available':torch.cuda.is_available(),'name':p.name,'capability':[p.major,p.minor],'cuda':torch.version.cuda,'total_memory':p.total_memory}))"):
+                stdout = '{"available": true, "name": "NVIDIA Thor", "capability": [11, 0], "cuda": "13.0", "total_memory": 1}\n'
+            elif "scripts/bench_pi05.py" in command:
+                stdout = "layer                 p50      p95\nL0_model           100.00   110.00\n"
+            return mock.Mock(returncode=0, stdout=stdout, stderr="")
+        run.side_effect = completed
         result = run_acceptance(
             self.manifest, ROOT, python="python", cargo="cargo",
             runtime_python="runtime-python", controlled_hardware=True,
         )
         self.assertEqual(result["status"], "accepted")
         self.assertEqual(result["stages"]["controlled_hardware_performance"], "passed")
+        self.assertEqual(result["stages"]["controlled_hardware_identity"], "passed")
         self.assertIn(
             "thor_bf16_performance", [check["name"] for check in result["checks"]]
         )
+        performance = next(check for check in result["checks"] if check["name"] == "thor_bf16_performance")
+        self.assertEqual(performance["evidence"], {"p95_ms": 110.0, "limit_ms": 200.0, "warmup": 1, "samples": 3})
+
+    @mock.patch("vla_family_pack_acceptance.subprocess.run")
+    def test_slow_thor_fails_the_machine_evaluated_gate(self, run) -> None:
+        def completed(command, **kwargs):
+            command = tuple(command)
+            if command[1:2] == ("-c",):
+                stdout = '{"available": true, "name": "NVIDIA Thor", "capability": [11, 0]}\n'
+            elif "scripts/bench_pi05.py" in command:
+                stdout = "L0_model           100.00   250.00\n"
+            else:
+                stdout = ""
+            return mock.Mock(returncode=0, stdout=stdout, stderr="")
+        run.side_effect = completed
+        with self.assertRaisesRegex(AcceptanceError, "exceeds 200.00"):
+            run_acceptance(self.manifest, ROOT, controlled_hardware=True)
 
     def test_manifest_requires_contracts_requested_subset_and_public_safety(self) -> None:
         for contract in tuple(self.manifest["contracts"]):

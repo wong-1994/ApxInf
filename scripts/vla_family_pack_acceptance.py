@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from typing import Any, Mapping
 SUPPORTED_TUPLES = frozenset({("thor", "bf16"), ("thor", "fp8"), ("orin", "bf16"), ("orin", "int8_w8a8")})
 CONTRACTS = frozenset({"capability", "reference", "canonicalization", "verification", "integration", "serving", "benchmark"})
 PUBLIC_KINDS = frozenset({"maintained_source", "synthetic_fixture", "ci_configuration"})
+THOR_BF16_L0_P95_LIMIT_MS = 200.0
 
 class AcceptanceError(ValueError):
     """The executable VLA acceptance matrix did not pass."""
@@ -44,8 +46,32 @@ def acceptance_checks(
     if not controlled_hardware:
         return software
     return software + (
+        AcceptanceCheck("thor_identity", ("controlled_hardware_identity",), (runtime_python, "-c", "import json,torch; p=torch.cuda.get_device_properties(0); print(json.dumps({'available':torch.cuda.is_available(),'name':p.name,'capability':[p.major,p.minor],'cuda':torch.version.cuda,'total_memory':p.total_memory}))")),
         AcceptanceCheck("thor_bf16_performance", ("controlled_hardware_performance",), (runtime_python, "scripts/bench_pi05.py", "--random-weights", "--layer", "l0", "--precision", "bf16", "--device", "cuda:0", "--warmup", "1", "--samples", "3")),
     )
+
+def _hardware_evidence(check: AcceptanceCheck, stdout: str) -> dict[str, Any] | None:
+    if check.name == "thor_identity":
+        try:
+            identity = json.loads(stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as error:
+            raise AcceptanceError("thor_identity did not emit valid JSON") from error
+        if not identity.get("available") or "thor" not in str(identity.get("name", "")).lower():
+            raise AcceptanceError("controlled hardware is not NVIDIA Thor")
+        if identity.get("capability") != [11, 0]:
+            raise AcceptanceError("controlled Thor must report CUDA capability 11.0")
+        return identity
+    if check.name == "thor_bf16_performance":
+        match = re.search(r"^L0_model\s+\S+\s+(\d+(?:\.\d+)?)", stdout, re.MULTILINE)
+        if match is None:
+            raise AcceptanceError("Thor benchmark did not emit an L0 p95 measurement")
+        p95_ms = float(match.group(1))
+        if p95_ms > THOR_BF16_L0_P95_LIMIT_MS:
+            raise AcceptanceError(
+                f"Thor BF16 L0 p95 {p95_ms:.2f} ms exceeds {THOR_BF16_L0_P95_LIMIT_MS:.2f} ms"
+            )
+        return {"p95_ms": p95_ms, "limit_ms": THOR_BF16_L0_P95_LIMIT_MS, "warmup": 1, "samples": 3}
+    return None
 
 def _pairs(value: Any, name: str) -> set[tuple[str, str]]:
     if not isinstance(value, list):
@@ -129,12 +155,16 @@ def run_acceptance(
             check.command, cwd=repository, env=environment, text=True, capture_output=True
         )
         status = "passed" if completed.returncode == 0 else "failed"
-        results.append({"name": check.name, "stages": list(check.stages), "command": list(check.command), "status": status})
-        stages.update({stage: status for stage in check.stages})
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout).strip().splitlines()
             suffix = f": {detail[-1]}" if detail else ""
             raise AcceptanceError(f"{check.name} failed{suffix}")
+        evidence = _hardware_evidence(check, completed.stdout)
+        result = {"name": check.name, "stages": list(check.stages), "command": list(check.command), "status": status, "stdout_sha256": hashlib.sha256(completed.stdout.encode()).hexdigest()}
+        if evidence is not None:
+            result["evidence"] = evidence
+        results.append(result)
+        stages.update({stage: status for stage in check.stages})
     public_files = {
         item["path"]: _sha256(repository / item["path"])
         for item in manifest["public_artifacts"]
