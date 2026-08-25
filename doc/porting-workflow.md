@@ -389,7 +389,7 @@ The VLA Family Pack binds seven explicit contracts to the shared Core:
 capability classification, private reference capture, canonicalization,
 named-tensor verification, the maintained `VlaRuntime` integration, action
 serving, and the control-step benchmark profile. The deterministic public
-acceptance fixture is validated with:
+acceptance fixture is software-validated with:
 
 ```bash
 python3 scripts/vla_family_pack_acceptance.py \
@@ -401,6 +401,21 @@ reverse-time Euler-flow, policy-postprocessing, and serving behavior without
 changing their mathematics. It also records a minimal synthetic external VLA
 passing Intake, Preflight, maintained implementation, policy integration,
 serving, tuning, qualification, bundling, and local PR preparation.
+
+The software run cannot claim full acceptance. A controlled Thor runner must
+repeat the immutable matrix and add the CUDA BF16 performance Gate:
+
+```bash
+python3 scripts/vla_family_pack_acceptance.py \
+  tests/fixtures/vla-family-pack-acceptance-v1.json \
+  --controlled-hardware --runtime-python python3 \
+  --output vla-family-pack-acceptance-report.json
+```
+
+The report binds every stage to the canonical `synthetic-minimal-vla-v1`
+subject, the exact Git commit, tool entry points, platform, and SHA-256 of every
+public acceptance artifact. The command matrix is fixed in maintained code and
+cannot be replaced by caller-supplied no-op checks.
 
 The fixture matrix fails closed for canonicalization and unsupported
 semantics, distinguishes a blocking Kernel Gap from a non-blocking
