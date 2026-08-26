@@ -1,0 +1,321 @@
+//! Checkpoint mapping for the Walloss dual-stream execution graph.
+
+use std::collections::HashMap;
+
+use apxinf_core::{DType, Error, Result, Tensor};
+
+use super::WallossConfig;
+
+pub struct WallossWeights {
+    pub token_embedding: Tensor,
+    pub language_layers: Vec<WallossLayerWeights>,
+    pub action_layers: Vec<WallossLayerWeights>,
+    pub language_norm: Tensor,
+    pub action_norm: Tensor,
+    pub vision: WallossVisionWeights,
+    pub action: WallossActionWeights,
+}
+
+pub struct WallossLayerWeights {
+    pub input_norm: Tensor,
+    pub post_attention_norm: Tensor,
+    /// Matmul-ready `[input, q + k + v]` projection.
+    pub qkv: Tensor,
+    pub qkv_bias: Tensor,
+    /// Matmul-ready `[attention_width, output]` projection.
+    pub output: Tensor,
+    /// Matmul-ready `[hidden, 2 * intermediate]` fused gate/up projection.
+    pub gate_up: Tensor,
+    /// Matmul-ready `[intermediate, hidden]` projection.
+    pub down: Tensor,
+}
+
+pub struct WallossVisionWeights {
+    /// Flattened and transposed patch projection.
+    pub patch_projection: Tensor,
+    pub blocks: Vec<WallossVisionBlockWeights>,
+    pub merger_norm: Tensor,
+    pub merger_hidden: Tensor,
+    pub merger_hidden_bias: Tensor,
+    pub merger_output: Tensor,
+    pub merger_output_bias: Tensor,
+}
+
+pub struct WallossVisionBlockWeights {
+    pub input_norm: Tensor,
+    pub qkv: Tensor,
+    pub qkv_bias: Tensor,
+    pub output: Tensor,
+    pub output_bias: Tensor,
+    pub post_attention_norm: Tensor,
+    pub gate_up: Tensor,
+    pub gate_up_bias: Tensor,
+    pub down: Tensor,
+    pub down_bias: Tensor,
+}
+
+pub struct WallossActionWeights {
+    pub noisy_action_projection: Tensor,
+    pub action_time_projection: Tensor,
+    pub action_embedding_projection: Tensor,
+    pub velocity_projection: Tensor,
+}
+
+impl WallossWeights {
+    pub fn from_map(config: &mut WallossConfig, mut tensors: HashMap<String, Tensor>) -> Result<Self> {
+        let token_embedding = take(&mut tensors, "model.embed_tokens.weight")?;
+        expect_rank(&token_embedding, 2, "model.embed_tokens.weight")?;
+        let embedding_shape = token_embedding.shape().dims();
+        if embedding_shape[1] != config.text.hidden_size {
+            return Err(Error::Other(format!(
+                "walloss checkpoint: embedding width {} != configured {}",
+                embedding_shape[1], config.text.hidden_size
+            )));
+        }
+        // Added control tokens make the tensor shape authoritative.
+        config.text.vocab_size = embedding_shape[0];
+
+        let q_width = config.text.num_attention_heads * config.text.head_dim;
+        let kv_width = config.text.num_kv_heads * config.text.head_dim;
+        let qkv_width = q_width + 2 * kv_width;
+        let mut language_layers = Vec::with_capacity(config.text.num_layers);
+        let mut action_layers = Vec::with_capacity(config.text.num_layers);
+        for layer in 0..config.text.num_layers {
+            language_layers.push(load_layer(
+                &mut tensors,
+                layer,
+                0,
+                config.text.hidden_size,
+                config.text.intermediate_size,
+                qkv_width,
+            )?);
+            action_layers.push(load_layer(
+                &mut tensors,
+                layer,
+                1,
+                config.action.hidden_size,
+                config.action.intermediate_size,
+                qkv_width,
+            )?);
+        }
+
+        let language_norm = take(&mut tensors, "model.norms.0.weight")?;
+        let action_norm = take(&mut tensors, "model.norms.1.weight")?;
+        expect_shape(&language_norm, &[config.text.hidden_size], "language final norm")?;
+        expect_shape(&action_norm, &[config.action.hidden_size], "action final norm")?;
+
+        Ok(Self {
+            token_embedding,
+            language_layers,
+            action_layers,
+            language_norm,
+            action_norm,
+            vision: load_vision(config, &mut tensors)?,
+            action: load_action(config, &mut tensors)?,
+        })
+    }
+}
+
+fn load_layer(
+    tensors: &mut HashMap<String, Tensor>,
+    layer: usize,
+    branch: usize,
+    hidden: usize,
+    intermediate: usize,
+    qkv_width: usize,
+) -> Result<WallossLayerWeights> {
+    let prefix = format!("model.layers.{layer}");
+    let input_norm = take(tensors, &format!("{prefix}.input_layernorms.{branch}.weight"))?;
+    let post_attention_norm = take(
+        tensors,
+        &format!("{prefix}.post_attention_layernorms.{branch}.weight"),
+    )?;
+    let qkv_source = take(
+        tensors,
+        &format!("{prefix}.self_attn.qkv_proj_experts.{branch}.weight"),
+    )?;
+    let qkv_bias = take(
+        tensors,
+        &format!("{prefix}.self_attn.qkv_proj_experts.{branch}.bias"),
+    )?;
+    let output_source = take(
+        tensors,
+        &format!("{prefix}.self_attn.o_proj_experts.{branch}.weight"),
+    )?;
+    let gate_up_source = take(
+        tensors,
+        &format!("{prefix}.moe.experts.{branch}.gate_up_proj.weight"),
+    )?;
+    let down_source = take(
+        tensors,
+        &format!("{prefix}.moe.experts.{branch}.down_proj.weight"),
+    )?;
+
+    expect_shape(&input_norm, &[hidden], "input norm")?;
+    expect_shape(&post_attention_norm, &[hidden], "post-attention norm")?;
+    expect_shape(&qkv_source, &[qkv_width, hidden], "QKV projection")?;
+    expect_shape(&qkv_bias, &[qkv_width], "QKV bias")?;
+    expect_shape(&output_source, &[hidden, config_attention_width(qkv_width)], "output projection")?;
+    expect_shape(&gate_up_source, &[2 * intermediate, hidden], "gate/up projection")?;
+    expect_shape(&down_source, &[hidden, intermediate], "down projection")?;
+
+    Ok(WallossLayerWeights {
+        input_norm,
+        post_attention_norm,
+        qkv: transpose_2d(&qkv_source)?,
+        qkv_bias,
+        output: transpose_2d(&output_source)?,
+        gate_up: transpose_2d(&gate_up_source)?,
+        down: transpose_2d(&down_source)?,
+    })
+}
+
+fn config_attention_width(qkv_width: usize) -> usize {
+    // Qwen-style fused QKV is Q + K + V; the output projection consumes Q.
+    // Published checkpoints use an 8:1 query-to-KV width ratio.
+    qkv_width * 4 / 5
+}
+
+fn load_vision(
+    config: &WallossConfig,
+    tensors: &mut HashMap<String, Tensor>,
+) -> Result<WallossVisionWeights> {
+    let vision = &config.vision;
+    if vision.hidden_size % vision.num_heads != 0 {
+        return Err(Error::Other("walloss checkpoint: invalid vision head geometry".into()));
+    }
+    let mut blocks = Vec::with_capacity(vision.depth);
+    for layer in 0..vision.depth {
+        let prefix = format!("visual.blocks.{layer}");
+        blocks.push(WallossVisionBlockWeights {
+            input_norm: take(tensors, &format!("{prefix}.norm1.weight"))?,
+            qkv: transpose_2d(&take(tensors, &format!("{prefix}.attn.qkv.weight"))?)?,
+            qkv_bias: take(tensors, &format!("{prefix}.attn.qkv.bias"))?,
+            output: transpose_2d(&take(tensors, &format!("{prefix}.attn.proj.weight"))?)?,
+            output_bias: take(tensors, &format!("{prefix}.attn.proj.bias"))?,
+            post_attention_norm: take(tensors, &format!("{prefix}.norm2.weight"))?,
+            gate_up: transpose_2d(&take(
+                tensors,
+                &format!("{prefix}.mlp.gate_up_proj.weight"),
+            )?)?,
+            gate_up_bias: take(tensors, &format!("{prefix}.mlp.gate_up_proj.bias"))?,
+            down: transpose_2d(&take(tensors, &format!("{prefix}.mlp.down_proj.weight"))?)?,
+            down_bias: take(tensors, &format!("{prefix}.mlp.down_proj.bias"))?,
+        });
+    }
+
+    let patch = take(tensors, "visual.patch_embed.proj.weight")?;
+    let patch_columns = 3
+        * vision.temporal_patch_size
+        * vision.patch_size
+        * vision.patch_size;
+    let patch_projection = flatten_and_transpose(&patch, vision.hidden_size, patch_columns)?;
+
+    Ok(WallossVisionWeights {
+        patch_projection,
+        blocks,
+        merger_norm: take(tensors, "visual.merger.ln_q.weight")?,
+        merger_hidden: transpose_2d(&take(tensors, "visual.merger.mlp.0.weight")?)?,
+        merger_hidden_bias: take(tensors, "visual.merger.mlp.0.bias")?,
+        merger_output: transpose_2d(&take(tensors, "visual.merger.mlp.2.weight")?)?,
+        merger_output_bias: take(tensors, "visual.merger.mlp.2.bias")?,
+    })
+}
+
+fn load_action(
+    config: &WallossConfig,
+    tensors: &mut HashMap<String, Tensor>,
+) -> Result<WallossActionWeights> {
+    let width = config.action.hidden_size;
+    let dim = config.action.action_dim;
+    let noisy_action_projection = take(tensors, "action_preprocessor.w1.weight")?;
+    let action_time_projection = take(tensors, "action_preprocessor.w2.weight")?;
+    let action_embedding_projection = take(tensors, "action_preprocessor.w3.weight")?;
+    let velocity_projection = take(tensors, "action_preprocessor.action_proj_back.weight")?;
+    expect_shape(&noisy_action_projection, &[width, 2 * dim], "noisy action projection")?;
+    expect_shape(&action_time_projection, &[width, 2 * width], "action/time projection")?;
+    expect_shape(&action_embedding_projection, &[width, width], "action embedding projection")?;
+    expect_shape(&velocity_projection, &[dim, width], "velocity projection")?;
+    Ok(WallossActionWeights {
+        noisy_action_projection: transpose_2d(&noisy_action_projection)?,
+        action_time_projection: transpose_2d(&action_time_projection)?,
+        action_embedding_projection: transpose_2d(&action_embedding_projection)?,
+        velocity_projection: transpose_2d(&velocity_projection)?,
+    })
+}
+
+fn take(tensors: &mut HashMap<String, Tensor>, name: &str) -> Result<Tensor> {
+    tensors
+        .remove(name)
+        .ok_or_else(|| Error::Other(format!("walloss checkpoint: missing {name}")))
+}
+
+fn expect_rank(tensor: &Tensor, rank: usize, name: &str) -> Result<()> {
+    if tensor.shape().dims().len() != rank {
+        return Err(Error::Other(format!(
+            "walloss checkpoint: {name} has shape {:?}, expected rank {rank}",
+            tensor.shape().dims()
+        )));
+    }
+    Ok(())
+}
+
+fn expect_shape(tensor: &Tensor, expected: &[usize], name: &str) -> Result<()> {
+    if tensor.shape().dims() != expected {
+        return Err(Error::Other(format!(
+            "walloss checkpoint: {name} has shape {:?}, expected {expected:?}",
+            tensor.shape().dims()
+        )));
+    }
+    Ok(())
+}
+
+fn flatten_and_transpose(tensor: &Tensor, rows: usize, cols: usize) -> Result<Tensor> {
+    if tensor.shape().numel() != rows * cols {
+        return Err(Error::Other(format!(
+            "walloss checkpoint: patch projection has {} elements, expected {}",
+            tensor.shape().numel(),
+            rows * cols
+        )));
+    }
+    match tensor.dtype() {
+        DType::F32 => Tensor::from_f32(vec![rows, cols], tensor.as_f32()?)
+            .and_then(|flat| transpose_2d(&flat)),
+        DType::BF16 => Tensor::from_bf16(vec![rows, cols], tensor.as_bf16()?)
+            .and_then(|flat| transpose_2d(&flat)),
+        dtype => Err(Error::Other(format!(
+            "walloss checkpoint: unsupported patch weight dtype {dtype}"
+        ))),
+    }
+}
+
+fn transpose_2d(tensor: &Tensor) -> Result<Tensor> {
+    expect_rank(tensor, 2, "linear weight")?;
+    let rows = tensor.shape().dims()[0];
+    let cols = tensor.shape().dims()[1];
+    match tensor.dtype() {
+        DType::F32 => {
+            let source = tensor.as_f32()?;
+            let mut output = vec![0.0; rows * cols];
+            for row in 0..rows {
+                for col in 0..cols {
+                    output[col * rows + row] = source[row * cols + col];
+                }
+            }
+            Tensor::from_f32(vec![cols, rows], &output)
+        }
+        DType::BF16 => {
+            let source = tensor.as_bf16()?;
+            let mut output = vec![half::bf16::ZERO; rows * cols];
+            for row in 0..rows {
+                for col in 0..cols {
+                    output[col * rows + row] = source[row * cols + col];
+                }
+            }
+            Tensor::from_bf16(vec![cols, rows], &output)
+        }
+        dtype => Err(Error::Other(format!(
+            "walloss checkpoint: unsupported linear weight dtype {dtype}"
+        ))),
+    }
+}
