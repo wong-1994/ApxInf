@@ -28,6 +28,46 @@ Before editing code, record outside the repository:
 - correctness tolerances and performance goals;
 - expected public API and deployment path.
 
+### Discover missing inputs and ask early
+
+Treat the list above as a discovery contract, not as an assumption that the
+user has already supplied every value. Before implementation, inspect only the
+current task's allowed workspace and environment for evidence such as the
+reference checkout, checkpoint configuration, configured execution hosts, GPU
+capabilities, and CUDA toolchain. Do not infer a source revision, checkpoint
+variant, target precision, or hardware target from a similarly named branch or
+an unrelated previous experiment.
+
+If required facts remain unknown or ambiguous after that inspection, ask the
+user one concise, consolidated question. In particular, explicitly request the
+missing parts of:
+
+- reference source location and immutable revision;
+- checkpoint location and exact model variant;
+- target device or execution host, GPU/compute capability, and CUDA toolkit;
+- target inference dtype; and
+- mandatory correctness, latency, memory, or capture gates.
+
+Ask as ordinary requirements gathering and name what each missing value
+unlocks. Do not replace the question with a generic blocked-status message. A
+useful request is, for example: "To run the reference and design the CUDA path,
+please provide the reference source/revision, checkpoint, target GPU and CUDA
+environment, and inference dtype."
+
+This preflight is best effort rather than an all-or-nothing form:
+
+- continue independent repository inspection and design work while waiting
+  when it is safe and useful;
+- use an explicit user-provided value even when environment discovery suggests
+  a likely default;
+- when no performance target is supplied, pursue functional and numerical
+  acceptance first and report optimization as best effort;
+- do not require the user to repeat facts that are already available in the
+  current task or can be verified safely; and
+- report a blocker only when a specific missing fact prevents further useful
+  progress, after stating what was inspected, what operation is prevented, and
+  exactly what information or access would resolve it.
+
 Keep private paths and generated evidence under the private workspace described
 in `AGENTS.md`. Do not commit model weights, captured tensors, environment
 snapshots, or generated JSON reports.
