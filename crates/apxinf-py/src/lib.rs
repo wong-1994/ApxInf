@@ -39,8 +39,8 @@ use pyo3::prelude::*;
 
 use apxinf_core::{Device, RngKey, Shape, Tensor};
 use apxinf_model::{
-    AutoModel, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation, Pi05Config,
-    SyntheticWeights, VisionObservation, VlaRequest,
+    AutoModel, Gr00tN1d7Config, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation,
+    Pi05Config, SyntheticWeights, VisionObservation, VlaConditioning, VlaRequest,
 };
 
 /// Map any Rust error into a Python `RuntimeError`.
@@ -118,12 +118,19 @@ fn load_config(checkpoint: &Path) -> PyResult<Pi05Config> {
 pub struct Model {
     model: LoadedModel,
     config: Pi05Config,
+    groot_config: Option<Gr00tN1d7Config>,
     device: Device,
     sampling_seed: Cell<u64>,
     sampling_draw: Cell<u64>,
 }
 
 impl Model {
+    fn action_shape(&self) -> (usize, usize) {
+        self.groot_config.as_ref().map_or(
+            (self.config.action_horizon, self.config.action_dim),
+            |cfg| (cfg.action_horizon, cfg.action_dim),
+        )
+    }
     fn patch_rows(&self) -> usize {
         self.config.num_views * self.config.patches_per_view()
     }
@@ -151,7 +158,8 @@ impl Model {
     /// Validate `noise` shape and build a CPU f32 tensor. The runtime normalizes
     /// f32 CPU tensors to its input dtype, so numpy f32 is accepted directly.
     fn noise_tensor(&self, noise: PyReadonlyArray2<'_, f32>) -> PyResult<Tensor> {
-        let expected = [self.config.action_horizon, self.config.action_dim];
+        let (horizon, dim) = self.action_shape();
+        let expected = [horizon, dim];
         let shape = noise.shape();
         if shape.len() != 2 || shape[0] != expected[0] || shape[1] != expected[1] {
             return Err(PyValueError::new_err(format!(
@@ -162,11 +170,17 @@ impl Model {
         let data = noise.as_slice().map_err(|_| {
             PyValueError::new_err("apxinf_py.infer: noise must be C-contiguous float32")
         })?;
-        Tensor::from_f32(
-            Shape::new(vec![expected[0], expected[1]]),
-            data,
-        )
-        .map_err(runtime_err)
+        if self.groot_config.is_some() {
+            let values = data
+                .iter()
+                .copied()
+                .map(half::bf16::from_f32)
+                .collect::<Vec<_>>();
+            Tensor::from_bf16(Shape::new(vec![expected[0], expected[1]]), &values)
+                .map_err(runtime_err)
+        } else {
+            Tensor::from_f32(Shape::new(vec![expected[0], expected[1]]), data).map_err(runtime_err)
+        }
     }
 
     fn action_array<'py>(
@@ -174,8 +188,7 @@ impl Model {
         py: Python<'py>,
         flat: Vec<f32>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let horizon = self.config.action_horizon;
-        let dim = self.config.action_dim;
+        let (horizon, dim) = self.action_shape();
         if flat.len() != horizon * dim {
             return Err(PyRuntimeError::new_err(format!(
                 "apxinf_py.infer: model returned {} values, expected {} ({}x{})",
@@ -258,11 +271,41 @@ impl Model {
         sampling_seed: u64,
     ) -> PyResult<Self> {
         let device = parse_device(device)?;
-        let mut config = load_config(&path)?;
+        let is_groot = matches!(
+            model.to_ascii_lowercase().as_str(),
+            "gr00tn1d7" | "gr00t_n1d7" | "groot"
+        );
+        let groot_config = if is_groot {
+            let root = if path.is_dir() {
+                path.as_path()
+            } else {
+                path.parent().unwrap_or_else(|| Path::new("."))
+            };
+            Some(Gr00tN1d7Config::from_json_file(&root.join("config.json")).map_err(runtime_err)?)
+        } else {
+            None
+        };
+        let mut config = if is_groot {
+            Pi05Config::default()
+        } else {
+            load_config(&path)?
+        };
         // Only hand the loader an explicit config when the caller actually
         // overrode something; otherwise it reads `config.json` itself, exactly
         // as before.
         let overridden = match action_horizon {
+            Some(horizon) if is_groot => {
+                let native = groot_config
+                    .as_ref()
+                    .expect("GR00T config loaded")
+                    .action_horizon;
+                if horizon != native {
+                    return Err(PyValueError::new_err(format!(
+                        "GR00T N1.7 action_horizon is checkpoint-fixed at {native}, got {horizon}"
+                    )));
+                }
+                false
+            }
             Some(horizon) => {
                 config.action_horizon = horizon;
                 config.validate().map_err(runtime_err)?;
@@ -282,6 +325,7 @@ impl Model {
         Ok(Self {
             model: loaded,
             config,
+            groot_config,
             device,
             sampling_seed: Cell::new(sampling_seed),
             sampling_draw: Cell::new(0),
@@ -372,11 +416,11 @@ impl Model {
             uniform_fp8_scale,
             ..LoadOptions::default()
         };
-        let loaded = AutoModel::load_model(device, Path::new(""), &options)
-            .map_err(runtime_err)?;
+        let loaded = AutoModel::load_model(device, Path::new(""), &options).map_err(runtime_err)?;
         Ok(Self {
             model: loaded,
             config,
+            groot_config: None,
             device,
             sampling_seed: Cell::new(sampling_seed),
             sampling_draw: Cell::new(0),
@@ -415,16 +459,15 @@ impl Model {
         let tokens = token_ids
             .as_slice()
             .map_err(|_| {
-                PyValueError::new_err("apxinf_py._infer_patches: token_ids must be C-contiguous uint32")
+                PyValueError::new_err(
+                    "apxinf_py._infer_patches: token_ids must be C-contiguous uint32",
+                )
             })?
             .to_vec();
         self.validate_tokens(&tokens)?;
 
-        let patch_tensor = Tensor::from_f32(
-            Shape::new(vec![expected[0], expected[1]]),
-            patch_data,
-        )
-        .map_err(runtime_err)?;
+        let patch_tensor = Tensor::from_f32(Shape::new(vec![expected[0], expected[1]]), patch_data)
+            .map_err(runtime_err)?;
 
         let observation = Observation {
             vision: VisionObservation::Patches(patch_tensor),
@@ -473,16 +516,145 @@ impl Model {
             })?
             .to_vec();
         self.validate_tokens(&tokens)?;
-        let patch_tensor = Tensor::from_f32(
-            Shape::new(vec![expected[0], expected[1]]),
-            patch_data,
-        )
-        .map_err(runtime_err)?;
+        let patch_tensor = Tensor::from_f32(Shape::new(vec![expected[0], expected[1]]), patch_data)
+            .map_err(runtime_err)?;
         let observation = Observation {
             vision: VisionObservation::Patches(patch_tensor),
             token_ids: tokens,
         };
         self.run_generated(py, observation, RngKey::new(seed, sequence, draw))
+    }
+
+    /// Infer GR00T N1.7 from canonical NVIDIA processor outputs.
+    #[pyo3(signature = (pixel_values, image_grid_thw, token_ids, attention_mask, image_mask, state, embodiment_id, noise=None))]
+    fn infer_groot<'py>(
+        &self,
+        py: Python<'py>,
+        pixel_values: PyReadonlyArray2<'py, f32>,
+        image_grid_thw: PyReadonlyArray2<'py, u32>,
+        token_ids: PyReadonlyArray1<'py, u32>,
+        attention_mask: PyReadonlyArray1<'py, u8>,
+        image_mask: PyReadonlyArray1<'py, u8>,
+        state: PyReadonlyArray2<'py, f32>,
+        embodiment_id: u32,
+        noise: Option<PyReadonlyArray2<'py, f32>>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let cfg = self.groot_config.as_ref().ok_or_else(|| {
+            PyValueError::new_err("infer_groot is only valid for a GR00T N1.7 model")
+        })?;
+        let pixels_shape = pixel_values.shape();
+        if pixels_shape.len() != 2 || pixels_shape[1] != 1536 || pixels_shape[0] == 0 {
+            return Err(PyValueError::new_err(format!(
+                "infer_groot: pixel_values expected non-empty [patch_rows, 1536], got {pixels_shape:?}"
+            )));
+        }
+        let state_shape = state.shape();
+        if state_shape != [cfg.state_history, cfg.state_dim] {
+            return Err(PyValueError::new_err(format!(
+                "infer_groot: state expected [{}, {}], got {state_shape:?}",
+                cfg.state_history, cfg.state_dim
+            )));
+        }
+        if embodiment_id as usize >= cfg.embodiment_count {
+            return Err(PyValueError::new_err(format!(
+                "infer_groot: embodiment_id {embodiment_id} exceeds {} categories",
+                cfg.embodiment_count
+            )));
+        }
+        let tokens = token_ids
+            .as_slice()
+            .map_err(|_| {
+                PyValueError::new_err("infer_groot: token_ids must be C-contiguous uint32")
+            })?
+            .to_vec();
+        if tokens.is_empty() || tokens.len() > cfg.max_seq_len {
+            return Err(PyValueError::new_err(format!(
+                "infer_groot: token count {} is outside 1..={}",
+                tokens.len(),
+                cfg.max_seq_len
+            )));
+        }
+        let attention = attention_mask
+            .as_slice()
+            .map_err(|_| {
+                PyValueError::new_err("infer_groot: attention_mask must be C-contiguous uint8")
+            })?
+            .to_vec();
+        let images = image_mask
+            .as_slice()
+            .map_err(|_| {
+                PyValueError::new_err("infer_groot: image_mask must be C-contiguous uint8")
+            })?
+            .to_vec();
+        if attention.len() != tokens.len() || images.len() != tokens.len() {
+            return Err(PyValueError::new_err(
+                "infer_groot: masks must align with token_ids",
+            ));
+        }
+        let grid_shape = image_grid_thw.shape();
+        if grid_shape.len() != 2 || grid_shape[1] != 3 || grid_shape[0] == 0 {
+            return Err(PyValueError::new_err(format!(
+                "infer_groot: image_grid_thw expected non-empty [images, 3], got {grid_shape:?}"
+            )));
+        }
+        let grid_flat = image_grid_thw.as_slice().map_err(|_| {
+            PyValueError::new_err("infer_groot: image_grid_thw must be C-contiguous uint32")
+        })?;
+        let grids = grid_flat
+            .chunks_exact(3)
+            .map(|v| [v[0], v[1], v[2]])
+            .collect::<Vec<_>>();
+        let pixel_data = pixel_values.as_slice().map_err(|_| {
+            PyValueError::new_err("infer_groot: pixel_values must be C-contiguous float32")
+        })?;
+        let pixel_bf16 = pixel_data
+            .iter()
+            .copied()
+            .map(half::bf16::from_f32)
+            .collect::<Vec<_>>();
+        let pixels = Tensor::from_bf16(
+            Shape::new(vec![pixels_shape[0], pixels_shape[1]]),
+            &pixel_bf16,
+        )
+        .map_err(runtime_err)?;
+        let state_data = state.as_slice().map_err(|_| {
+            PyValueError::new_err("infer_groot: state must be C-contiguous float32")
+        })?;
+        let state_bf16 = state_data
+            .iter()
+            .copied()
+            .map(half::bf16::from_f32)
+            .collect::<Vec<_>>();
+        let state_tensor = Tensor::from_bf16(
+            Shape::new(vec![cfg.state_history, cfg.state_dim]),
+            &state_bf16,
+        )
+        .map_err(runtime_err)?;
+        let observation = Observation {
+            vision: VisionObservation::Patches(pixels),
+            token_ids: tokens,
+        };
+        let conditioning = VlaConditioning {
+            state: &state_tensor,
+            embodiment_id,
+            image_grid_thw: &grids,
+            attention_mask: &attention,
+            image_mask: &images,
+        };
+        let flat = match noise {
+            Some(noise) => {
+                let latent = self.noise_tensor(noise)?;
+                self.model.infer_host_f32(
+                    &VlaRequest::provided(&observation, &latent).with_conditioning(conditioning),
+                )
+            }
+            None => self.model.infer_host_f32(
+                &VlaRequest::generated(&observation, self.next_sampling_rng()?)
+                    .with_conditioning(conditioning),
+            ),
+        }
+        .map_err(runtime_err)?;
+        self.action_array(py, flat)
     }
 
     /// **L1** — infer from resized RGB `uint8` images; vision→patches runs in the
@@ -615,12 +787,12 @@ impl Model {
 
     #[getter]
     fn action_dim(&self) -> usize {
-        self.config.action_dim
+        self.action_shape().1
     }
 
     #[getter]
     fn action_horizon(&self) -> usize {
-        self.config.action_horizon
+        self.action_shape().0
     }
 
     #[getter]
@@ -649,11 +821,12 @@ impl Model {
     }
 
     fn __repr__(&self) -> String {
+        let (horizon, dim) = self.action_shape();
         format!(
             "Model(device={}, action=[{}, {}], views={}, image={}, patch={})",
             self.device(),
-            self.config.action_horizon,
-            self.config.action_dim,
+            horizon,
+            dim,
             self.config.num_views,
             self.config.image_size,
             self.config.patch_size,

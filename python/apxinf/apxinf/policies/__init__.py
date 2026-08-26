@@ -28,7 +28,7 @@ from .base import BareModel, Policy
 from .registry import available_policies, get_policy, register_policy
 
 # Concrete model policies (importing registers them under their model_type).
-from .impls import Pi05Policy
+from .impls import GrootPolicy, Pi05Policy
 
 __all__ = [
     "Policy",
@@ -37,6 +37,6 @@ __all__ = [
     "register_policy",
     "get_policy",
     "available_policies",
+    "GrootPolicy",
     "Pi05Policy",
 ]
-

@@ -313,6 +313,53 @@ __global__ void vision_sdpa_bf16_kernel(
     out_row[d1] = __float2bfloat16(acc1);
 }
 
+// Generic non-causal BF16 attention used by VLA cross-attention. Unlike the
+// vision-specialized kernel, query and key lengths may differ and head_dim may
+// be any value up to 64. One warp owns a (query, head) pair.
+__global__ void cross_sdpa_bf16_kernel(
+    const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat16* v,
+    __nv_bfloat16* out, uint32_t q_len, uint32_t kv_len,
+    uint32_t n_heads, uint32_t head_dim, float scale)
+{
+    const uint32_t qi = blockIdx.x;
+    const uint32_t head = blockIdx.y;
+    const int tid = threadIdx.x;
+    extern __shared__ float scores[];
+    const __nv_bfloat16* q_row = q + (qi * n_heads + head) * head_dim;
+    for (uint32_t ki = 0; ki < kv_len; ++ki) {
+        const __nv_bfloat16* k_row = k + (ki * n_heads + head) * head_dim;
+        float dot = 0.0f;
+        for (uint32_t d = tid; d < head_dim; d += 32)
+            dot += __bfloat162float(q_row[d]) * __bfloat162float(k_row[d]);
+        for (int off = 16; off > 0; off >>= 1)
+            dot += __shfl_xor_sync(0xffffffff, dot, off);
+        if (tid == 0) scores[ki] = dot * scale;
+    }
+    __syncthreads();
+    float maximum = -INFINITY;
+    for (uint32_t ki = tid; ki < kv_len; ki += 32) maximum = fmaxf(maximum, scores[ki]);
+    for (int off = 16; off > 0; off >>= 1)
+        maximum = fmaxf(maximum, __shfl_xor_sync(0xffffffff, maximum, off));
+    if (tid == 0) scores[kv_len] = maximum;
+    __syncthreads();
+    float sum = 0.0f;
+    for (uint32_t ki = tid; ki < kv_len; ki += 32) {
+        scores[ki] = expf(scores[ki] - scores[kv_len]); sum += scores[ki];
+    }
+    for (int off = 16; off > 0; off >>= 1) sum += __shfl_xor_sync(0xffffffff, sum, off);
+    if (tid == 0) scores[kv_len] = sum;
+    __syncthreads();
+    const float inv = 1.0f / scores[kv_len];
+    for (uint32_t d = tid; d < head_dim; d += 32) {
+        float acc = 0.0f;
+        for (uint32_t ki = 0; ki < kv_len; ++ki) {
+            const __nv_bfloat16* v_row = v + (ki * n_heads + head) * head_dim;
+            acc += scores[ki] * inv * __bfloat162float(v_row[d]);
+        }
+        out[(qi * n_heads + head) * head_dim + d] = __float2bfloat16(acc);
+    }
+}
+
 
 
 // ── Flash Attention decode (bf16) — single-kernel online-softmax ────────
@@ -870,6 +917,5 @@ __global__ void mha_bf16_kernel(
         __float2bfloat16(accumulator);
   }
 }
-
 
 

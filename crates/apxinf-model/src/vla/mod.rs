@@ -55,12 +55,32 @@ pub enum InitialLatent<'a> {
     Provided(&'a Tensor),
 }
 
+/// Optional continuous and multimodal conditioning used by VLA families whose
+/// canonical model input is richer than PI0.5's image/token pair.
+///
+/// The processor owns construction of these tensors and masks. The model
+/// runtime validates their exact shapes against its checkpoint configuration.
+#[derive(Clone, Copy, Debug)]
+pub struct VlaConditioning<'a> {
+    /// Normalized state history, conventionally `[history, state_dim]`.
+    pub state: &'a Tensor,
+    /// Checkpoint-defined embodiment/category selector.
+    pub embodiment_id: u32,
+    /// Qwen-style image grids, one `[temporal, height, width]` row per image.
+    pub image_grid_thw: &'a [[u32; 3]],
+    /// Valid-token mask aligned with `Observation::token_ids`.
+    pub attention_mask: &'a [u8],
+    /// Image-token mask aligned with `Observation::token_ids`.
+    pub image_mask: &'a [u8],
+}
+
 /// Complete VLA request: an environment observation plus the model-generation
 /// input that is deliberately not part of the observation itself.
 #[derive(Clone, Copy, Debug)]
 pub struct VlaRequest<'a> {
     pub observation: &'a Observation,
     pub initial_latent: InitialLatent<'a>,
+    pub conditioning: Option<VlaConditioning<'a>>,
 }
 
 impl<'a> VlaRequest<'a> {
@@ -68,6 +88,7 @@ impl<'a> VlaRequest<'a> {
         Self {
             observation,
             initial_latent: InitialLatent::Generate { rng },
+            conditioning: None,
         }
     }
 
@@ -75,7 +96,15 @@ impl<'a> VlaRequest<'a> {
         Self {
             observation,
             initial_latent: InitialLatent::Provided(latent),
+            conditioning: None,
         }
+    }
+
+    /// Attach model-specific continuous/multimodal conditioning while keeping
+    /// latent ownership explicit.
+    pub const fn with_conditioning(mut self, conditioning: VlaConditioning<'a>) -> Self {
+        self.conditioning = Some(conditioning);
+        self
     }
 }
 

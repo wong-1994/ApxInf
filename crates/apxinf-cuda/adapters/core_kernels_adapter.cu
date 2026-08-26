@@ -506,6 +506,21 @@ extern "C" cudaError_t apxinf_vision_sdpa_bf16(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_cross_sdpa_bf16(
+    const void* q, const void* k, const void* v, void* out,
+    uint32_t q_len, uint32_t kv_len, uint32_t n_heads,
+    uint32_t head_dim, float scale, void* stream)
+{
+    if (q_len == 0 || kv_len == 0 || head_dim == 0 || head_dim > 64)
+        return cudaErrorInvalidConfiguration;
+    dim3 grid(q_len, n_heads, 1); dim3 block(32, 1, 1);
+    size_t smem = (kv_len + 1) * sizeof(float);
+    cross_sdpa_bf16_kernel<<<grid, block, smem, (cudaStream_t)stream>>>(
+        (const __nv_bfloat16*)q, (const __nv_bfloat16*)k, (const __nv_bfloat16*)v,
+        (__nv_bfloat16*)out, q_len, kv_len, n_heads, head_dim, scale);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_flash_attn_decode_bf16(
     const void* q, const void* k_cache, const void* v_cache, void* out,
     uint32_t n_heads, uint32_t n_kv_heads, uint32_t head_dim,

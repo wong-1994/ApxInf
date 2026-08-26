@@ -410,6 +410,48 @@ pub fn vision(
     ))
 }
 
+pub fn cross_bf16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    q_len: usize,
+    kv_len: usize,
+    n_heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    if q.dtype() != DType::BF16 || k.dtype() != DType::BF16 || v.dtype() != DType::BF16 {
+        return Err(Error::Other("cross attention requires BF16".into()));
+    }
+    let device_id = ctx.device_id();
+    let out_buf = CudaBuffer::alloc_zeros(
+        q_len * n_heads * head_dim * DType::BF16.size_in_bytes(),
+        device_id,
+    )
+    .map_err(Error::Cuda)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_cross_sdpa_bf16(
+            gpu_ptr(q)?,
+            gpu_ptr(k)?,
+            gpu_ptr(v)?,
+            out_buf.ptr(),
+            q_len as u32,
+            kv_len as u32,
+            n_heads as u32,
+            head_dim as u32,
+            1.0 / (head_dim as f32).sqrt(),
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(make_gpu_tensor(
+        Shape::new(vec![q_len, n_heads * head_dim]),
+        DType::BF16,
+        device_id,
+        out_buf,
+    ))
+}
+
 /// Causal attention mask on CUDA. Dispatches on dtype.
 pub fn causal_mask(ctx: &CudaContext, input: &Tensor, kv_offset: u32) -> Result<Tensor> {
     let device_id = ctx.device_id();
@@ -603,10 +645,7 @@ fn fa2_splitkv_enabled(
     if std::env::var_os("APXINF_DISABLE_FA2_SPLITKV").is_some() {
         return false;
     }
-    query_tokens <= 64
-        && key_tokens > query_tokens
-        && query_heads > kv_heads
-        && head_dim == 256
+    query_tokens <= 64 && key_tokens > query_tokens && query_heads > kv_heads && head_dim == 256
 }
 
 #[cfg(apxinf_fa2_sm80)]
