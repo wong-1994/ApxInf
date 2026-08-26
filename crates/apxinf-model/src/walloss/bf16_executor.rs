@@ -409,11 +409,10 @@ pub fn vision_merger(
     )?
     .reshape(vec![merged_tokens, merge_unit * config.hidden_size])?;
     let hidden = kernels::gemm::bf16(context, &normalized, &weights.merger_hidden)?;
-    let hidden = kernels::activation::bias_activation(
+    let hidden = kernels::activation::bias_gelu_bf16(
         context,
         &hidden,
         Some(&weights.merger_hidden_bias),
-        1,
     )?;
     let output = kernels::gemm::bf16(context, &hidden, &weights.merger_output)?;
     let output = kernels::elementwise::bias_bf16(

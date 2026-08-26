@@ -15,5 +15,6 @@ pub use geometry::VisionGeometry;
 pub use geometry::DeviceVisionGeometry;
 pub use schedule::{sinusoidal_time_embedding, solver_times};
 pub use weights::{
-    WallossActionWeights, WallossLayerWeights, WallossVisionWeights, WallossWeights,
+    WallossActionWeights, WallossLayerWeights, WallossVisionBlockWeights, WallossVisionWeights,
+    WallossWeights,
 };
