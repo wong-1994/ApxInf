@@ -490,6 +490,17 @@ extern "C" {
         projection_width: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub fn apxinf_static_gqa_qkv_split_bias_bf16(
+        qkv: *const c_void,
+        bias: *const c_void,
+        q: *mut c_void,
+        k: *mut c_void,
+        v: *mut c_void,
+        tokens: i32,
+        q_width: i32,
+        kv_width: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_static_mqa_bf16(
         q: *const c_void,
         k: *const c_void,

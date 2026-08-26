@@ -543,4 +543,22 @@ __global__ void qkv_split_bias_bf16_kernel(
   }
 }
 
+__global__ void gqa_qkv_split_bias_bf16_kernel(
+    const __nv_bfloat16* qkv, const __nv_bfloat16* bias,
+    __nv_bfloat16* q, __nv_bfloat16* k, __nv_bfloat16* v,
+    int tokens, int q_width, int kv_width) {
+  const int token = blockIdx.x;
+  const int fused_width = q_width + 2 * kv_width;
+  for (int col = threadIdx.x; col < fused_width; col += blockDim.x) {
+    float value = __bfloat162float(qkv[token * fused_width + col]);
+    if (bias != nullptr) value += __bfloat162float(bias[col]);
+    if (col < q_width) {
+      q[token * q_width + col] = __float2bfloat16(value);
+    } else if (col < q_width + kv_width) {
+      k[token * kv_width + col - q_width] = __float2bfloat16(value);
+    } else {
+      v[token * kv_width + col - q_width - kv_width] = __float2bfloat16(value);
+    }
+  }
+}
 
