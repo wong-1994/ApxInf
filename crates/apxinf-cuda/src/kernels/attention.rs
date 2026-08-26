@@ -903,6 +903,59 @@ pub fn mha_bf16(
         output,
     ))
 }
+
+pub fn segmented_mha_bf16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    offsets: &crate::buffer::CudaBuffer,
+    segments: usize,
+    max_tokens: usize,
+) -> Result<Tensor> {
+    let shape = q.shape().dims();
+    if [q, k, v]
+        .into_iter()
+        .any(|tensor| tensor.dtype() != DType::BF16)
+        || shape.len() != 3
+        || k.shape() != q.shape()
+        || v.shape() != q.shape()
+        || segments == 0
+        || max_tokens == 0
+        || shape[2] > 256
+    {
+        return Err(Error::Other(
+            "segmented BF16 MHA requires matching [tokens,heads,head_dim] tensors".into(),
+        ));
+    }
+    super::contracts::require_buffers(
+        ctx,
+        "segmented BF16 MHA",
+        &[("offsets", offsets, (segments + 1) * std::mem::size_of::<u32>())],
+    )?;
+    let output = output_buffer(ctx, q.size_in_bytes())?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_segmented_mha_bf16(
+            gpu_ptr(q)?,
+            gpu_ptr(k)?,
+            gpu_ptr(v)?,
+            offsets.ptr(),
+            output.ptr(),
+            segments as i32,
+            max_tokens as i32,
+            shape[1] as i32,
+            shape[2] as i32,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(make_gpu_tensor(
+        q.shape().clone(),
+        DType::BF16,
+        ctx.device_id(),
+        output,
+    ))
+}
 pub(crate) fn cublas_mqa_f16(
     ctx: &CudaContext,
     q: &Tensor,

@@ -291,6 +291,26 @@ extern "C" cudaError_t apxinf_static_mha_bf16(
   return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_static_segmented_mha_bf16(
+    const void* q, const void* k, const void* v, const void* offsets,
+    void* output, int segments, int max_tokens, int heads, int head_dim,
+    cudaStream_t stream) {
+  if (q == nullptr || k == nullptr || v == nullptr || offsets == nullptr ||
+      output == nullptr || segments <= 0 || max_tokens <= 0 || heads <= 0 ||
+      head_dim <= 0 || head_dim > kThreads) {
+    return cudaErrorInvalidValue;
+  }
+  dim3 grid(max_tokens, heads, segments);
+  const size_t shared = static_cast<size_t>(max_tokens + 8) * sizeof(float);
+  segmented_mha_bf16_kernel<<<grid, kThreads, shared, stream>>>(
+      static_cast<const __nv_bfloat16*>(q),
+      static_cast<const __nv_bfloat16*>(k),
+      static_cast<const __nv_bfloat16*>(v),
+      static_cast<const uint32_t*>(offsets),
+      static_cast<__nv_bfloat16*>(output), heads, head_dim);
+  return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_static_bias_position_bf16(
     const void* projection, const void* bias, const void* position,
     void* output, int rows, int cols, int tokens_per_view,

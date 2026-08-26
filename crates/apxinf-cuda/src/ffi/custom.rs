@@ -512,6 +512,18 @@ extern "C" {
         head_dim: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub fn apxinf_static_segmented_mha_bf16(
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        offsets: *const c_void,
+        output: *mut c_void,
+        segments: i32,
+        max_tokens: i32,
+        heads: i32,
+        head_dim: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_static_bias_position_bf16(
         projection: *const c_void,
         bias: *const c_void,
