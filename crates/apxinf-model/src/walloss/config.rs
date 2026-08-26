@@ -32,6 +32,8 @@ pub struct WallossVisionConfig {
     pub out_hidden_size: usize,
     pub window_size: usize,
     pub full_attention_blocks: Vec<usize>,
+    pub rms_norm_eps: f32,
+    pub rope_theta: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -148,6 +150,14 @@ impl WallossConfig {
                 out_hidden_size: usize_field(vision, "out_hidden_size")?,
                 window_size: usize_field(vision, "window_size")?,
                 full_attention_blocks: usize_array(vision, "fullatt_block_indexes")?,
+                rms_norm_eps: vision
+                    .get("rms_norm_eps")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(1e-6) as f32,
+                rope_theta: vision
+                    .get("rope_theta")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(10_000.0) as f32,
             },
             action: WallossActionConfig {
                 hidden_size: action_hidden_size,

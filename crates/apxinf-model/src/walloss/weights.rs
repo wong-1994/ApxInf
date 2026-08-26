@@ -1,8 +1,9 @@
 //! Checkpoint mapping for the Walloss dual-stream execution graph.
 
 use std::collections::HashMap;
+use std::path::Path;
 
-use apxinf_core::{DType, Error, Result, Tensor};
+use apxinf_core::{Backend, DType, Error, Result, Tensor};
 
 use super::WallossConfig;
 
@@ -64,6 +65,12 @@ pub struct WallossActionWeights {
 }
 
 impl WallossWeights {
+    pub fn from_safetensors(config: &mut WallossConfig, path: &Path) -> Result<Self> {
+        let (tensors, _) = apxinf_loader::safetensors::load_native_path(path)
+            .map_err(|error| Error::Other(format!("load walloss checkpoint: {error}")))?;
+        Self::from_map(config, tensors)
+    }
+
     pub fn from_map(
         config: &mut WallossConfig,
         mut tensors: HashMap<String, Tensor>,
@@ -129,6 +136,105 @@ impl WallossWeights {
             action: load_action(config, &mut tensors)?,
         })
     }
+
+    pub fn to_bf16_device(&self, backend: &dyn Backend) -> Result<Self> {
+        Ok(Self {
+            token_embedding: bf16_to_device(&self.token_embedding, backend)?,
+            language_layers: self
+                .language_layers
+                .iter()
+                .map(|layer| layer.to_bf16_device(backend))
+                .collect::<Result<_>>()?,
+            action_layers: self
+                .action_layers
+                .iter()
+                .map(|layer| layer.to_bf16_device(backend))
+                .collect::<Result<_>>()?,
+            language_norm: bf16_to_device(&self.language_norm, backend)?,
+            action_norm: bf16_to_device(&self.action_norm, backend)?,
+            vision: self.vision.to_bf16_device(backend)?,
+            action: self.action.to_bf16_device(backend)?,
+        })
+    }
+}
+
+impl WallossLayerWeights {
+    fn to_bf16_device(&self, backend: &dyn Backend) -> Result<Self> {
+        Ok(Self {
+            input_norm: bf16_to_device(&self.input_norm, backend)?,
+            post_attention_norm: bf16_to_device(&self.post_attention_norm, backend)?,
+            qkv: bf16_to_device(&self.qkv, backend)?,
+            qkv_bias: bf16_to_device(&self.qkv_bias, backend)?,
+            output: bf16_to_device(&self.output, backend)?,
+            gate_up: bf16_to_device(&self.gate_up, backend)?,
+            down: bf16_to_device(&self.down, backend)?,
+        })
+    }
+}
+
+impl WallossVisionWeights {
+    fn to_bf16_device(&self, backend: &dyn Backend) -> Result<Self> {
+        Ok(Self {
+            patch_projection: bf16_to_device(&self.patch_projection, backend)?,
+            blocks: self
+                .blocks
+                .iter()
+                .map(|block| block.to_bf16_device(backend))
+                .collect::<Result<_>>()?,
+            merger_norm: bf16_to_device(&self.merger_norm, backend)?,
+            merger_hidden: bf16_to_device(&self.merger_hidden, backend)?,
+            merger_hidden_bias: bf16_to_device(&self.merger_hidden_bias, backend)?,
+            merger_output: bf16_to_device(&self.merger_output, backend)?,
+            merger_output_bias: bf16_to_device(&self.merger_output_bias, backend)?,
+        })
+    }
+}
+
+impl WallossVisionBlockWeights {
+    fn to_bf16_device(&self, backend: &dyn Backend) -> Result<Self> {
+        Ok(Self {
+            input_norm: bf16_to_device(&self.input_norm, backend)?,
+            qkv: bf16_to_device(&self.qkv, backend)?,
+            qkv_bias: bf16_to_device(&self.qkv_bias, backend)?,
+            output: bf16_to_device(&self.output, backend)?,
+            output_bias: bf16_to_device(&self.output_bias, backend)?,
+            post_attention_norm: bf16_to_device(&self.post_attention_norm, backend)?,
+            gate_up: bf16_to_device(&self.gate_up, backend)?,
+            gate_up_bias: bf16_to_device(&self.gate_up_bias, backend)?,
+            down: bf16_to_device(&self.down, backend)?,
+            down_bias: bf16_to_device(&self.down_bias, backend)?,
+        })
+    }
+}
+
+impl WallossActionWeights {
+    fn to_bf16_device(&self, backend: &dyn Backend) -> Result<Self> {
+        Ok(Self {
+            noisy_action_projection: bf16_to_device(&self.noisy_action_projection, backend)?,
+            dof_projection: bf16_to_device(&self.dof_projection, backend)?,
+            action_projection: bf16_to_device(&self.action_projection, backend)?,
+            time_projection: bf16_to_device(&self.time_projection, backend)?,
+            action_embedding_projection: bf16_to_device(
+                &self.action_embedding_projection,
+                backend,
+            )?,
+            velocity_projection: bf16_to_device(&self.velocity_projection, backend)?,
+        })
+    }
+}
+
+fn bf16_to_device(tensor: &Tensor, backend: &dyn Backend) -> Result<Tensor> {
+    if tensor.dtype() == DType::F8E4M3 {
+        return Err(Error::Other(
+            "walloss BF16 upload cannot decode scale-less FP8 data".into(),
+        ));
+    }
+    let values = tensor
+        .to_f32_vec()?
+        .into_iter()
+        .map(half::bf16::from_f32)
+        .collect::<Vec<_>>();
+    backend.to_device(&Tensor::from_bf16(tensor.shape().dims().to_vec(), &values)?)
 }
 
 fn load_layer(

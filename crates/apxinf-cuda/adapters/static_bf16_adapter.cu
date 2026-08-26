@@ -101,6 +101,33 @@ extern "C" cudaError_t apxinf_static_concat_rows_bf16(
   return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_static_gather_rows_bf16(
+    const void* input, const void* indices, void* output,
+    int rows, int cols, cudaStream_t stream) {
+  if (input == nullptr || indices == nullptr || output == nullptr ||
+      rows <= 0 || cols <= 0) return cudaErrorInvalidValue;
+  const int64_t count = static_cast<int64_t>(rows) * cols;
+  gather_rows_bf16_kernel<<<blocks_for(count), kThreads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<const uint32_t*>(indices),
+      static_cast<__nv_bfloat16*>(output), rows, cols);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_static_replace_rows_bf16(
+    const void* base, const void* replacement, const void* row_map,
+    void* output, int rows, int cols, cudaStream_t stream) {
+  if (base == nullptr || replacement == nullptr || row_map == nullptr ||
+      output == nullptr || rows <= 0 || cols <= 0) return cudaErrorInvalidValue;
+  const int64_t count = static_cast<int64_t>(rows) * cols;
+  replace_rows_bf16_kernel<<<blocks_for(count), kThreads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(base),
+      static_cast<const __nv_bfloat16*>(replacement),
+      static_cast<const uint32_t*>(row_map),
+      static_cast<__nv_bfloat16*>(output), rows, cols);
+  return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_static_euler_update_bf16(
     const void* state, const void* velocity, void* output,
     int64_t count, float dt, cudaStream_t stream) {

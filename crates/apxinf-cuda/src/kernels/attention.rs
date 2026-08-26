@@ -657,6 +657,33 @@ fn fa2_attention(
 }
 
 #[cfg(apxinf_fa2_sm80)]
+#[allow(clippy::too_many_arguments)]
+fn fa2_attention_causal(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    query_tokens: usize,
+    key_tokens: usize,
+    query_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    let output = output_buffer(ctx, q.size_in_bytes())?;
+    let softmax_lse = output_buffer(ctx, query_heads * query_tokens * std::mem::size_of::<f32>())?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_fa2_bf16_causal(
+            gpu_ptr(q)?, gpu_ptr(k)?, gpu_ptr(v)?, output.ptr(), softmax_lse.ptr(),
+            1, query_tokens as i32, key_tokens as i32, query_heads as i32,
+            kv_heads as i32, head_dim as i32, (head_dim as f32).sqrt().recip(),
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(make_gpu_tensor(q.shape().clone(), DType::BF16, ctx.device_id(), output))
+}
+
+#[cfg(apxinf_fa2_sm80)]
 fn fa2_splitkv_enabled(
     query_tokens: usize,
     key_tokens: usize,
@@ -903,6 +930,37 @@ pub fn gqa_bf16(
             "BF16 grouped-query attention requires the FA2 backend".into(),
         ))
     }
+}
+
+pub fn causal_gqa_bf16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    key_tokens: usize,
+) -> Result<Tensor> {
+    let q_shape = q.shape().dims();
+    let k_shape = k.shape().dims();
+    if [q, k, v].into_iter().any(|tensor| tensor.dtype() != DType::BF16)
+        || q_shape.len() != 3
+        || k_shape.len() != 3
+        || v.shape() != k.shape()
+        || k_shape[0] < key_tokens
+        || k_shape[2] != q_shape[2]
+        || k_shape[1] == 0
+        || q_shape[1] % k_shape[1] != 0
+        || key_tokens < q_shape[0]
+    {
+        return Err(Error::Other("static inference causal BF16 GQA shape mismatch".into()));
+    }
+    #[cfg(apxinf_fa2_sm80)]
+    {
+        return fa2_attention_causal(
+            ctx, q, k, v, q_shape[0], key_tokens, q_shape[1], k_shape[1], q_shape[2],
+        );
+    }
+    #[cfg(not(apxinf_fa2_sm80))]
+    Err(Error::Other("causal BF16 GQA requires the FA2 backend".into()))
 }
 
 pub fn mha_bf16(

@@ -262,6 +262,77 @@ pub fn concat_rows_bf16(ctx: &CudaContext, first: &Tensor, second: &Tensor) -> R
     Ok(matrix_tensor(ctx, first_rows + second_rows, cols, output))
 }
 
+pub fn gather_rows_bf16(
+    ctx: &CudaContext,
+    input: &Tensor,
+    indices: &CudaBuffer,
+    rows: usize,
+) -> Result<Tensor> {
+    let (input_rows, cols) = matrix_shape(input, "row gather")?;
+    if input.dtype() != DType::BF16 || rows == 0 || rows > input_rows {
+        return Err(Error::Other(
+            "static inference BF16 row gather has incompatible shape".into(),
+        ));
+    }
+    require_buffers(
+        ctx,
+        "row gather",
+        &[("indices", indices, rows * std::mem::size_of::<u32>())],
+    )?;
+    let output = bf16_output(ctx, rows, cols)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_gather_rows_bf16(
+            gpu_ptr(input)?,
+            indices.ptr(),
+            output.ptr(),
+            rows as i32,
+            cols as i32,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(matrix_tensor(ctx, rows, cols, output))
+}
+
+/// Replace selected rows according to a device `u32` map. `u32::MAX` keeps
+/// the base row; every other value selects a row from `replacement`.
+pub fn replace_rows_bf16(
+    ctx: &CudaContext,
+    base: &Tensor,
+    replacement: &Tensor,
+    row_map: &CudaBuffer,
+) -> Result<Tensor> {
+    let (rows, cols) = matrix_shape(base, "row replacement")?;
+    let (_, replacement_cols) = matrix_shape(replacement, "row replacement")?;
+    if base.dtype() != DType::BF16
+        || replacement.dtype() != DType::BF16
+        || cols != replacement_cols
+    {
+        return Err(Error::Other(
+            "static inference BF16 row replacement has incompatible shape".into(),
+        ));
+    }
+    require_buffers(
+        ctx,
+        "row replacement",
+        &[("row_map", row_map, rows * std::mem::size_of::<u32>())],
+    )?;
+    let output = bf16_output(ctx, rows, cols)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_replace_rows_bf16(
+            gpu_ptr(base)?,
+            gpu_ptr(replacement)?,
+            row_map.ptr(),
+            output.ptr(),
+            rows as i32,
+            cols as i32,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(matrix_tensor(ctx, rows, cols, output))
+}
+
 pub fn euler_update_bf16(
     ctx: &CudaContext,
     state: &Tensor,

@@ -367,6 +367,23 @@ extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub fn apxinf_static_gather_rows_bf16(
+        input: *const c_void,
+        indices: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_static_replace_rows_bf16(
+        base: *const c_void,
+        replacement: *const c_void,
+        row_map: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_static_euler_update_bf16(
         state: *const c_void,
         velocity: *const c_void,

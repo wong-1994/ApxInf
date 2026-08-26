@@ -148,7 +148,7 @@ int fa2(
     const void* q, const void* k, const void* v, void* output,
     void* softmax_lse, int batch, int query_tokens, int key_tokens,
     int query_heads, int kv_heads, int head_dim, float softmax_scale,
-    cudaStream_t stream) {
+    cudaStream_t stream, bool is_causal = false) {
   if (q == nullptr || k == nullptr || v == nullptr || output == nullptr ||
       softmax_lse == nullptr || batch <= 0 || query_tokens <= 0 ||
       key_tokens <= 0 || query_heads <= 0 || kv_heads <= 0 || head_dim <= 0 ||
@@ -160,10 +160,19 @@ int fa2(
   fill_params(params, std::is_same<Element, cutlass::bfloat16_t>::value,
               q, k, v, output, softmax_lse, batch, query_tokens,
               key_tokens, query_heads, kv_heads, head_dim, softmax_scale);
+  params.is_causal = is_causal;
   if (head_dim <= 96) {
-    FLASH_NAMESPACE::run_mha_fwd_<Element, 96, false>(params, stream);
+    if (is_causal) {
+      FLASH_NAMESPACE::run_mha_fwd_<Element, 96, true>(params, stream);
+    } else {
+      FLASH_NAMESPACE::run_mha_fwd_<Element, 96, false>(params, stream);
+    }
   } else {
-    FLASH_NAMESPACE::run_mha_fwd_<Element, 256, false>(params, stream);
+    if (is_causal) {
+      FLASH_NAMESPACE::run_mha_fwd_<Element, 256, true>(params, stream);
+    } else {
+      FLASH_NAMESPACE::run_mha_fwd_<Element, 256, false>(params, stream);
+    }
   }
   return static_cast<int>(cudaSuccess);
 }
@@ -216,6 +225,16 @@ int fa2_bf16(
   return fa2<cutlass::bfloat16_t>(
       q, k, v, output, softmax_lse, batch, query_tokens, key_tokens,
       query_heads, kv_heads, head_dim, softmax_scale, stream);
+}
+
+int fa2_bf16_causal(
+    const void* q, const void* k, const void* v, void* output,
+    void* softmax_lse, int batch, int query_tokens, int key_tokens,
+    int query_heads, int kv_heads, int head_dim, float softmax_scale,
+    cudaStream_t stream) {
+  return fa2<cutlass::bfloat16_t>(
+      q, k, v, output, softmax_lse, batch, query_tokens, key_tokens,
+      query_heads, kv_heads, head_dim, softmax_scale, stream, true);
 }
 
 #if defined(APXINF_FA2_SM80)
