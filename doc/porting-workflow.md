@@ -107,9 +107,15 @@ or numerical checkpoint while required completion criteria remain. Do not end
 a turn with a list of remaining work unless the same message contains a
 specific blocker or approval request that prevents that work.
 
-Keep private paths and generated evidence under the private workspace described
-in `AGENTS.md`. Do not commit model weights, captured tensors, environment
-snapshots, or generated JSON reports.
+### Private port workspace
+
+Use a **private port workspace** for reference checkouts, captures, temporary
+programs, and generated evidence. Place it under the ignored
+`experiment/<port-name>/` directory or outside the repository, and verify with
+`git status` that none of its contents are tracked. Do not commit model weights,
+captured tensors, environment snapshots, or generated JSON reports. This rule
+is repository-local and self-contained; machine-specific agent configuration
+does not change it.
 
 ## 2. Run the reference implementation
 

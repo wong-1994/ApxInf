@@ -201,9 +201,10 @@ Verify progressively:
 7. requested device and precision combinations;
 8. latency and memory, reported separately from correctness.
 
-Temporary capture and replay programs belong in the private port workspace.
-Commit only maintained product tests or examples whose purpose remains after
-the port is complete.
+Temporary capture and replay programs belong in the
+[private port workspace](porting-workflow.md#private-port-workspace). Commit only
+maintained product tests or examples whose purpose remains after the port is
+complete.
 
 ## Completion criteria
 

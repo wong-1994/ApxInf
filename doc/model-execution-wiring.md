@@ -13,9 +13,10 @@ Write one row for every repeated block and every boundary operation:
 |---|---|---:|---|---|---|---|
 | semantic expression, including adjacent operations | shape, dtype, layout, broadcasting, rounding | per request, layer, or solver step | fused call, then primitive alternative | output, scratch, cache, stable address | expected transfer or `none` | replay fixture and tolerance |
 
-The ledger is a design artifact and may stay in the private port workspace. It
-must cover preprocessing-to-output, not only transformer blocks. Update it when
-the implementation differs from the plan.
+The ledger is a design artifact and may stay in the
+[private port workspace](porting-workflow.md#private-port-workspace). It must cover
+preprocessing-to-output, not only transformer blocks. Update it when the
+implementation differs from the plan.
 
 Search for an implementation in this order:
 
