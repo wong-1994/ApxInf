@@ -19,12 +19,31 @@ been replayed against the original model evidence.
 
 Before editing code, record outside the repository:
 
-- reference repository and immutable revision;
+- exact model variant, reference repository, and immutable revision;
 - checkpoint identity and license constraints;
 - target hardware and precision;
 - representative input profiles;
 - correctness tolerances and performance goals;
 - expected public API and deployment path.
+
+### Resolve missing inputs with the user
+
+The model variant, checkpoint, dtype, and target hardware are user choices, not
+implementation details. If any is missing, explicitly ask the user before
+implementation. First gather enough evidence to make the question useful:
+
+- inspect the model publisher's official GitHub repository and Hugging Face
+  organization for maintained variants, compatible checkpoints, licenses, and
+  reference precision;
+- inspect the available execution environment for GPU model, compute
+  capability, memory, CUDA toolkit, and existing official checkpoint caches;
+- compare those facts with ApxInf's currently supported devices and dtypes.
+
+Present one recommended default tuple and explain the tradeoff, plus alternatives
+when they materially change scope or feasibility. Recommendations are proposals:
+wait for the user to confirm or replace the model, checkpoint, dtype, and target
+hardware. Record the confirmed tuple before proceeding. Never infer consent from
+a convenient local cache or silently substitute a different model release.
 
 Keep private paths and generated evidence under the private workspace described
 in `AGENTS.md`. Do not commit model weights, captured tensors, environment

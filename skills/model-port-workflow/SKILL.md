@@ -23,9 +23,14 @@ background material.
 
 ## Workflow
 
-1. Fix the reference revision, checkpoint identity, target, precision,
-   representative inputs, tolerances, performance goals, and public API.
-   Completion: every requested tuple and acceptance threshold is explicit.
+1. Fix the exact model variant and reference revision, checkpoint identity,
+   target hardware, precision, representative inputs, tolerances, performance
+   goals, and public API. When the user omits the model variant, checkpoint,
+   dtype, or hardware, inspect the official GitHub/Hugging Face sources and the
+   available execution environment, present recommended defaults with reasons,
+   and explicitly ask the user to confirm or replace them. Do not silently pick
+   these inputs. Completion: the user has confirmed every requested tuple and
+   acceptance threshold.
 2. Run the reference privately and capture deterministic inputs, outputs, and
    diagnostic tensors. Completion: the reference loads and repeated captures
    are attributable to the same source, environment, weights, and stochastic
