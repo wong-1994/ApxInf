@@ -342,9 +342,15 @@ pub fn vision_tower(
     config: &WallossVisionConfig,
     weights: &WallossVisionWeights,
     geometry: &DeviceVisionGeometry,
-    ordered_patches: &Tensor,
+    patches: &Tensor,
 ) -> Result<Tensor> {
-    let mut hidden = kernels::gemm::bf16(context, ordered_patches, &weights.patch_projection)?;
+    let ordered_patches = kernels::elementwise::gather_rows_bf16(
+        context,
+        patches,
+        &geometry.patch_order,
+        geometry.patch_order.len() / std::mem::size_of::<u32>(),
+    )?;
+    let mut hidden = kernels::gemm::bf16(context, &ordered_patches, &weights.patch_projection)?;
     for (layer_index, block) in weights.blocks.iter().enumerate() {
         let full_attention = config.full_attention_blocks.contains(&layer_index);
         let (offsets, segments, max_tokens) = if full_attention {
