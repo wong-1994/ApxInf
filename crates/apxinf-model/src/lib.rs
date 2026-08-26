@@ -12,6 +12,7 @@ pub mod profiling;
 pub mod pi05;
 pub mod qwen3vl;
 pub mod vla;
+pub mod walloss;
 
 pub use builtin::register_builtin_models;
 pub use debug::{DebugCapture, DebugConfig};
