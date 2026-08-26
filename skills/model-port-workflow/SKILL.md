@@ -54,8 +54,11 @@ background material.
    end-to-end values do not turn host round trips into deliverable performance
    debt.
 6. Create `crates/apxinf-model/src/<model>/`. Start with a self-contained
-   implementation; copy a close model when useful and defer shared extraction
-   until repeated maintained implementations prove the seam.
+   implementation. Inspect and copy a close model when useful, but do not import
+   or modify another model-family directory for the new architecture. Defer
+   shared extraction to a separate review after repeated maintained
+   implementations prove the seam. Run
+   `scripts/check_model_family_boundaries.sh` before review.
 7. Integrate through the appropriate maintained contract: `LlmTrait` for
    LLM/VLM or `VlaRuntime` plus the Python policy layer for VLA.
 8. Verify operators, transformations, intermediate checkpoints, eager and

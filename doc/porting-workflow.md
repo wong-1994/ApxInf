@@ -304,6 +304,8 @@ A port is complete only when:
 - end-to-end output passes the declared tolerance;
 - the public deployment path has been exercised;
 - unsupported targets fail clearly;
+- the new model neither imports nor modifies another model-family directory
+  without a separately reviewed shared-seam design;
 - optimization opportunities, host escapes, static-buffer/KV reuse, and CUDA
   Graph eligibility have been audited;
 - applicable existing optimized paths have been attempted and remaining

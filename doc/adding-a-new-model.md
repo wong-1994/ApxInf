@@ -28,6 +28,12 @@ code from the closest model is preferable to inventing a shared abstraction
 before the second implementation exposes the real common boundary. Preserve
 provenance when copying and rename model-specific concepts immediately.
 
+Model-family directories are private architecture modules. Follow the
+[dependency matrix](model-layer-architecture.md#per-model-isolation): inspect
+and copy from a close implementation when useful, but keep the new product code
+independent of other families. Run
+`scripts/check_model_family_boundaries.sh` before review.
+
 ## Choose the runtime contract
 
 ### LLM and VLM
