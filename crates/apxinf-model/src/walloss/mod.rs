@@ -4,4 +4,6 @@ mod config;
 mod weights;
 
 pub use config::{WallossActionConfig, WallossConfig, WallossTextConfig, WallossVisionConfig};
-pub use weights::{WallossActionWeights, WallossLayerWeights, WallossVisionWeights, WallossWeights};
+pub use weights::{
+    WallossActionWeights, WallossLayerWeights, WallossVisionWeights, WallossWeights,
+};

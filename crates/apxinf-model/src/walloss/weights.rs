@@ -62,7 +62,10 @@ pub struct WallossActionWeights {
 }
 
 impl WallossWeights {
-    pub fn from_map(config: &mut WallossConfig, mut tensors: HashMap<String, Tensor>) -> Result<Self> {
+    pub fn from_map(
+        config: &mut WallossConfig,
+        mut tensors: HashMap<String, Tensor>,
+    ) -> Result<Self> {
         let token_embedding = take(&mut tensors, "model.embed_tokens.weight")?;
         expect_rank(&token_embedding, 2, "model.embed_tokens.weight")?;
         let embedding_shape = token_embedding.shape().dims();
@@ -88,6 +91,7 @@ impl WallossWeights {
                 config.text.hidden_size,
                 config.text.intermediate_size,
                 qkv_width,
+                q_width,
             )?);
             action_layers.push(load_layer(
                 &mut tensors,
@@ -96,13 +100,22 @@ impl WallossWeights {
                 config.action.hidden_size,
                 config.action.intermediate_size,
                 qkv_width,
+                q_width,
             )?);
         }
 
         let language_norm = take(&mut tensors, "model.norms.0.weight")?;
         let action_norm = take(&mut tensors, "model.norms.1.weight")?;
-        expect_shape(&language_norm, &[config.text.hidden_size], "language final norm")?;
-        expect_shape(&action_norm, &[config.action.hidden_size], "action final norm")?;
+        expect_shape(
+            &language_norm,
+            &[config.text.hidden_size],
+            "language final norm",
+        )?;
+        expect_shape(
+            &action_norm,
+            &[config.action.hidden_size],
+            "action final norm",
+        )?;
 
         Ok(Self {
             token_embedding,
@@ -123,9 +136,13 @@ fn load_layer(
     hidden: usize,
     intermediate: usize,
     qkv_width: usize,
+    attention_width: usize,
 ) -> Result<WallossLayerWeights> {
     let prefix = format!("model.layers.{layer}");
-    let input_norm = take(tensors, &format!("{prefix}.input_layernorms.{branch}.weight"))?;
+    let input_norm = take(
+        tensors,
+        &format!("{prefix}.input_layernorms.{branch}.weight"),
+    )?;
     let post_attention_norm = take(
         tensors,
         &format!("{prefix}.post_attention_layernorms.{branch}.weight"),
@@ -155,8 +172,16 @@ fn load_layer(
     expect_shape(&post_attention_norm, &[hidden], "post-attention norm")?;
     expect_shape(&qkv_source, &[qkv_width, hidden], "QKV projection")?;
     expect_shape(&qkv_bias, &[qkv_width], "QKV bias")?;
-    expect_shape(&output_source, &[hidden, config_attention_width(qkv_width)], "output projection")?;
-    expect_shape(&gate_up_source, &[2 * intermediate, hidden], "gate/up projection")?;
+    expect_shape(
+        &output_source,
+        &[hidden, attention_width],
+        "output projection",
+    )?;
+    expect_shape(
+        &gate_up_source,
+        &[2 * intermediate, hidden],
+        "gate/up projection",
+    )?;
     expect_shape(&down_source, &[hidden, intermediate], "down projection")?;
 
     Ok(WallossLayerWeights {
@@ -170,19 +195,15 @@ fn load_layer(
     })
 }
 
-fn config_attention_width(qkv_width: usize) -> usize {
-    // Qwen-style fused QKV is Q + K + V; the output projection consumes Q.
-    // Published checkpoints use an 8:1 query-to-KV width ratio.
-    qkv_width * 4 / 5
-}
-
 fn load_vision(
     config: &WallossConfig,
     tensors: &mut HashMap<String, Tensor>,
 ) -> Result<WallossVisionWeights> {
     let vision = &config.vision;
     if vision.hidden_size % vision.num_heads != 0 {
-        return Err(Error::Other("walloss checkpoint: invalid vision head geometry".into()));
+        return Err(Error::Other(
+            "walloss checkpoint: invalid vision head geometry".into(),
+        ));
     }
     let mut blocks = Vec::with_capacity(vision.depth);
     for layer in 0..vision.depth {
@@ -205,10 +226,7 @@ fn load_vision(
     }
 
     let patch = take(tensors, "visual.patch_embed.proj.weight")?;
-    let patch_columns = 3
-        * vision.temporal_patch_size
-        * vision.patch_size
-        * vision.patch_size;
+    let patch_columns = 3 * vision.temporal_patch_size * vision.patch_size * vision.patch_size;
     let patch_projection = flatten_and_transpose(&patch, vision.hidden_size, patch_columns)?;
 
     Ok(WallossVisionWeights {
@@ -232,9 +250,21 @@ fn load_action(
     let action_time_projection = take(tensors, "action_preprocessor.w2.weight")?;
     let action_embedding_projection = take(tensors, "action_preprocessor.w3.weight")?;
     let velocity_projection = take(tensors, "action_preprocessor.action_proj_back.weight")?;
-    expect_shape(&noisy_action_projection, &[width, 2 * dim], "noisy action projection")?;
-    expect_shape(&action_time_projection, &[width, 2 * width], "action/time projection")?;
-    expect_shape(&action_embedding_projection, &[width, width], "action embedding projection")?;
+    expect_shape(
+        &noisy_action_projection,
+        &[width, 2 * dim],
+        "noisy action projection",
+    )?;
+    expect_shape(
+        &action_time_projection,
+        &[width, 2 * width],
+        "action/time projection",
+    )?;
+    expect_shape(
+        &action_embedding_projection,
+        &[width, width],
+        "action embedding projection",
+    )?;
     expect_shape(&velocity_projection, &[dim, width], "velocity projection")?;
     Ok(WallossActionWeights {
         noisy_action_projection: transpose_2d(&noisy_action_projection)?,
