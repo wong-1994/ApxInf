@@ -56,7 +56,9 @@ pub struct WallossVisionBlockWeights {
 
 pub struct WallossActionWeights {
     pub noisy_action_projection: Tensor,
-    pub action_time_projection: Tensor,
+    pub dof_projection: Tensor,
+    pub action_projection: Tensor,
+    pub time_projection: Tensor,
     pub action_embedding_projection: Tensor,
     pub velocity_projection: Tensor,
 }
@@ -266,11 +268,15 @@ fn load_action(
         "action embedding projection",
     )?;
     expect_shape(&velocity_projection, &[dim, width], "velocity projection")?;
+    let (noisy_action_projection, dof_projection) = split_columns(&noisy_action_projection, dim)?;
+    let (action_projection, time_projection) = split_columns(&action_time_projection, width)?;
     Ok(WallossActionWeights {
-        noisy_action_projection: transpose_2d(&noisy_action_projection)?,
-        action_time_projection: transpose_2d(&action_time_projection)?,
-        action_embedding_projection: transpose_2d(&action_embedding_projection)?,
-        velocity_projection: transpose_2d(&velocity_projection)?,
+        noisy_action_projection: to_bf16(&transpose_2d(&noisy_action_projection)?)?,
+        dof_projection: to_bf16(&transpose_2d(&dof_projection)?)?,
+        action_projection: to_bf16(&transpose_2d(&action_projection)?)?,
+        time_projection: to_bf16(&transpose_2d(&time_projection)?)?,
+        action_embedding_projection: to_bf16(&transpose_2d(&action_embedding_projection)?)?,
+        velocity_projection: to_bf16(&transpose_2d(&velocity_projection)?)?,
     })
 }
 
@@ -346,6 +352,69 @@ fn transpose_2d(tensor: &Tensor) -> Result<Tensor> {
         }
         dtype => Err(Error::Other(format!(
             "walloss checkpoint: unsupported linear weight dtype {dtype}"
+        ))),
+    }
+}
+
+fn split_columns(tensor: &Tensor, first_columns: usize) -> Result<(Tensor, Tensor)> {
+    expect_rank(tensor, 2, "split weight")?;
+    let rows = tensor.shape().dims()[0];
+    let columns = tensor.shape().dims()[1];
+    if first_columns == 0 || first_columns >= columns {
+        return Err(Error::Other(format!(
+            "walloss checkpoint: invalid column split {first_columns} for {columns} columns"
+        )));
+    }
+    let second_columns = columns - first_columns;
+    match tensor.dtype() {
+        DType::F32 => {
+            let source = tensor.as_f32()?;
+            let mut first = Vec::with_capacity(rows * first_columns);
+            let mut second = Vec::with_capacity(rows * second_columns);
+            for row in 0..rows {
+                let start = row * columns;
+                first.extend_from_slice(&source[start..start + first_columns]);
+                second.extend_from_slice(&source[start + first_columns..start + columns]);
+            }
+            Ok((
+                Tensor::from_f32(vec![rows, first_columns], &first)?,
+                Tensor::from_f32(vec![rows, second_columns], &second)?,
+            ))
+        }
+        DType::BF16 => {
+            let source = tensor.as_bf16()?;
+            let mut first = Vec::with_capacity(rows * first_columns);
+            let mut second = Vec::with_capacity(rows * second_columns);
+            for row in 0..rows {
+                let start = row * columns;
+                first.extend_from_slice(&source[start..start + first_columns]);
+                second.extend_from_slice(&source[start + first_columns..start + columns]);
+            }
+            Ok((
+                Tensor::from_bf16(vec![rows, first_columns], &first)?,
+                Tensor::from_bf16(vec![rows, second_columns], &second)?,
+            ))
+        }
+        dtype => Err(Error::Other(format!(
+            "walloss checkpoint: unsupported split weight dtype {dtype}"
+        ))),
+    }
+}
+
+fn to_bf16(tensor: &Tensor) -> Result<Tensor> {
+    match tensor.dtype() {
+        DType::BF16 => Ok(tensor.clone()),
+        DType::F32 => {
+            let values = tensor
+                .as_f32()?
+                .iter()
+                .copied()
+                .map(half::bf16::from_f32)
+                .collect::<Vec<_>>();
+            Tensor::from_bf16(tensor.shape().clone(), &values)
+        }
+        dtype => Err(Error::Other(format!(
+            "walloss checkpoint: cannot convert {dtype} action weight to BF16"
         ))),
     }
 }
