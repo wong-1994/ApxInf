@@ -39,13 +39,151 @@ use pyo3::prelude::*;
 
 use apxinf_core::{Device, RngKey, Shape, Tensor};
 use apxinf_model::{
-    AutoModel, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation, Pi05Config,
-    SyntheticWeights, VisionObservation, VlaRequest,
+    AutoModel, GrootN1d7Config, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation,
+    Pi05Config, SyntheticWeights, VisionObservation, VlaRequest,
 };
 
 /// Map any Rust error into a Python `RuntimeError`.
 fn runtime_err<E: std::fmt::Display>(error: E) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
+}
+
+#[pyclass(unsendable)]
+pub struct GrootModel {
+    model: LoadedModel,
+    config: GrootN1d7Config,
+    sampling_seed: Cell<u64>,
+    sampling_draw: Cell<u64>,
+}
+
+#[pymethods]
+impl GrootModel {
+    #[staticmethod]
+    #[pyo3(signature = (path, device="cuda:0", precision="bf16", sampling_seed=0))]
+    fn load(path: PathBuf, device: &str, precision: &str, sampling_seed: u64) -> PyResult<Self> {
+        let root = if path.is_dir() {
+            path.as_path()
+        } else {
+            path.parent().unwrap_or(Path::new("."))
+        };
+        let config =
+            GrootN1d7Config::from_json_file(&root.join("config.json")).map_err(runtime_err)?;
+        let model = AutoModel::load_model(
+            parse_device(device)?,
+            &path,
+            &LoadOptions {
+                model_name: Some("Gr00tN1d7".into()),
+                precision: parse_precision(precision)?,
+                ..LoadOptions::default()
+            },
+        )
+        .map_err(runtime_err)?;
+        Ok(Self {
+            model,
+            config,
+            sampling_seed: Cell::new(sampling_seed),
+            sampling_draw: Cell::new(0),
+        })
+    }
+
+    #[pyo3(signature = (patches, token_ids, state, embodiment_id, noise=None))]
+    fn infer_patches<'py>(
+        &self,
+        py: Python<'py>,
+        patches: PyReadonlyArray2<'py, f32>,
+        token_ids: PyReadonlyArray1<'py, u32>,
+        state: PyReadonlyArray2<'py, f32>,
+        embodiment_id: u32,
+        noise: Option<PyReadonlyArray2<'py, f32>>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let patch_shape = patches.shape();
+        if patch_shape.len() != 2 || patch_shape[1] != 1536 || patch_shape[0] % 256 != 0 {
+            return Err(PyValueError::new_err(format!(
+                "GR00T patches expected [views*256,1536], got {patch_shape:?}"
+            )));
+        }
+        let state_shape = state.shape();
+        let expected_state = [self.config.state_history_length, self.config.max_state_dim];
+        if state_shape != expected_state {
+            return Err(PyValueError::new_err(format!(
+                "GR00T state expected {expected_state:?}, got {state_shape:?}"
+            )));
+        }
+        let tokens = token_ids
+            .as_slice()
+            .map_err(|_| PyValueError::new_err("token_ids must be contiguous"))?
+            .to_vec();
+        if tokens.is_empty() || tokens.len() > self.config.max_seq_len {
+            return Err(PyValueError::new_err("invalid GR00T token count"));
+        }
+        let observation = Observation {
+            vision: VisionObservation::Patches(
+                Tensor::from_f32(
+                    patch_shape.to_vec(),
+                    patches
+                        .as_slice()
+                        .map_err(|_| PyValueError::new_err("patches must be contiguous"))?,
+                )
+                .map_err(runtime_err)?,
+            ),
+            token_ids: tokens,
+        };
+        let state_tensor = Tensor::from_f32(
+            expected_state.to_vec(),
+            state
+                .as_slice()
+                .map_err(|_| PyValueError::new_err("state must be contiguous"))?,
+        )
+        .map_err(runtime_err)?;
+        let flat = if let Some(noise) = noise {
+            let expected = [self.config.action_horizon, self.config.max_action_dim];
+            if noise.shape() != expected {
+                return Err(PyValueError::new_err(format!(
+                    "GR00T noise expected {expected:?}"
+                )));
+            }
+            let latent = Tensor::from_f32(
+                expected.to_vec(),
+                noise
+                    .as_slice()
+                    .map_err(|_| PyValueError::new_err("noise must be contiguous"))?,
+            )
+            .map_err(runtime_err)?;
+            let request = VlaRequest::provided(&observation, &latent)
+                .with_conditioning(&state_tensor, embodiment_id);
+            self.model.infer_host_f32(&request).map_err(runtime_err)?
+        } else {
+            let draw = self.sampling_draw.get();
+            self.sampling_draw.set(draw + 1);
+            let request =
+                VlaRequest::generated(&observation, RngKey::new(self.sampling_seed.get(), 0, draw))
+                    .with_conditioning(&state_tensor, embodiment_id);
+            self.model.infer_host_f32(&request).map_err(runtime_err)?
+        };
+        let array = Array2::from_shape_vec(
+            (self.config.action_horizon, self.config.max_action_dim),
+            flat,
+        )
+        .map_err(runtime_err)?;
+        Ok(array.into_pyarray_bound(py))
+    }
+
+    #[getter]
+    fn action_horizon(&self) -> usize {
+        self.config.action_horizon
+    }
+    #[getter]
+    fn action_dim(&self) -> usize {
+        self.config.max_action_dim
+    }
+    #[getter]
+    fn image_size(&self) -> usize {
+        self.config.image_target_size[0]
+    }
+    #[getter]
+    fn max_token_len(&self) -> usize {
+        self.config.max_seq_len
+    }
 }
 
 fn parse_device(spec: &str) -> PyResult<Device> {
@@ -162,11 +300,7 @@ impl Model {
         let data = noise.as_slice().map_err(|_| {
             PyValueError::new_err("apxinf_py.infer: noise must be C-contiguous float32")
         })?;
-        Tensor::from_f32(
-            Shape::new(vec![expected[0], expected[1]]),
-            data,
-        )
-        .map_err(runtime_err)
+        Tensor::from_f32(Shape::new(vec![expected[0], expected[1]]), data).map_err(runtime_err)
     }
 
     fn action_array<'py>(
@@ -372,8 +506,7 @@ impl Model {
             uniform_fp8_scale,
             ..LoadOptions::default()
         };
-        let loaded = AutoModel::load_model(device, Path::new(""), &options)
-            .map_err(runtime_err)?;
+        let loaded = AutoModel::load_model(device, Path::new(""), &options).map_err(runtime_err)?;
         Ok(Self {
             model: loaded,
             config,
@@ -415,16 +548,15 @@ impl Model {
         let tokens = token_ids
             .as_slice()
             .map_err(|_| {
-                PyValueError::new_err("apxinf_py._infer_patches: token_ids must be C-contiguous uint32")
+                PyValueError::new_err(
+                    "apxinf_py._infer_patches: token_ids must be C-contiguous uint32",
+                )
             })?
             .to_vec();
         self.validate_tokens(&tokens)?;
 
-        let patch_tensor = Tensor::from_f32(
-            Shape::new(vec![expected[0], expected[1]]),
-            patch_data,
-        )
-        .map_err(runtime_err)?;
+        let patch_tensor = Tensor::from_f32(Shape::new(vec![expected[0], expected[1]]), patch_data)
+            .map_err(runtime_err)?;
 
         let observation = Observation {
             vision: VisionObservation::Patches(patch_tensor),
@@ -473,11 +605,8 @@ impl Model {
             })?
             .to_vec();
         self.validate_tokens(&tokens)?;
-        let patch_tensor = Tensor::from_f32(
-            Shape::new(vec![expected[0], expected[1]]),
-            patch_data,
-        )
-        .map_err(runtime_err)?;
+        let patch_tensor = Tensor::from_f32(Shape::new(vec![expected[0], expected[1]]), patch_data)
+            .map_err(runtime_err)?;
         let observation = Observation {
             vision: VisionObservation::Patches(patch_tensor),
             token_ids: tokens,
@@ -664,6 +793,7 @@ impl Model {
 #[pymodule]
 fn apxinf_py(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Model>()?;
+    module.add_class::<GrootModel>()?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

@@ -10,6 +10,65 @@ use crate::tuning::{
 use crate::CudaBackend;
 
 #[test]
+fn masked_cross_attention_bf16_respects_key_mask() {
+    const HEADS: usize = 1;
+    const DIM: usize = 4;
+    let backend = CudaBackend::new(0).unwrap();
+    let bf = |values: &[f32]| {
+        values
+            .iter()
+            .copied()
+            .map(bf16::from_f32)
+            .collect::<Vec<_>>()
+    };
+    let q = Tensor::from_bf16(
+        vec![2, HEADS, DIM],
+        &bf(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+    )
+    .unwrap();
+    let k = Tensor::from_bf16(
+        vec![3, HEADS, DIM],
+        &bf(&[
+            1.0, 0.0, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 0.0, 1.0, 0.0, 0.0,
+        ]),
+    )
+    .unwrap();
+    let v = Tensor::from_bf16(
+        vec![3, HEADS, DIM],
+        &bf(&[
+            1.0, 2.0, 3.0, 4.0, 99.0, 99.0, 99.0, 99.0, 5.0, 6.0, 7.0, 8.0,
+        ]),
+    )
+    .unwrap();
+    let q = backend.to_device(&q).unwrap();
+    let k = backend.to_device(&k).unwrap();
+    let v = backend.to_device(&v).unwrap();
+    let actual = backend
+        .masked_cross_sdpa(&q, &k, &v, &[1, 0, 1], HEADS, DIM)
+        .unwrap();
+    let actual = backend.to_cpu(&actual).unwrap().to_f32_vec().unwrap();
+
+    // scale=1/sqrt(4)=0.5. The masked middle key must make no contribution.
+    let p = 0.5f32.exp() / (0.5f32.exp() + 1.0);
+    let expected = [
+        p * 1.0 + (1.0 - p) * 5.0,
+        p * 2.0 + (1.0 - p) * 6.0,
+        p * 3.0 + (1.0 - p) * 7.0,
+        p * 4.0 + (1.0 - p) * 8.0,
+        (1.0 - p) * 1.0 + p * 5.0,
+        (1.0 - p) * 2.0 + p * 6.0,
+        (1.0 - p) * 3.0 + p * 7.0,
+        (1.0 - p) * 4.0 + p * 8.0,
+    ];
+    for (index, (&observed, &reference)) in actual.iter().zip(&expected).enumerate() {
+        assert!(
+            (observed - reference).abs() < 0.04,
+            "value {index}: observed={observed}, reference={reference}"
+        );
+    }
+}
+
+#[test]
 fn persisted_bf16_cublaslt_tactic_matches_vendor() {
     const M: usize = 10;
     const N: usize = 32;

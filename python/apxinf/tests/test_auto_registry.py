@@ -30,6 +30,14 @@ def test_registry_registers_pi05():
     assert get_policy("PI05") is Pi05Policy  # case-insensitive
 
 
+def test_registry_registers_groot_n1d7():
+    from apxinf import GrootPolicy
+    from apxinf.policies import available_policies, get_policy
+
+    assert "gr00tn1d7" in available_policies()
+    assert get_policy("Gr00tN1d7") is GrootPolicy
+
+
 def test_registry_rejects_conflicting_reregister():
     from apxinf.policies import register_policy
 

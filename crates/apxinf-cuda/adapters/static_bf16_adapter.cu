@@ -170,6 +170,18 @@ extern "C" cudaError_t apxinf_static_layer_norm_bf16(
   return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_static_ada_layer_norm_bf16(
+    const void* input, const void* style, void* output,
+    int rows, int cols, float eps, int shift_first, cudaStream_t stream) {
+  if (input == nullptr || style == nullptr || output == nullptr || rows <= 0 || cols <= 0)
+    return cudaErrorInvalidValue;
+  ada_layer_norm_bf16_kernel<<<rows, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<const __nv_bfloat16*>(style),
+      static_cast<__nv_bfloat16*>(output), rows, cols, eps, shift_first != 0);
+  return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_static_bias_residual_rms_norm_bf16(
     const void* projection, const void* bias, const void* residual,
     const void* weight, void* hidden, void* normalized,

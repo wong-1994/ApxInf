@@ -20,6 +20,8 @@ pub fn register_builtin_models() {
 
     #[cfg(feature = "cuda")]
     crate::pi05::register_builtin();
+    #[cfg(feature = "cuda")]
+    crate::groot_n1d7::register_builtin();
 }
 fn load_llama(
     path: &Path,

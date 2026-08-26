@@ -5,6 +5,32 @@ use std::ffi::c_void;
 use super::cuda::{cudaError_t, cudaStream_t};
 
 extern "C" {
+    pub fn apxinf_static_ada_layer_norm_bf16(
+        input: *const c_void,
+        style: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        eps: f32,
+        shift_first: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn apxinf_masked_cross_sdpa_bf16(
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        key_mask: *const u8,
+        output: *mut c_void,
+        query_len: u32,
+        key_len: u32,
+        n_heads: u32,
+        head_dim: u32,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
     pub fn apxinf_static_evict_l2(
         buffer: *mut c_void,
         bytes: usize,

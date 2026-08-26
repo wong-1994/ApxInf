@@ -313,6 +313,78 @@ __global__ void vision_sdpa_bf16_kernel(
     out_row[d1] = __float2bfloat16(acc1);
 }
 
+// ── Masked cross attention (bf16) ────────────────────────────────────────
+// Q: [query_len, heads, head_dim], K/V: [key_len, heads, head_dim].
+// key_mask is one byte per key; zero entries have exactly zero probability.
+// One warp owns one (query, head), accumulating dot products in FP32.
+__global__ void masked_cross_sdpa_bf16_kernel(
+    const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat16* v,
+    const uint8_t* key_mask, __nv_bfloat16* out,
+    uint32_t query_len, uint32_t key_len, uint32_t n_heads,
+    uint32_t head_dim, float scale)
+{
+    uint32_t qi = blockIdx.x;
+    uint32_t head = blockIdx.y;
+    int tid = threadIdx.x;
+    if (qi >= query_len || head >= n_heads) return;
+
+    extern __shared__ float scores[];  // key_len scores + one reduction slot
+    const __nv_bfloat16* q_row = q + (qi * n_heads + head) * head_dim;
+    float q0 = tid < static_cast<int>(head_dim)
+        ? __bfloat162float(q_row[tid]) : 0.0f;
+    int d1 = tid + 32;
+    float q1 = d1 < static_cast<int>(head_dim)
+        ? __bfloat162float(q_row[d1]) : 0.0f;
+
+    for (uint32_t ki = 0; ki < key_len; ++ki) {
+        const __nv_bfloat16* k_row = k + (ki * n_heads + head) * head_dim;
+        float dot = 0.0f;
+        if (tid < static_cast<int>(head_dim))
+            dot += q0 * __bfloat162float(k_row[tid]);
+        if (d1 < static_cast<int>(head_dim))
+            dot += q1 * __bfloat162float(k_row[d1]);
+        for (int offset = 16; offset > 0; offset >>= 1)
+            dot += __shfl_xor_sync(0xffffffff, dot, offset);
+        if (tid == 0)
+            scores[ki] = key_mask[ki] ? dot * scale : -INFINITY;
+    }
+    __syncthreads();
+
+    float max_value = -INFINITY;
+    for (uint32_t ki = tid; ki < key_len; ki += 32)
+        max_value = fmaxf(max_value, scores[ki]);
+    for (int offset = 16; offset > 0; offset >>= 1)
+        max_value = fmaxf(max_value, __shfl_xor_sync(0xffffffff, max_value, offset));
+    if (tid == 0) scores[key_len] = max_value;
+    __syncthreads();
+    max_value = scores[key_len];
+
+    float sum = 0.0f;
+    for (uint32_t ki = tid; ki < key_len; ki += 32) {
+        float probability = key_mask[ki] ? expf(scores[ki] - max_value) : 0.0f;
+        scores[ki] = probability;
+        sum += probability;
+    }
+    for (int offset = 16; offset > 0; offset >>= 1)
+        sum += __shfl_xor_sync(0xffffffff, sum, offset);
+    if (tid == 0) scores[key_len] = sum;
+    __syncthreads();
+    float inverse_sum = scores[key_len] > 0.0f ? 1.0f / scores[key_len] : 0.0f;
+
+    float output0 = 0.0f, output1 = 0.0f;
+    for (uint32_t ki = 0; ki < key_len; ++ki) {
+        float probability = scores[ki] * inverse_sum;
+        const __nv_bfloat16* v_row = v + (ki * n_heads + head) * head_dim;
+        if (tid < static_cast<int>(head_dim))
+            output0 += probability * __bfloat162float(v_row[tid]);
+        if (d1 < static_cast<int>(head_dim))
+            output1 += probability * __bfloat162float(v_row[d1]);
+    }
+    __nv_bfloat16* out_row = out + (qi * n_heads + head) * head_dim;
+    if (tid < static_cast<int>(head_dim)) out_row[tid] = __float2bfloat16(output0);
+    if (d1 < static_cast<int>(head_dim)) out_row[d1] = __float2bfloat16(output1);
+}
+
 
 
 // ── Flash Attention decode (bf16) — single-kernel online-softmax ────────
@@ -870,6 +942,5 @@ __global__ void mha_bf16_kernel(
         __float2bfloat16(accumulator);
   }
 }
-
 
 

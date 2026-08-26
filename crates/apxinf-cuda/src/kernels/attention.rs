@@ -410,6 +410,62 @@ pub fn vision(
     ))
 }
 
+/// BF16 non-causal cross-attention with a shared key mask.
+pub fn masked_cross(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    key_mask: &CudaBuffer,
+    key_mask_len: usize,
+    n_heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    let q_shape = q.shape().dims();
+    let k_shape = k.shape().dims();
+    if q.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || q_shape.len() != 3
+        || k_shape.len() != 3
+        || v.shape().dims() != k_shape
+        || q_shape[1..] != [n_heads, head_dim]
+        || k_shape[1..] != [n_heads, head_dim]
+        || key_mask_len != k_shape[0]
+        || head_dim == 0
+        || head_dim > 64
+    {
+        return Err(Error::Other(format!(
+            "masked cross attention expects BF16 q=[Q,{n_heads},{head_dim}], k/v=[K,{n_heads},{head_dim}], mask=[K]; got q={q_shape:?}, k={k_shape:?}, mask={key_mask_len}"
+        )));
+    }
+    let query_len = q_shape[0];
+    let key_len = k_shape[0];
+    let output = output_buffer(ctx, q.size_in_bytes())?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_masked_cross_sdpa_bf16(
+            gpu_ptr(q)?,
+            gpu_ptr(k)?,
+            gpu_ptr(v)?,
+            key_mask.ptr() as *const u8,
+            output.ptr(),
+            query_len as u32,
+            key_len as u32,
+            n_heads as u32,
+            head_dim as u32,
+            1.0 / (head_dim as f32).sqrt(),
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(make_gpu_tensor(
+        Shape::new(vec![query_len, n_heads * head_dim]),
+        DType::BF16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
 /// Causal attention mask on CUDA. Dispatches on dtype.
 pub fn causal_mask(ctx: &CudaContext, input: &Tensor, kv_offset: u32) -> Result<Tensor> {
     let device_id = ctx.device_id();
@@ -603,10 +659,7 @@ fn fa2_splitkv_enabled(
     if std::env::var_os("APXINF_DISABLE_FA2_SPLITKV").is_some() {
         return false;
     }
-    query_tokens <= 64
-        && key_tokens > query_tokens
-        && query_heads > kv_heads
-        && head_dim == 256
+    query_tokens <= 64 && key_tokens > query_tokens && query_heads > kv_heads && head_dim == 256
 }
 
 #[cfg(apxinf_fa2_sm80)]

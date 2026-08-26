@@ -61,6 +61,12 @@ pub enum InitialLatent<'a> {
 pub struct VlaRequest<'a> {
     pub observation: &'a Observation,
     pub initial_latent: InitialLatent<'a>,
+    /// Optional continuous robot state. Model runtimes validate the exact
+    /// history/width required by their checkpoint. Policies that do not use
+    /// continuous state (such as PI0.5's default path) leave this unset.
+    pub state: Option<&'a Tensor>,
+    /// Optional model-defined embodiment/category selector.
+    pub embodiment_id: Option<u32>,
 }
 
 impl<'a> VlaRequest<'a> {
@@ -68,6 +74,8 @@ impl<'a> VlaRequest<'a> {
         Self {
             observation,
             initial_latent: InitialLatent::Generate { rng },
+            state: None,
+            embodiment_id: None,
         }
     }
 
@@ -75,7 +83,16 @@ impl<'a> VlaRequest<'a> {
         Self {
             observation,
             initial_latent: InitialLatent::Provided(latent),
+            state: None,
+            embodiment_id: None,
         }
+    }
+
+    /// Attach the continuous conditioning used by multi-embodiment VLAs.
+    pub const fn with_conditioning(mut self, state: &'a Tensor, embodiment_id: u32) -> Self {
+        self.state = Some(state);
+        self.embodiment_id = Some(embodiment_id);
+        self
     }
 }
 
@@ -200,5 +217,10 @@ mod tests {
             InitialLatent::Generate { rng: actual } => assert_eq!(actual, rng),
             InitialLatent::Provided(_) => panic!("generated latent requires a caller tensor"),
         }
+
+        let state = Tensor::zeros((1, 132), DType::F32);
+        let conditioned = generated.with_conditioning(&state, 7);
+        assert!(std::ptr::eq(conditioned.state.unwrap(), &state));
+        assert_eq!(conditioned.embodiment_id, Some(7));
     }
 }

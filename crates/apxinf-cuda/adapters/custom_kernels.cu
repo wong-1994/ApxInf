@@ -1,6 +1,7 @@
 // Copyright 2026 apxinf contributors.
 // Stable C ABI and CUDA launch adapter for custom static-inference operators.
 
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
@@ -43,6 +44,27 @@ const int kActionAdaPacked8Mode = [] {
   }();
 
 }  // namespace
+
+extern "C" cudaError_t apxinf_masked_cross_sdpa_bf16(
+    const void* q, const void* k, const void* v, const uint8_t* key_mask,
+    void* output, uint32_t query_len, uint32_t key_len, uint32_t n_heads,
+    uint32_t head_dim, float scale, cudaStream_t stream) {
+  if (q == nullptr || k == nullptr || v == nullptr || key_mask == nullptr ||
+      output == nullptr || query_len == 0 || key_len == 0 || n_heads == 0 ||
+      head_dim == 0 || head_dim > 64 || !(scale > 0.0f)) {
+    return cudaErrorInvalidValue;
+  }
+  dim3 grid(query_len, n_heads);
+  constexpr int threads = 32;
+  size_t shared_bytes = (static_cast<size_t>(key_len) + 1) * sizeof(float);
+  masked_cross_sdpa_bf16_kernel<<<grid, threads, shared_bytes, stream>>>(
+      static_cast<const __nv_bfloat16*>(q),
+      static_cast<const __nv_bfloat16*>(k),
+      static_cast<const __nv_bfloat16*>(v), key_mask,
+      static_cast<__nv_bfloat16*>(output), query_len, key_len, n_heads,
+      head_dim, scale);
+  return cudaGetLastError();
+}
 
 extern "C" cudaError_t apxinf_static_evict_l2(
     void* buffer, size_t bytes, uint32_t seed, cudaStream_t stream) {

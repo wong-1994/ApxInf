@@ -184,6 +184,29 @@ impl Backend for CudaBackend {
         kernels::attention::vision(&self.ctx, q, k, v, seq_len, n_heads, head_dim)
     }
 
+    fn masked_cross_sdpa(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        key_mask: &[u8],
+        n_heads: usize,
+        head_dim: usize,
+    ) -> Result<Tensor> {
+        let mask = CudaBuffer::alloc(key_mask.len(), self.ctx.device_id()).map_err(Error::Cuda)?;
+        mask.copy_from_host(key_mask).map_err(Error::Cuda)?;
+        kernels::attention::masked_cross(
+            &self.ctx,
+            q,
+            k,
+            v,
+            &mask,
+            key_mask.len(),
+            n_heads,
+            head_dim,
+        )
+    }
+
     fn concat_2d(&self, tensors: &[&Tensor]) -> Result<Tensor> {
         use apxinf_core::Shape;
         if tensors.is_empty() {

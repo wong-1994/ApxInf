@@ -255,6 +255,39 @@ pub fn layer_bf16(
     Ok(matrix_tensor(ctx, rows, cols, output))
 }
 
+pub fn adaptive_layer_bf16(
+    ctx: &CudaContext,
+    input: &Tensor,
+    style: &Tensor,
+    eps: f32,
+    shift_first: bool,
+) -> Result<Tensor> {
+    let (rows, cols) = matrix_shape(input, "AdaLayerNorm")?;
+    if input.dtype() != DType::BF16
+        || style.dtype() != DType::BF16
+        || style.shape().dims() != [2 * cols]
+    {
+        return Err(Error::Other(
+            "BF16 AdaLayerNorm expects input [rows,cols] and style [2*cols]".into(),
+        ));
+    }
+    let output = bf16_output(ctx, rows, cols)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_ada_layer_norm_bf16(
+            gpu_ptr(input)?,
+            gpu_ptr(style)?,
+            output.ptr(),
+            rows as i32,
+            cols as i32,
+            eps,
+            i32::from(shift_first),
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(matrix_tensor(ctx, rows, cols, output))
+}
+
 pub fn adaptive_rms_bf16(
     ctx: &CudaContext,
     input: &Tensor,

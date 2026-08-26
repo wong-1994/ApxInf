@@ -255,5 +255,29 @@ __global__ void ada_rms_norm_bf16_kernel(
   }
 }
 
-
-
+__global__ void ada_layer_norm_bf16_kernel(
+    const __nv_bfloat16* input, const __nv_bfloat16* style,
+    __nv_bfloat16* output, int rows, int cols, float eps, bool shift_first) {
+  __shared__ float scratch[8];
+  const int row = blockIdx.x;
+  float sum = 0.0f;
+  for (int col = threadIdx.x; col < cols; col += blockDim.x)
+    sum += __bfloat162float(input[static_cast<int64_t>(row) * cols + col]);
+  const float mean = block_sum(sum, scratch) / cols;
+  float variance_sum = 0.0f;
+  for (int col = threadIdx.x; col < cols; col += blockDim.x) {
+    const float centered =
+        __bfloat162float(input[static_cast<int64_t>(row) * cols + col]) - mean;
+    variance_sum += centered * centered;
+  }
+  const float inverse_std = rsqrtf(block_sum(variance_sum, scratch) / cols + eps);
+  for (int col = threadIdx.x; col < cols; col += blockDim.x) {
+    const int64_t index = static_cast<int64_t>(row) * cols + col;
+    const float normalized = (__bfloat162float(input[index]) - mean) * inverse_std;
+    const int scale_offset = shift_first ? cols : 0;
+    const int shift_offset = shift_first ? 0 : cols;
+    output[index] = __float2bfloat16(
+        normalized * (1.0f + __bfloat162float(style[scale_offset + col])) +
+        __bfloat162float(style[shift_offset + col]));
+  }
+}
