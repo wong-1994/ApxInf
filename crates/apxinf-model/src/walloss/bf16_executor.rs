@@ -96,7 +96,7 @@ pub fn language_layer(
         config.mrope_section,
         position_ids,
     )?;
-    let attention = kernels::attention::gqa_bf16(context, &q, &k, &qkv.v, tokens)?
+    let attention = kernels::attention::causal_gqa_bf16(context, &q, &k, &qkv.v, tokens)?
         .reshape(vec![tokens, config.num_attention_heads * config.head_dim])?;
     let projected = kernels::gemm::bf16(context, &attention, &weights.output)?;
     let fused = kernels::fused::bias_residual_rms_bf16(

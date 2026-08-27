@@ -39,8 +39,10 @@ pub struct WallossVisionConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WallossActionConfig {
     pub hidden_size: usize,
+    pub state_hidden_size: usize,
     pub intermediate_size: usize,
     pub action_dim: usize,
+    pub proprio_dim: usize,
     pub action_horizon: usize,
     pub solver_steps: usize,
     pub causal_attention: bool,
@@ -161,8 +163,10 @@ impl WallossConfig {
             },
             action: WallossActionConfig {
                 hidden_size: action_hidden_size,
+                state_hidden_size: usize_field(&value, "state_hidden_size")?,
                 intermediate_size: usize_field(action_expert, "intermediate_size")?,
                 action_dim: 26,
+                proprio_dim: 26,
                 action_horizon: 10,
                 solver_steps: value
                     .pointer("/noise_scheduler/num_inference_timesteps")

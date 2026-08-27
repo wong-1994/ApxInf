@@ -25,6 +25,12 @@ pub enum VisionObservation {
 pub struct Observation {
     pub vision: VisionObservation,
     pub token_ids: Vec<u32>,
+    /// Optional normalized proprioceptive state for models that project it
+    /// directly instead of encoding it in the prompt.
+    pub state: Option<Tensor>,
+    /// Optional per-dimension action mask. Missing means every action
+    /// dimension is active.
+    pub action_mask: Option<Tensor>,
 }
 
 impl Observation {
@@ -171,6 +177,8 @@ mod tests {
                 layout: ImageLayout::Nhwc,
             },
             token_ids: vec![1, 2, 3],
+            state: None,
+            action_mask: None,
         }
     }
 
@@ -189,6 +197,8 @@ mod tests {
         let empty = Observation {
             vision: VisionObservation::Patches(Tensor::zeros((1, 2), DType::F32)),
             token_ids: Vec::new(),
+            state: None,
+            action_mask: None,
         };
         assert!(empty.validate().is_err());
     }

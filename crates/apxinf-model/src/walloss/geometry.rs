@@ -163,6 +163,66 @@ fn offset_max_delta(offsets: &[u32]) -> usize {
         .unwrap_or(0)
 }
 
+/// Build token-major multimodal position IDs for one unpadded sequence.
+pub fn multimodal_position_ids(
+    token_ids: &[u32],
+    grids: &[[usize; 3]],
+    image_token_id: u32,
+    spatial_merge: usize,
+) -> Result<Vec<u32>> {
+    let mut axes = [Vec::new(), Vec::new(), Vec::new()];
+    let mut token_offset = 0usize;
+    let mut next_position = 0u32;
+    for &[t, h, w] in grids {
+        let image_start = token_ids[token_offset..]
+            .iter()
+            .position(|&token| token == image_token_id)
+            .map(|index| token_offset + index)
+            .ok_or_else(|| Error::Other("walloss prompt has fewer image-token runs than configured grids".into()))?;
+        for position in token_offset..image_start {
+            let value = next_position + (position - token_offset) as u32;
+            for axis in &mut axes {
+                axis.push(value);
+            }
+        }
+        next_position += (image_start - token_offset) as u32;
+        let llm_h = h / spatial_merge;
+        let llm_w = w / spatial_merge;
+        let image_tokens = t * llm_h * llm_w;
+        if token_ids.get(image_start..image_start + image_tokens).is_none()
+            || token_ids[image_start..image_start + image_tokens]
+                .iter()
+                .any(|&token| token != image_token_id)
+        {
+            return Err(Error::Other(format!(
+                "walloss prompt image run does not contain {image_tokens} tokens"
+            )));
+        }
+        for time in 0..t {
+            for height in 0..llm_h {
+                for width in 0..llm_w {
+                    axes[0].push(next_position + time as u32);
+                    axes[1].push(next_position + height as u32);
+                    axes[2].push(next_position + width as u32);
+                }
+            }
+        }
+        next_position += t.max(llm_h).max(llm_w) as u32;
+        token_offset = image_start + image_tokens;
+    }
+    for position in token_offset..token_ids.len() {
+        let value = next_position + (position - token_offset) as u32;
+        for axis in &mut axes {
+            axis.push(value);
+        }
+    }
+    let mut output = Vec::with_capacity(token_ids.len() * 3);
+    for token in 0..token_ids.len() {
+        output.extend([axes[0][token], axes[1][token], axes[2][token]]);
+    }
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +253,18 @@ mod tests {
         assert_eq!(*geometry.window_offsets.last().unwrap(), 160);
         assert_eq!(geometry.reverse_indices.len(), 40);
         assert_eq!(geometry.max_full_tokens, 96);
+    }
+
+
+    #[test]
+    fn positions_advance_by_multimodal_extent() {
+        let image = 9;
+        let tokens = [1, 2, image, image, image, image, 3, 4];
+        let positions = multimodal_position_ids(&tokens, &[[1, 4, 4]], image, 2).unwrap();
+        let rows = positions.chunks_exact(3).collect::<Vec<_>>();
+        assert_eq!(rows[0], &[0, 0, 0]);
+        assert_eq!(rows[2], &[2, 2, 2]);
+        assert_eq!(rows[5], &[2, 3, 3]);
+        assert_eq!(rows[6], &[4, 4, 4]);
     }
 }
