@@ -15,6 +15,27 @@ __global__ void quantize_f16_e4m3_kernel(
   }
 }
 
+__global__ void quantize_bf16_e4m3_kernel(
+    const __nv_bfloat16* input, __nv_fp8_e4m3* output, int64_t count,
+    float inverse_scale) {
+  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; index < count; index += stride) {
+    float value = fminf(448.0f, fmaxf(-448.0f,
+        __bfloat162float(input[index]) * inverse_scale));
+    output[index] = static_cast<__nv_fp8_e4m3>(value);
+  }
+}
+
+__global__ void cast_f16_bf16_kernel(
+    const half* input, __nv_bfloat16* output, int64_t count) {
+  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; index < count; index += stride) {
+    output[index] = __float2bfloat16(__half2float(input[index]));
+  }
+}
+
 // Four values per thread with one half2 pair per load and one uint32 store.
 // The scalar kernel above remains the fallback for unaligned buffers and the
 // final 0..3 values.

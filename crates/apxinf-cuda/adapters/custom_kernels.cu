@@ -105,6 +105,31 @@ extern "C" cudaError_t apxinf_static_dequantize_e4m3_f16(
   return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_static_quantize_bf16_e4m3(
+    const void* input, void* output, int64_t count, float scale,
+    cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || count <= 0 || !(scale > 0.0f))
+    return cudaErrorInvalidValue;
+  int blocks = static_cast<int>((count + 255) / 256);
+  blocks = blocks > 4096 ? 4096 : blocks;
+  quantize_bf16_e4m3_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<__nv_fp8_e4m3*>(output), count, 1.0f / scale);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_static_cast_f16_bf16(
+    const void* input, void* output, int64_t count, cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || count <= 0)
+    return cudaErrorInvalidValue;
+  int blocks = static_cast<int>((count + 255) / 256);
+  blocks = blocks > 4096 ? 4096 : blocks;
+  cast_f16_bf16_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const half*>(input),
+      static_cast<__nv_bfloat16*>(output), count);
+  return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_static_rgb_u8_to_patches_e4m3(
     const void* images, void* patches, int views, int image_size,
     int patch_size, int layout, float scale, cudaStream_t stream) {
