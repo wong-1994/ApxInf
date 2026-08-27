@@ -603,7 +603,7 @@ pub fn split_gqa_qkv_bias_bf16(
     })
 }
 
-#[cfg(apxinf_fa2_sm80)]
+#[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
 #[allow(clippy::too_many_arguments)]
 fn fa2_attention(
     ctx: &CudaContext,
@@ -656,7 +656,7 @@ fn fa2_attention(
     ))
 }
 
-#[cfg(apxinf_fa2_sm80)]
+#[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
 #[allow(clippy::too_many_arguments)]
 fn fa2_attention_causal(
     ctx: &CudaContext,
@@ -906,7 +906,7 @@ pub fn gqa_bf16(
             "static inference BF16 GQA shape mismatch".into(),
         ));
     }
-    #[cfg(apxinf_fa2_sm80)]
+    #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
     {
         return fa2_attention(
             ctx,
@@ -921,7 +921,7 @@ pub fn gqa_bf16(
             q_shape[2],
         );
     }
-    #[cfg(not(apxinf_fa2_sm80))]
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
     {
         if k_shape[1] == 1 {
             return mqa_bf16(ctx, q, k, v, key_tokens);
@@ -953,13 +953,13 @@ pub fn causal_gqa_bf16(
     {
         return Err(Error::Other("static inference causal BF16 GQA shape mismatch".into()));
     }
-    #[cfg(apxinf_fa2_sm80)]
+    #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
     {
         return fa2_attention_causal(
             ctx, q, k, v, q_shape[0], key_tokens, q_shape[1], k_shape[1], q_shape[2],
         );
     }
-    #[cfg(not(apxinf_fa2_sm80))]
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
     Err(Error::Other("causal BF16 GQA requires the FA2 backend".into()))
 }
 
