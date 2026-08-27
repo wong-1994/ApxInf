@@ -49,6 +49,7 @@ server (``--host/--port``) and needs no local weights — serve with
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import pathlib
@@ -75,6 +76,14 @@ PROMPT_T21 = (
 ALL_LAYERS = ("l0", "l1", "l2", "l3")
 IN_PROCESS = ("l0", "l1", "l2")
 
+_DEFAULT_TACTICS = {
+    (87, "bf16"): "orin_sm87_bf16_v2_v3_h10_tactics.json",
+    (89, "bf16"): "rtx4090_sm89_bf16_v2_v3_h10_tactics.json",
+    (101, "fp8"): "thor_u_cutlass_tactics.json",
+    (110, "bf16"): "thor_sm110_bf16_v2_v3_h10_tactics.json",
+    (110, "fp8"): "thor_sm110_fp8_native_v2_v3_h10_tactics.json",
+}
+
 
 def _stats(samples_ms):
     ordered = sorted(samples_ms)
@@ -99,6 +108,48 @@ def _time_loop(fn, warmup, samples):
         fn()
         out.append((time.perf_counter() - t) * 1000.0)
     return out
+
+
+def _cuda_sm(device: str) -> int | None:
+    """Return CUDA's integer compute capability for ``cuda:N`` (e.g. 110)."""
+    if device == "cuda":
+        device_index = 0
+    elif device.startswith("cuda:"):
+        try:
+            device_index = int(device.removeprefix("cuda:"))
+        except ValueError as error:
+            raise SystemExit(f"invalid CUDA device {device!r}; expected cuda:N") from error
+    else:
+        return None
+
+    try:
+        cudart = ctypes.CDLL("libcudart.so")
+    except OSError as error:
+        raise SystemExit(f"cannot query {device}: failed to load CUDA runtime: {error}") from error
+
+    # cudaDevAttrComputeCapabilityMajor/Minor from cuda_runtime_api.h.
+    def attribute(code: int) -> int:
+        value = ctypes.c_int()
+        status = cudart.cudaDeviceGetAttribute(ctypes.byref(value), code, device_index)
+        if status != 0:
+            raise SystemExit(
+                f"cannot query {device} compute capability: cudaDeviceGetAttribute "
+                f"returned {status}"
+            )
+        return value.value
+
+    return attribute(75) * 10 + attribute(76)
+
+
+def _default_tactics(device: str, precision: str) -> pathlib.Path | None:
+    sm = _cuda_sm(device)
+    filename = _DEFAULT_TACTICS.get((sm, precision))
+    if filename is None:
+        return None
+    path = _REPO_ROOT / "configs" / "pi05" / filename
+    if not path.is_file():
+        raise SystemExit(f"default tactics for SM{sm} {precision} are missing: {path}")
+    return path
 
 
 def _git_commit():
@@ -147,10 +198,12 @@ def parse_args() -> argparse.Namespace:
         "--random-weights", action="store_true", help="checkpoint-free engine (L0/L1/L2)"
     )
 
-    # Tuning knobs. In random mode these feed `Model.random`; in checkpoint mode
-    # the loader reads calibration.json / tactics.json from the model dir.
+    # Calibration is public for synthetic FP8 latency runs. Tactics are routed
+    # internally by CUDA SM + precision below.
     p.add_argument("--calibration", help="FP8 calibration json or `uniform:SCALE` (random mode)")
-    p.add_argument("--tactics", type=pathlib.Path, help="BF16/FP8 tactics json (random mode)")
+    # Internal escape hatch for tactic generation/debugging. Normal benchmark
+    # runs select the repository's validated JSON from CUDA SM + precision.
+    p.add_argument("--tactics", type=pathlib.Path, help=argparse.SUPPRESS)
 
     # Architecture overrides — synthetic shapes. `--action-horizon` is the one
     # knob that also applies to a checkpoint (see below).
@@ -287,17 +340,12 @@ def main() -> None:
                 "--model-dir (they reshape synthetic weights; a checkpoint runs its "
                 "native config apart from --action-horizon)"
             )
-    # Synthetic BF16 and FP8 both use the exact-shape tactic store. Calibration
-    # remains FP8-only, while INT8 has no persisted tactic database. A checkpoint
-    # discovers both files from its model directory instead of these CLI knobs.
-    tuning_knobs = [
-        name for name, value in (("--tactics", args.tactics), ("--calibration", args.calibration))
-        if value is not None
-    ]
-    if checkpoint and tuning_knobs:
+    # Calibration remains a synthetic FP8 knob here. Tactics are selected below
+    # from CUDA SM + precision for both synthetic and checkpoint benchmarks.
+    if checkpoint and args.calibration is not None:
         raise SystemExit(
-            f"{', '.join(tuning_knobs)} only apply to synthetic weights (drop --model-dir); "
-            "a checkpoint loads calibration/tactics from its own directory"
+            "--calibration only applies to synthetic weights (drop --model-dir); "
+            "a checkpoint loads calibration.json from its model directory"
         )
     if args.calibration is not None and args.precision != "fp8":
         raise SystemExit("--calibration only applies to --precision fp8")
@@ -309,6 +357,9 @@ def main() -> None:
     observation = rgb = token_ids = noise = patches = None
 
     if in_process:
+        tactics = args.tactics or _default_tactics(args.device, args.precision)
+        if tactics is not None:
+            print(f"using {args.precision} tactics for {args.device}: {tactics}", file=sys.stderr)
         if random:
             from apxinf import Model
 
@@ -328,7 +379,7 @@ def main() -> None:
                 num_flow_steps=args.num_flow_steps if args.num_flow_steps is not None else 10,
                 max_token_len=args.max_token_len if args.max_token_len is not None else 200,
                 calibration=calibration,
-                tactics=str(args.tactics) if args.tactics is not None else None,
+                tactics=str(tactics) if tactics is not None else None,
                 seed=args.seed,
             )
             if "l2" in layers:
@@ -379,6 +430,7 @@ def main() -> None:
                 args.model_dir,
                 device=args.device,
                 precision=args.precision,
+                tactics=tactics,
                 action_dim=(args.action_dim or None),
                 action_horizon=args.action_horizon,
             )
@@ -448,6 +500,8 @@ def main() -> None:
             result["model_dir"] = str(args.model_dir)
             result["workload"]["prompt"] = args.prompt
             result["workload"]["deploy_action_dim"] = policy.action_dim
+        if tactics is not None:
+            result["tactics"] = str(tactics)
     if in_process_report:
         result["layers_ms"] = in_process_report
         result["raw_ms"] = {layer_names[layer]: ms for layer, ms in in_process_raw.items()}
