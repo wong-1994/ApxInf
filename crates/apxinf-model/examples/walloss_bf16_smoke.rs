@@ -1,0 +1,66 @@
+use std::path::PathBuf;
+use std::time::Instant;
+
+use apxinf_core::{DType, Device, Tensor};
+use apxinf_model::{
+    AutoModel, LoadOptions, ModelPrecision, Observation, VisionObservation, VlaRequest,
+    WallossConfig,
+};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let checkpoint = std::env::args_os()
+        .nth(1)
+        .map(PathBuf::from)
+        .ok_or("usage: walloss_bf16_smoke CHECKPOINT")?;
+    let config = WallossConfig::from_json_file(&checkpoint.join("config.json"))?;
+    let image_tokens_per_view = (18 / config.vision.spatial_merge_size).pow(2);
+    let mut token_ids = vec![1, config.vision_start_token_id];
+    token_ids.extend(std::iter::repeat_n(
+        config.image_token_id,
+        image_tokens_per_view,
+    ));
+    token_ids.extend([config.vision_end_token_id, 2, config.vision_start_token_id]);
+    token_ids.extend(std::iter::repeat_n(
+        config.image_token_id,
+        image_tokens_per_view,
+    ));
+    token_ids.extend([config.vision_end_token_id, 3]);
+    token_ids.extend(std::iter::repeat_n(4, config.action.action_horizon));
+
+    let patch_rows = 2 * 18 * 18;
+    let patch_width = 3
+        * config.vision.temporal_patch_size
+        * config.vision.patch_size
+        * config.vision.patch_size;
+    let observation = Observation {
+        vision: VisionObservation::Patches(Tensor::zeros(
+            (patch_rows, patch_width),
+            DType::F32,
+        )),
+        token_ids,
+        state: None,
+        action_mask: None,
+    };
+    let latent = Tensor::zeros(
+        (config.action.action_horizon, config.action.action_dim),
+        DType::F32,
+    );
+    let options = LoadOptions {
+        model_name: Some("walloss".into()),
+        precision: ModelPrecision::Bf16,
+        ..LoadOptions::default()
+    };
+    let load_start = Instant::now();
+    let model = AutoModel::load_model(Device::Cuda(0), &checkpoint, &options)?;
+    eprintln!("load_ms={:.3}", load_start.elapsed().as_secs_f64() * 1e3);
+    let request = VlaRequest::provided(&observation, &latent);
+    let infer_start = Instant::now();
+    let action = model.infer_host_f32(&request)?;
+    eprintln!(
+        "infer_ms={:.3} output={} finite={}",
+        infer_start.elapsed().as_secs_f64() * 1e3,
+        action.len(),
+        action.iter().all(|value| value.is_finite())
+    );
+    Ok(())
+}
