@@ -45,9 +45,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (config.action.action_horizon, config.action.action_dim),
         DType::F32,
     );
+    let fp8_scale = std::env::var("APXINF_WALLOSS_FP8_SCALE")
+        .ok()
+        .map(|value| value.parse::<f32>())
+        .transpose()?;
     let options = LoadOptions {
         model_name: Some("walloss".into()),
-        precision: ModelPrecision::Bf16,
+        precision: if fp8_scale.is_some() {
+            ModelPrecision::Fp8
+        } else {
+            ModelPrecision::Bf16
+        },
+        uniform_fp8_scale: fp8_scale,
         ..LoadOptions::default()
     };
     let load_start = Instant::now();
