@@ -2,10 +2,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use apxinf_core::{DType, Device, Tensor};
+use apxinf_model::walloss::WallossConfig;
 use apxinf_model::{
     AutoModel, LoadOptions, ModelPrecision, Observation, VisionObservation, VlaRequest,
 };
-use apxinf_model::walloss::WallossConfig;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let checkpoint = std::env::args_os()
@@ -28,15 +28,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     token_ids.extend(std::iter::repeat_n(4, config.action.action_horizon));
 
     let patch_rows = 2 * 18 * 18;
-    let patch_width = 3
-        * config.vision.temporal_patch_size
-        * config.vision.patch_size
-        * config.vision.patch_size;
+    let patch_width =
+        3 * config.vision.temporal_patch_size * config.vision.patch_size * config.vision.patch_size;
     let observation = Observation {
-        vision: VisionObservation::Patches(Tensor::zeros(
-            (patch_rows, patch_width),
-            DType::F32,
-        )),
+        vision: VisionObservation::Patches(Tensor::zeros((patch_rows, patch_width), DType::F32)),
         token_ids,
         state: None,
         action_mask: None,
@@ -93,6 +88,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if profile && run == 2 {
             apxinf_cuda::profiler::stop().map_err(std::io::Error::other)?;
         }
+    }
+    if let (Some(path), Some(action)) = (
+        std::env::var_os("APXINF_WALLOSS_OUTPUT_PATH"),
+        reference.as_ref(),
+    ) {
+        let bytes = action
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        std::fs::write(path, bytes)?;
     }
     Ok(())
 }

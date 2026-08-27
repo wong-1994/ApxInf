@@ -1,5 +1,5 @@
 use apxinf_core::{Backend, DType, Result, Shape, Tensor};
-use half::f16;
+use half::{bf16, f16};
 
 use crate::buffer::CudaBuffer;
 use crate::context::CudaContext;
@@ -68,6 +68,102 @@ fn gpu_ptr(tensor: &Tensor) -> Result<*mut std::ffi::c_void> {
     Ok(CudaBuffer::from_tensor(tensor)
         .map_err(apxinf_core::Error::Cuda)?
         .ptr())
+}
+
+#[test]
+fn fused_gqa_qkv_mrope_cache_matches_composed_kernels() {
+    const TOKENS: usize = 3;
+    const CACHE_TOKENS: usize = 5;
+    const Q_HEADS: usize = 4;
+    const KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 8;
+    const WIDTH: usize = (Q_HEADS + 2 * KV_HEADS) * HEAD_DIM;
+    let backend = CudaBackend::new(0).unwrap();
+    let values = (0..TOKENS * WIDTH)
+        .map(|index| bf16::from_f32((index as f32 - 71.0) / 53.0))
+        .collect::<Vec<_>>();
+    let bias = (0..WIDTH)
+        .map(|index| bf16::from_f32((index as f32 - 19.0) / 97.0))
+        .collect::<Vec<_>>();
+    let qkv = backend
+        .to_device(&Tensor::from_bf16(vec![TOKENS, WIDTH], &values).unwrap())
+        .unwrap();
+    let bias = backend
+        .to_device(&Tensor::from_bf16(vec![WIDTH], &bias).unwrap())
+        .unwrap();
+    let positions = [2u32, 3, 5, 7, 11, 13, 17, 19, 23];
+    let position_bytes = positions
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect::<Vec<_>>();
+    let position_ids = CudaBuffer::alloc(position_bytes.len(), backend.device_id()).unwrap();
+    position_ids.copy_from_host(&position_bytes).unwrap();
+
+    let split = split_gqa_qkv_bias_bf16(
+        backend.context(),
+        &qkv,
+        Some(&bias),
+        Q_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+    )
+    .unwrap();
+    let reference_q = crate::kernels::rope::apply_mrope(
+        backend.context(),
+        &split.q,
+        Q_HEADS,
+        HEAD_DIM,
+        10_000.0,
+        [2, 1, 1],
+        &position_ids,
+    )
+    .unwrap();
+    let reference_k = crate::kernels::rope::apply_mrope(
+        backend.context(),
+        &split.k,
+        KV_HEADS,
+        HEAD_DIM,
+        10_000.0,
+        [2, 1, 1],
+        &position_ids,
+    )
+    .unwrap();
+    let fused = split_gqa_qkv_mrope_cache_bf16(
+        backend.context(),
+        &qkv,
+        Some(&bias),
+        &position_ids,
+        Q_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+        10_000.0,
+        [2, 1, 1],
+        CACHE_TOKENS,
+        None,
+    )
+    .unwrap();
+    backend.synchronize().unwrap();
+
+    let reference_q = backend.to_cpu(&reference_q).unwrap().to_f32_vec().unwrap();
+    let reference_k = backend.to_cpu(&reference_k).unwrap().to_f32_vec().unwrap();
+    let reference_v = backend.to_cpu(&split.v).unwrap().to_f32_vec().unwrap();
+    let fused_q = backend.to_cpu(&fused.q).unwrap().to_f32_vec().unwrap();
+    let fused_k = backend.to_cpu(&fused.k).unwrap().to_f32_vec().unwrap();
+    let fused_v = backend.to_cpu(&fused.v).unwrap().to_f32_vec().unwrap();
+    let kv_elements = TOKENS * KV_HEADS * HEAD_DIM;
+    let q_max_error = fused_q
+        .iter()
+        .zip(&reference_q)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0f32, f32::max);
+    let k_max_error = fused_k[..kv_elements]
+        .iter()
+        .zip(&reference_k)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0f32, f32::max);
+    eprintln!("fused QKV mRoPE max error: q={q_max_error}, k={k_max_error}");
+    assert!(q_max_error <= 0.03 && k_max_error <= 0.03);
+    assert_eq!(&fused_v[..kv_elements], reference_v.as_slice());
 }
 
 fn make_gpu_tensor(shape: Shape, dtype: DType, _device: usize, buffer: CudaBuffer) -> Tensor {

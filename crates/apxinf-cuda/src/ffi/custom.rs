@@ -579,6 +579,23 @@ extern "C" {
         kv_width: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub fn apxinf_static_gqa_qkv_mrope_cache_bf16(
+        qkv: *const c_void,
+        bias: *const c_void,
+        position_ids: *const u32,
+        q: *mut c_void,
+        k_cache: *mut c_void,
+        v_cache: *mut c_void,
+        tokens: i32,
+        q_heads: i32,
+        kv_heads: i32,
+        head_dim: i32,
+        theta: f32,
+        section_h: i32,
+        section_w: i32,
+        cache_offset: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_static_mqa_bf16(
         q: *const c_void,
         k: *const c_void,

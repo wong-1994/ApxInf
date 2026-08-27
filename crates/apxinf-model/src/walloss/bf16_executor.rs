@@ -330,13 +330,13 @@ pub struct LanguageLayerOutput {
 
 pub struct ActionLayerOutput {
     pub hidden: Tensor,
-    pub key: Tensor,
-    pub value: Tensor,
 }
 
 pub struct PrefixCache {
     pub keys: Vec<Tensor>,
     pub values: Vec<Tensor>,
+    pub prefix_tokens: usize,
+    pub cache_tokens: usize,
 }
 
 pub(super) fn language_prefix<W: TransformerWeights>(
@@ -349,6 +349,7 @@ pub(super) fn language_prefix<W: TransformerWeights>(
     vision_row_map: &DeviceBuffer,
     position_ids: &DeviceBuffer,
     tokens: usize,
+    cache_tokens: usize,
 ) -> Result<PrefixCache> {
     let embedded = kernels::embedding::lookup_bf16(context, token_embedding, token_ids, tokens)?;
     let mut hidden =
@@ -356,12 +357,17 @@ pub(super) fn language_prefix<W: TransformerWeights>(
     let mut keys = Vec::with_capacity(weights.len());
     let mut values = Vec::with_capacity(weights.len());
     for layer in weights {
-        let output = language_layer(context, config, layer, &hidden, position_ids)?;
+        let output = language_layer(context, config, layer, &hidden, position_ids, cache_tokens)?;
         hidden = output.hidden;
         keys.push(output.key);
         values.push(output.value);
     }
-    Ok(PrefixCache { keys, values })
+    Ok(PrefixCache {
+        keys,
+        values,
+        prefix_tokens: tokens,
+        cache_tokens,
+    })
 }
 
 fn language_layer<W: TransformerWeights>(
@@ -370,6 +376,7 @@ fn language_layer<W: TransformerWeights>(
     weights: &W,
     input: &Tensor,
     position_ids: &DeviceBuffer,
+    cache_tokens: usize,
 ) -> Result<LanguageLayerOutput> {
     let tokens = input.shape().dims()[0];
     let qkv = qkv_after_rms(
@@ -379,33 +386,20 @@ fn language_layer<W: TransformerWeights>(
         config.rms_norm_eps,
         weights.qkv(),
     )?;
-    let qkv = kernels::attention::split_gqa_qkv_bias_bf16(
+    let qkv = kernels::attention::split_gqa_qkv_mrope_cache_bf16(
         context,
         &qkv,
         Some(weights.qkv_bias()),
-        config.num_attention_heads,
-        config.num_kv_heads,
-        config.head_dim,
-    )?;
-    let q = kernels::rope::apply_mrope(
-        context,
-        &qkv.q,
-        config.num_attention_heads,
-        config.head_dim,
-        config.rope_theta,
-        config.mrope_section,
         position_ids,
-    )?;
-    let k = kernels::rope::apply_mrope(
-        context,
-        &qkv.k,
+        config.num_attention_heads,
         config.num_kv_heads,
         config.head_dim,
         config.rope_theta,
         config.mrope_section,
-        position_ids,
+        cache_tokens,
+        None,
     )?;
-    let attention = kernels::attention::causal_gqa_bf16(context, &q, &k, &qkv.v, tokens)?
+    let attention = kernels::attention::causal_gqa_bf16(context, &qkv.q, &qkv.k, &qkv.v, tokens)?
         .reshape(vec![tokens, config.num_attention_heads * config.head_dim])?;
     let hidden = residual_mlp(
         context,
@@ -422,7 +416,7 @@ fn language_layer<W: TransformerWeights>(
     )?;
     Ok(LanguageLayerOutput {
         hidden,
-        key: k,
+        key: qkv.k,
         value: qkv.v,
     })
 }
@@ -435,11 +429,11 @@ fn action_layer<W: TransformerWeights>(
     input: &Tensor,
     prefix_key: &Tensor,
     prefix_value: &Tensor,
+    prefix_tokens: usize,
+    cache_tokens: usize,
     action_position_ids: &DeviceBuffer,
 ) -> Result<ActionLayerOutput> {
     let action_tokens = input.shape().dims()[0];
-    let prefix_tokens = prefix_key.shape().dims()[0];
-    let kv_width = config.num_kv_heads * config.head_dim;
     let qkv = qkv_after_rms(
         context,
         input,
@@ -447,63 +441,25 @@ fn action_layer<W: TransformerWeights>(
         config.rms_norm_eps,
         weights.qkv(),
     )?;
-    let qkv = kernels::attention::split_gqa_qkv_bias_bf16(
+    let qkv = kernels::attention::split_gqa_qkv_mrope_cache_bf16(
         context,
         &qkv,
         Some(weights.qkv_bias()),
-        config.num_attention_heads,
-        config.num_kv_heads,
-        config.head_dim,
-    )?;
-    let q = kernels::rope::apply_mrope(
-        context,
-        &qkv.q,
-        config.num_attention_heads,
-        config.head_dim,
-        config.rope_theta,
-        config.mrope_section,
         action_position_ids,
-    )?;
-    let action_key = kernels::rope::apply_mrope(
-        context,
-        &qkv.k,
+        config.num_attention_heads,
         config.num_kv_heads,
         config.head_dim,
         config.rope_theta,
         config.mrope_section,
-        action_position_ids,
+        cache_tokens,
+        Some((prefix_key, prefix_value, prefix_tokens)),
     )?;
-    let key = kernels::elementwise::concat_rows_bf16(
-        context,
-        &prefix_key.reshape(vec![prefix_tokens, kv_width])?,
-        &action_key.reshape(vec![action_tokens, kv_width])?,
-    )?
-    .reshape(vec![
-        prefix_tokens + action_tokens,
-        config.num_kv_heads,
-        config.head_dim,
-    ])?;
-    let value = kernels::elementwise::concat_rows_bf16(
-        context,
-        &prefix_value.reshape(vec![prefix_tokens, kv_width])?,
-        &qkv.v.reshape(vec![action_tokens, kv_width])?,
-    )?
-    .reshape(vec![
-        prefix_tokens + action_tokens,
-        config.num_kv_heads,
-        config.head_dim,
-    ])?;
-    let attention = kernels::attention::causal_gqa_bf16(
-        context,
-        &q,
-        &key,
-        &value,
-        prefix_tokens + action_tokens,
-    )?
-    .reshape(vec![
-        action_tokens,
-        config.num_attention_heads * config.head_dim,
-    ])?;
+    let attention =
+        kernels::attention::causal_gqa_bf16(context, &qkv.q, &qkv.k, &qkv.v, cache_tokens)?
+            .reshape(vec![
+                action_tokens,
+                config.num_attention_heads * config.head_dim,
+            ])?;
     let hidden = residual_mlp(
         context,
         &attention,
@@ -517,11 +473,7 @@ fn action_layer<W: TransformerWeights>(
         None,
         config.rms_norm_eps,
     )?;
-    Ok(ActionLayerOutput {
-        hidden,
-        key: action_key,
-        value: qkv.v,
-    })
+    Ok(ActionLayerOutput { hidden })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -559,6 +511,8 @@ pub(super) fn action_stack<W: TransformerWeights>(
             &hidden,
             &prefix.keys[index],
             &prefix.values[index],
+            prefix.prefix_tokens,
+            prefix.cache_tokens,
             action_position_ids,
         )?
         .hidden;

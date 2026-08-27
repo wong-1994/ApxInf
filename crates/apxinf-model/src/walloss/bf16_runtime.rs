@@ -96,9 +96,8 @@ impl WallossPreparedInference {
         }
 
         let inputs = self.upload_inputs(&host)?;
-        let eager_output = kernels::prepare_with_workspace(&self.workspace, || {
-            self.execute(&inputs)
-        })?;
+        let eager_output =
+            kernels::prepare_with_workspace(&self.workspace, || self.execute(&inputs))?;
         self.backend.synchronize()?;
         drop(eager_output);
 
@@ -129,19 +128,21 @@ impl WallossPreparedInference {
                 observation.inference_spec()
             )));
         }
-        let patches = match &observation.vision {
-            VisionObservation::Patches(value) => normalize_host_bf16(
-                value,
-                vec![self.geometry.patch_order.len() / 4, patch_width(&self.config)],
-                "patches",
-            )?,
-            VisionObservation::RgbU8 { .. } => {
-                return Err(Error::Other(
+        let patches =
+            match &observation.vision {
+                VisionObservation::Patches(value) => normalize_host_bf16(
+                    value,
+                    vec![
+                        self.geometry.patch_order.len() / 4,
+                        patch_width(&self.config),
+                    ],
+                    "patches",
+                )?,
+                VisionObservation::RgbU8 { .. } => return Err(Error::Other(
                     "walloss raw RGB preprocessing is not connected yet; pass preprocessed patches"
                         .into(),
-                ))
-            }
-        };
+                )),
+            };
         let action_tokens = self.config.action.action_horizon;
         let prefix_tokens = observation.token_ids.len() - action_tokens;
         let prefix_ids = observation.token_ids[..prefix_tokens].to_vec();
@@ -194,10 +195,7 @@ impl WallossPreparedInference {
         )?;
         let mut time_embeddings = Vec::with_capacity(self.config.action.solver_steps);
         for &time in times.iter().take(self.config.action.solver_steps) {
-            let embedding = sinusoidal_time_embedding(
-                time,
-                self.config.action.hidden_size,
-            )?;
+            let embedding = sinusoidal_time_embedding(time, self.config.action.hidden_size)?;
             let repeated = embedding
                 .iter()
                 .copied()
@@ -320,6 +318,7 @@ impl WallossPreparedInference {
             &inputs.vision_row_map,
             &inputs.prefix_position_ids,
             inputs.prefix_tokens,
+            inputs.prefix_tokens + self.config.action.action_horizon,
         )?;
         let times = solver_times(
             self.config.action.solver_steps,
@@ -365,15 +364,16 @@ impl WallossBf16Runtime {
             ));
         }
         let noise_host = Tensor::zeros(
-            (self.config.action.action_horizon, self.config.action.action_dim),
+            (
+                self.config.action.action_horizon,
+                self.config.action.action_dim,
+            ),
             DType::BF16,
         );
         let noise = self.backend.to_device(&noise_host)?;
         let normal_generator = self.backend.create_normal_generator(noise.clone())?;
-        let workspace = kernels::GraphWorkspace::new(
-            BF16_WORKSPACE_BYTES,
-            self.backend.context().device_id(),
-        )?;
+        let workspace =
+            kernels::GraphWorkspace::new(BF16_WORKSPACE_BYTES, self.backend.context().device_id())?;
         Ok(WallossPreparedInference {
             spec,
             backend: Arc::clone(&self.backend),
