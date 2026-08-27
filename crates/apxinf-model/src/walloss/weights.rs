@@ -56,8 +56,6 @@ pub struct WallossVisionBlockWeights {
 }
 
 pub struct WallossActionWeights {
-    pub proprioception_projection: Tensor,
-    pub proprioception_mask_projection: Tensor,
     pub noisy_action_projection: Tensor,
     pub dof_projection: Tensor,
     pub action_projection: Tensor,
@@ -212,14 +210,6 @@ impl WallossVisionBlockWeights {
 impl WallossActionWeights {
     fn to_bf16_device(&self, backend: &dyn Backend) -> Result<Self> {
         Ok(Self {
-            proprioception_projection: bf16_to_device(
-                &self.proprioception_projection,
-                backend,
-            )?,
-            proprioception_mask_projection: bf16_to_device(
-                &self.proprioception_mask_projection,
-                backend,
-            )?,
             noisy_action_projection: bf16_to_device(&self.noisy_action_projection, backend)?,
             dof_projection: bf16_to_device(&self.dof_projection, backend)?,
             action_projection: bf16_to_device(&self.action_projection, backend)?,
@@ -364,16 +354,10 @@ fn load_action(
 ) -> Result<WallossActionWeights> {
     let width = config.action.hidden_size;
     let dim = config.action.action_dim;
-    let proprio_source = take(tensors, "action_preprocessor.propri_proj.weight")?;
     let noisy_action_projection = take(tensors, "action_preprocessor.w1.weight")?;
     let action_time_projection = take(tensors, "action_preprocessor.w2.weight")?;
     let action_embedding_projection = take(tensors, "action_preprocessor.w3.weight")?;
     let velocity_projection = take(tensors, "action_preprocessor.action_proj_back.weight")?;
-    expect_shape(
-        &proprio_source,
-        &[config.action.state_hidden_size, 2 * config.action.proprio_dim],
-        "proprioception projection",
-    )?;
     expect_shape(
         &noisy_action_projection,
         &[width, 2 * dim],
@@ -391,14 +375,8 @@ fn load_action(
     )?;
     expect_shape(&velocity_projection, &[dim, width], "velocity projection")?;
     let (noisy_action_projection, dof_projection) = split_columns(&noisy_action_projection, dim)?;
-    let (proprioception_projection, proprioception_mask_projection) =
-        split_columns(&proprio_source, config.action.proprio_dim)?;
     let (action_projection, time_projection) = split_columns(&action_time_projection, width)?;
     Ok(WallossActionWeights {
-        proprioception_projection: to_bf16(&transpose_2d(&proprioception_projection)?)?,
-        proprioception_mask_projection: to_bf16(&transpose_2d(
-            &proprioception_mask_projection,
-        )?)?,
         noisy_action_projection: to_bf16(&transpose_2d(&noisy_action_projection)?)?,
         dof_projection: to_bf16(&transpose_2d(&dof_projection)?)?,
         action_projection: to_bf16(&transpose_2d(&action_projection)?)?,
