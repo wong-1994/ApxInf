@@ -54,13 +54,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = AutoModel::load_model(Device::Cuda(0), &checkpoint, &options)?;
     eprintln!("load_ms={:.3}", load_start.elapsed().as_secs_f64() * 1e3);
     let request = VlaRequest::provided(&observation, &latent);
-    let infer_start = Instant::now();
-    let action = model.infer_host_f32(&request)?;
-    eprintln!(
-        "infer_ms={:.3} output={} finite={}",
-        infer_start.elapsed().as_secs_f64() * 1e3,
-        action.len(),
-        action.iter().all(|value| value.is_finite())
-    );
+    for run in 0..4 {
+        let infer_start = Instant::now();
+        let action = model.infer_host_f32(&request)?;
+        eprintln!(
+            "infer_run={} infer_ms={:.3} output={} finite={}",
+            run + 1,
+            infer_start.elapsed().as_secs_f64() * 1e3,
+            action.len(),
+            action.iter().all(|value| value.is_finite())
+        );
+    }
     Ok(())
 }
