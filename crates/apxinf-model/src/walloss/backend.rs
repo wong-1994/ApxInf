@@ -1,5 +1,3 @@
 //! CUDA-facing seam for the Walloss runtime.
 
-pub(crate) use crate::accelerator::cuda::{
-    kernels, transfers, Context, DeviceBuffer, RuntimeBackend,
-};
+pub(crate) use crate::accelerator::cuda::{kernels, Context, DeviceBuffer, RuntimeBackend};

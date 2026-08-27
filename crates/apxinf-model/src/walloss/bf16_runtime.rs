@@ -202,7 +202,7 @@ impl WallossBf16Runtime {
             ));
         }
         let noise_host = Tensor::zeros(
-            [self.config.action.action_horizon, self.config.action.action_dim],
+            (self.config.action.action_horizon, self.config.action.action_dim),
             DType::BF16,
         );
         let noise = self.backend.to_device(&noise_host)?;
