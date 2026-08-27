@@ -54,7 +54,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = AutoModel::load_model(Device::Cuda(0), &checkpoint, &options)?;
     eprintln!("load_ms={:.3}", load_start.elapsed().as_secs_f64() * 1e3);
     let request = VlaRequest::provided(&observation, &latent);
+    let profile = std::env::var_os("APXINF_PROFILE_RUN").is_some();
     for run in 0..4 {
+        if profile && run == 2 {
+            apxinf_cuda::profiler::start().map_err(std::io::Error::other)?;
+        }
         let infer_start = Instant::now();
         let action = model.infer_host_f32(&request)?;
         eprintln!(
@@ -64,6 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             action.len(),
             action.iter().all(|value| value.is_finite())
         );
+        if profile && run == 2 {
+            apxinf_cuda::profiler::stop().map_err(std::io::Error::other)?;
+        }
     }
     Ok(())
 }
