@@ -985,7 +985,7 @@ pub fn mha_bf16(
             "static inference BF16 MHA shape mismatch".into(),
         ));
     }
-    #[cfg(apxinf_fa2_sm80)]
+    #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
     {
         return fa2_attention(
             ctx,
@@ -1000,7 +1000,10 @@ pub fn mha_bf16(
             shape[2],
         );
     }
-    #[cfg(apxinf_cutlass_fmha)]
+    #[cfg(all(
+        apxinf_cutlass_fmha,
+        not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))
+    ))]
     if tokens_per_batch == 256 && shape[1] == 16 && shape[2] == 72 {
         let output = output_buffer(ctx, q.size_in_bytes())?;
         unsafe {
@@ -1051,9 +1054,9 @@ pub fn mha_bf16(
             ));
         }
     }
-    #[cfg(not(apxinf_fa2_sm80))]
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
     let output = output_buffer(ctx, q.size_in_bytes())?;
-    #[cfg(not(apxinf_fa2_sm80))]
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
     unsafe {
         ffi::check_cuda(ffi::apxinf_static_mha_bf16(
             gpu_ptr(q)?,
@@ -1068,7 +1071,7 @@ pub fn mha_bf16(
         ))
         .map_err(Error::Cuda)?;
     }
-    #[cfg(not(apxinf_fa2_sm80))]
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
     Ok(make_gpu_tensor(
         q.shape().clone(),
         DType::BF16,
@@ -1083,6 +1086,7 @@ pub fn segmented_mha_bf16(
     k: &Tensor,
     v: &Tensor,
     offsets: &crate::buffer::CudaBuffer,
+    host_offsets: &[u32],
     segments: usize,
     max_tokens: usize,
 ) -> Result<Tensor> {
@@ -1094,6 +1098,7 @@ pub fn segmented_mha_bf16(
         || k.shape() != q.shape()
         || v.shape() != q.shape()
         || segments == 0
+        || host_offsets.len() != segments + 1
         || max_tokens == 0
         || shape[2] > 256
     {
@@ -1106,7 +1111,47 @@ pub fn segmented_mha_bf16(
         "segmented BF16 MHA",
         &[("offsets", offsets, (segments + 1) * std::mem::size_of::<u32>())],
     )?;
+    #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
+    {
+        let output = output_buffer(ctx, q.size_in_bytes())?;
+        let softmax_lse = output_buffer(
+            ctx,
+            shape[0] * shape[1] * std::mem::size_of::<f32>(),
+        )?;
+        let row_bytes = shape[1] * shape[2] * DType::BF16.size_in_bytes();
+        let lse_row_bytes = shape[1] * std::mem::size_of::<f32>();
+        for bounds in host_offsets.windows(2) {
+            let start = bounds[0] as usize;
+            let tokens = (bounds[1] - bounds[0]) as usize;
+            unsafe {
+                ffi::check_cuda(ffi::apxinf_static_fa2_bf16(
+                    gpu_ptr(q)?.cast::<u8>().add(start * row_bytes).cast(),
+                    gpu_ptr(k)?.cast::<u8>().add(start * row_bytes).cast(),
+                    gpu_ptr(v)?.cast::<u8>().add(start * row_bytes).cast(),
+                    output.ptr().cast::<u8>().add(start * row_bytes).cast(),
+                    softmax_lse.ptr().cast::<u8>().add(start * lse_row_bytes).cast(),
+                    1,
+                    tokens as i32,
+                    tokens as i32,
+                    shape[1] as i32,
+                    shape[1] as i32,
+                    shape[2] as i32,
+                    (shape[2] as f32).sqrt().recip(),
+                    ctx.stream().handle(),
+                ))
+                .map_err(Error::Cuda)?;
+            }
+        }
+        return Ok(make_gpu_tensor(
+            q.shape().clone(),
+            DType::BF16,
+            ctx.device_id(),
+            output,
+        ));
+    }
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
     let output = output_buffer(ctx, q.size_in_bytes())?;
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
     unsafe {
         ffi::check_cuda(ffi::apxinf_static_segmented_mha_bf16(
             gpu_ptr(q)?,
@@ -1122,6 +1167,7 @@ pub fn segmented_mha_bf16(
         ))
         .map_err(Error::Cuda)?;
     }
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
     Ok(make_gpu_tensor(
         q.shape().clone(),
         DType::BF16,

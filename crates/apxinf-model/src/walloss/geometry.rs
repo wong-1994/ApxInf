@@ -126,6 +126,8 @@ impl VisionGeometry {
             full_segments: self.full_offsets.len() - 1,
             max_window_tokens: self.max_window_tokens,
             max_full_tokens: self.max_full_tokens,
+            host_window_offsets: self.window_offsets.clone(),
+            host_full_offsets: self.full_offsets.clone(),
         })
     }
 }
@@ -141,6 +143,8 @@ pub struct DeviceVisionGeometry {
     pub full_segments: usize,
     pub max_window_tokens: usize,
     pub max_full_tokens: usize,
+    pub host_window_offsets: Vec<u32>,
+    pub host_full_offsets: Vec<u32>,
 }
 
 #[cfg(feature = "cuda")]

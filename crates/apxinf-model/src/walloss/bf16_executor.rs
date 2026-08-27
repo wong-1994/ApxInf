@@ -271,6 +271,7 @@ pub fn vision_layer(
     input: &Tensor,
     position_ids: &DeviceBuffer,
     attention_offsets: &DeviceBuffer,
+    host_attention_offsets: &[u32],
     segments: usize,
     max_segment_tokens: usize,
 ) -> Result<Tensor> {
@@ -312,6 +313,7 @@ pub fn vision_layer(
         &k,
         &qkv.v,
         attention_offsets,
+        host_attention_offsets,
         segments,
         max_segment_tokens,
     )?
@@ -353,15 +355,17 @@ pub fn vision_tower(
     let mut hidden = kernels::gemm::bf16(context, &ordered_patches, &weights.patch_projection)?;
     for (layer_index, block) in weights.blocks.iter().enumerate() {
         let full_attention = config.full_attention_blocks.contains(&layer_index);
-        let (offsets, segments, max_tokens) = if full_attention {
+        let (offsets, host_offsets, segments, max_tokens) = if full_attention {
             (
                 &geometry.full_offsets,
+                geometry.host_full_offsets.as_slice(),
                 geometry.full_segments,
                 geometry.max_full_tokens,
             )
         } else {
             (
                 &geometry.window_offsets,
+                geometry.host_window_offsets.as_slice(),
                 geometry.window_segments,
                 geometry.max_window_tokens,
             )
@@ -373,6 +377,7 @@ pub fn vision_tower(
             &hidden,
             &geometry.position_ids,
             offsets,
+            host_offsets,
             segments,
             max_tokens,
         )?;
