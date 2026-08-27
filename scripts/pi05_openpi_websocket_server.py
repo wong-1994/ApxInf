@@ -54,10 +54,7 @@ from apxinf.robots.presets import (  # noqa: E402
     get_robot_preset,
 )
 from apxinf.serving import WebsocketPolicyServer  # noqa: E402
-try:  # noqa: E402
-    from _pi05_tactics import select_pi05_tactics
-except ModuleNotFoundError:  # imported as a module in tests/tools
-    from scripts._pi05_tactics import select_pi05_tactics
+from apxinf._tactics import resolve_pi05_tactics  # noqa: E402
 
 DEFAULT_ROBOT = "franka_libero"
 
@@ -218,15 +215,16 @@ def main() -> None:
         "precision": args.precision,
         "policy": preset.name,
     }
-    tactics = select_pi05_tactics(
-        args.device, args.precision, _REPO_ROOT, override=args.tactics
-    )
-    if tactics is not None:
-        logging.info("using %s tactics for %s: %s", args.precision, args.device, tactics)
-
     if args.random_weights:
         import apxinf_py  # lazy: only the synthetic path needs the CUDA binding here
 
+        # Random engines bypass Pi05Policy.from_pretrained, so this synthetic
+        # server is the sole caller that must resolve the package default.
+        tactics = resolve_pi05_tactics(
+            args.device, args.precision, override=args.tactics
+        )
+        if tactics is not None:
+            logging.info("using %s tactics for %s: %s", args.precision, args.device, tactics)
         # Synthetic FP8 has no calibration file; a uniform activation scale keeps the
         # FP8 path on. bf16/int8 need neither calibration nor tactics.
         calibration = None
@@ -300,7 +298,7 @@ def main() -> None:
             device=args.device,
             precision=args.precision,
             calibration=args.calibration,
-            tactics=tactics,
+            tactics=args.tactics,
             tokenizer_path=args.tokenizer,
             norm_key=args.norm_key,
             action_horizon=args.action_horizon,

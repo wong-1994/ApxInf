@@ -59,15 +59,12 @@ import time
 
 import numpy as np
 
-try:
-    from _pi05_tactics import select_pi05_tactics
-except ModuleNotFoundError:  # imported as ``scripts.bench_pi05`` in tests/tools
-    from scripts._pi05_tactics import select_pi05_tactics
-
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _APXINF_PKG = _REPO_ROOT / "python" / "apxinf"
 if _APXINF_PKG.is_dir() and str(_APXINF_PKG) not in sys.path:
     sys.path.insert(0, str(_APXINF_PKG))
+
+from apxinf._tactics import resolve_pi05_tactics
 
 # doc/pi05-cuda-regression.md primary/worst-case LIBERO prompts
 # (T = PaliGemma token count).
@@ -311,14 +308,19 @@ def main() -> None:
     observation = rgb = token_ids = noise = patches = None
 
     if in_process:
-        tactics = select_pi05_tactics(
-            args.device, args.precision, _REPO_ROOT, override=args.tactics
-        )
-        if tactics is not None:
-            print(f"using {args.precision} tactics for {args.device}: {tactics}", file=sys.stderr)
         if random:
             from apxinf import Model
 
+            # Random engines bypass Pi05Policy.from_pretrained, so this synthetic
+            # benchmark is the sole caller that must resolve the package default.
+            tactics = resolve_pi05_tactics(
+                args.device, args.precision, override=args.tactics
+            )
+            if tactics is not None:
+                print(
+                    f"using {args.precision} tactics for {args.device}: {tactics}",
+                    file=sys.stderr,
+                )
             calibration = args.calibration
             if args.precision == "fp8" and calibration is None:
                 # Synthetic FP8 has no calibration file; a uniform scale keeps the
@@ -386,7 +388,7 @@ def main() -> None:
                 args.model_dir,
                 device=args.device,
                 precision=args.precision,
-                tactics=tactics,
+                tactics=args.tactics,
                 action_dim=(args.action_dim or None),
                 action_horizon=args.action_horizon,
             )

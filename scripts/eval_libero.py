@@ -50,11 +50,6 @@ from typing import Optional, Protocol, Tuple
 import numpy as np
 from PIL import Image
 
-try:
-    from _pi05_tactics import select_pi05_tactics
-except ModuleNotFoundError:  # imported as ``scripts.eval_libero`` in tests/tools
-    from scripts._pi05_tactics import select_pi05_tactics
-
 # --- rollout protocol constants (OpenPI's public PI0.5 LIBERO configuration) ---
 LIBERO_ACTION_DIM = 7
 MAX_STEPS = 520
@@ -368,12 +363,6 @@ class InProcessBackend:
             sys.path.insert(0, str(package_dir))
         from apxinf import AutoPolicy
 
-        tactics = select_pi05_tactics(
-            args.device, args.precision, repo_root, override=args.tactics
-        )
-        if tactics is not None:
-            print(f"using {args.precision} tactics for {args.device}: {tactics}", file=sys.stderr)
-
         self._policy = AutoPolicy.from_pretrained(
             args.model_dir,
             model_type=args.model_type,
@@ -381,7 +370,7 @@ class InProcessBackend:
             device=args.device,
             precision=args.precision,
             calibration=args.calibration,
-            tactics=tactics,
+            tactics=args.tactics,
             tokenizer_path=args.tokenizer,
             norm_key=args.norm_key,
             action_dim=(args.action_dim or None),
