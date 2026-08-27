@@ -178,6 +178,38 @@ pub fn bias_residual_bf16(
     Ok(matrix_tensor(ctx, rows, cols, output))
 }
 
+pub fn bias_residual_f16_bf16(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    bias: Option<&Tensor>,
+    residual: &Tensor,
+) -> Result<Tensor> {
+    let (rows, cols) = matrix_shape(projection, "mixed bias residual")?;
+    if projection.dtype() != DType::F16
+        || residual.dtype() != DType::BF16
+        || residual.shape() != projection.shape()
+        || bias.is_some_and(|value| value.dtype() != DType::BF16 || value.shape().dims() != [cols])
+    {
+        return Err(Error::Other(
+            "static inference mixed bias residual has incompatible dtype or shape".into(),
+        ));
+    }
+    let output = bf16_output(ctx, rows, cols)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_bias_residual_f16_bf16(
+            gpu_ptr(projection)?,
+            optional_ptr(bias)?,
+            gpu_ptr(residual)?,
+            output.ptr(),
+            rows as i32,
+            cols as i32,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(matrix_tensor(ctx, rows, cols, output))
+}
+
 pub fn bias_residual_rms_bf16(
     ctx: &CudaContext,
     projection: &Tensor,
@@ -218,6 +250,60 @@ pub fn bias_residual_rms_bf16(
     Ok(ResidualNormTensors {
         hidden: matrix_tensor(ctx, rows, cols, hidden),
         normalized: matrix_tensor(ctx, rows, cols, normalized),
+    })
+}
+
+pub fn bias_residual_rms_quant_f16_bf16_e4m3(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    bias: Option<&Tensor>,
+    residual: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+    scale: f32,
+) -> Result<ResidualNormTensors> {
+    let (rows, cols) = matrix_shape(projection, "mixed residual RMSNorm quantization")?;
+    if projection.dtype() != DType::F16
+        || residual.dtype() != DType::BF16
+        || weight.dtype() != DType::BF16
+        || residual.shape() != projection.shape()
+        || weight.shape().dims() != [cols]
+        || bias.is_some_and(|value| value.dtype() != DType::BF16 || value.shape().dims() != [cols])
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        return Err(Error::Other(
+            "static inference mixed residual RMSNorm quantization has incompatible input".into(),
+        ));
+    }
+    let hidden = bf16_output(ctx, rows, cols)?;
+    let normalized = fp8_output(ctx, rows, cols)?;
+    unsafe {
+        ffi::check_cuda(
+            ffi::apxinf_static_bias_residual_rms_norm_quant_f16_bf16_e4m3(
+                gpu_ptr(projection)?,
+                optional_ptr(bias)?,
+                gpu_ptr(residual)?,
+                gpu_ptr(weight)?,
+                hidden.ptr(),
+                normalized.ptr(),
+                rows as i32,
+                cols as i32,
+                eps,
+                scale,
+                ctx.stream().handle(),
+            ),
+        )
+        .map_err(Error::Cuda)?;
+    }
+    Ok(ResidualNormTensors {
+        hidden: matrix_tensor(ctx, rows, cols, hidden),
+        normalized: make_gpu_tensor(
+            Shape::new(vec![rows, cols]),
+            DType::F8E4M3,
+            ctx.device_id(),
+            normalized,
+        ),
     })
 }
 

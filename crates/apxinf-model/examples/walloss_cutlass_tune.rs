@@ -265,6 +265,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "prefix_counts": prefix_counts,
             "tactics": tactics
         }))?
-    )?;
+    );
     Ok(())
 }

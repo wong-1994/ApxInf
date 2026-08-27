@@ -120,8 +120,12 @@ pub fn gelu_tanh(ctx: &CudaContext, input: &Tensor) -> Result<Tensor> {
     let count = input.numel() as u32;
     let out_buf = CudaBuffer::alloc_zeros(input.size_in_bytes(), device_id).map_err(Error::Cuda)?;
     unsafe {
-        let res =
-            ffi::apxinf_gelu_tanh_bf16(gpu_ptr(input)?, out_buf.ptr(), count, ctx.stream().handle());
+        let res = ffi::apxinf_gelu_tanh_bf16(
+            gpu_ptr(input)?,
+            out_buf.ptr(),
+            count,
+            ctx.stream().handle(),
+        );
         ffi::check_cuda(res).map_err(Error::Cuda)?;
     }
     Ok(make_gpu_tensor(
@@ -211,6 +215,50 @@ pub fn swiglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
         .map_err(Error::Cuda)?;
     }
     Ok(matrix_tensor(ctx, rows, inner, output))
+}
+
+pub fn swiglu_quant_f16_e4m3(
+    ctx: &CudaContext,
+    gate_up: &Tensor,
+    bias: Option<&Tensor>,
+    scale: f32,
+) -> Result<Tensor> {
+    let (rows, twice_inner) = matrix_shape(gate_up, "SwiGLU quantization")?;
+    if gate_up.dtype() != DType::F16 || twice_inner % 2 != 0 || !scale.is_finite() || scale <= 0.0 {
+        return Err(Error::Other(
+            "static inference quantized SwiGLU expects FP16 [rows,2*inner] and a positive scale"
+                .into(),
+        ));
+    }
+    let inner = twice_inner / 2;
+    if bias
+        .is_some_and(|value| value.dtype() != DType::BF16 || value.shape().dims() != [twice_inner])
+    {
+        return Err(Error::Other(
+            "static inference quantized SwiGLU bias must be BF16 [2*inner]".into(),
+        ));
+    }
+    let output = fp8_output(ctx, rows, inner)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_swiglu_quant_f16_e4m3(
+            gpu_ptr(gate_up)?,
+            bias.map(gpu_ptr)
+                .transpose()?
+                .unwrap_or(std::ptr::null_mut()),
+            output.ptr(),
+            rows as i32,
+            inner as i32,
+            scale,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(make_gpu_tensor(
+        Shape::new(vec![rows, inner]),
+        DType::F8E4M3,
+        ctx.device_id(),
+        output,
+    ))
 }
 pub fn bias_gelu_quant_f16_e4m3(
     ctx: &CudaContext,

@@ -323,6 +323,47 @@ pub fn rms_quant_f16_e4m3(
     ))
 }
 
+pub fn rms_quant_bf16_e4m3(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+    scale: f32,
+) -> Result<Tensor> {
+    let (rows, cols) = matrix_shape(input, "BF16 RMSNorm quantization")?;
+    if input.dtype() != DType::BF16
+        || weight.dtype() != DType::BF16
+        || weight.shape().dims() != [cols]
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        return Err(Error::Other(
+            "static inference BF16 RMSNorm quantization has incompatible dtype, shape, or scale"
+                .into(),
+        ));
+    }
+    let output = fp8_output(ctx, rows, cols)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_rms_norm_quant_bf16_e4m3(
+            gpu_ptr(input)?,
+            gpu_ptr(weight)?,
+            output.ptr(),
+            rows as i32,
+            cols as i32,
+            eps,
+            scale,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(make_gpu_tensor(
+        Shape::new(vec![rows, cols]),
+        DType::F8E4M3,
+        ctx.device_id(),
+        output,
+    ))
+}
+
 pub fn layer_quant_f16_e4m3(
     ctx: &CudaContext,
     input: &Tensor,

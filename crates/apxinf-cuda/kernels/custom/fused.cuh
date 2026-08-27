@@ -364,6 +364,20 @@ __global__ void bias_residual_bf16_kernel(
   }
 }
 
+__global__ void bias_residual_f16_bf16_kernel(
+    const half* projection, const __nv_bfloat16* bias,
+    const __nv_bfloat16* residual, __nv_bfloat16* output,
+    int64_t count, int cols) {
+  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; index < count; index += stride) {
+    float value = __half2float(projection[index]) +
+                  __bfloat162float(residual[index]);
+    if (bias != nullptr) value += __bfloat162float(bias[index % cols]);
+    output[index] = __float2bfloat16(value);
+  }
+}
+
 __global__ void bias_residual_rms_norm_bf16_kernel(
     const __nv_bfloat16* projection, const __nv_bfloat16* bias,
     const __nv_bfloat16* residual, const __nv_bfloat16* weight,
@@ -387,6 +401,34 @@ __global__ void bias_residual_rms_norm_bf16_kernel(
     const int64_t index = static_cast<int64_t>(row) * cols + col;
     normalized[index] = __float2bfloat16(
         __bfloat162float(hidden[index]) * inverse_rms * __bfloat162float(weight[col]));
+  }
+}
+
+__global__ void bias_residual_rms_norm_quant_f16_bf16_e4m3_kernel(
+    const half* projection, const __nv_bfloat16* bias,
+    const __nv_bfloat16* residual, const __nv_bfloat16* weight,
+    __nv_bfloat16* hidden, __nv_fp8_e4m3* normalized,
+    int rows, int cols, float eps, float inverse_scale) {
+  __shared__ float scratch[8];
+  const int row = blockIdx.x;
+  float square_sum = 0.0f;
+  for (int col = threadIdx.x; col < cols; col += blockDim.x) {
+    const int64_t index = static_cast<int64_t>(row) * cols + col;
+    float value = __half2float(projection[index]) +
+                  __bfloat162float(residual[index]);
+    if (bias != nullptr) value += __bfloat162float(bias[col]);
+    const __nv_bfloat16 rounded = __float2bfloat16(value);
+    hidden[index] = rounded;
+    value = __bfloat162float(rounded);
+    square_sum += value * value;
+  }
+  const float inverse_rms = rsqrtf(block_sum(square_sum, scratch) / cols + eps);
+  for (int col = threadIdx.x; col < cols; col += blockDim.x) {
+    const int64_t index = static_cast<int64_t>(row) * cols + col;
+    float value = __bfloat162float(hidden[index]) * inverse_rms *
+                  __bfloat162float(weight[col]) * inverse_scale;
+    value = fminf(448.0f, fmaxf(-448.0f, value));
+    normalized[index] = static_cast<__nv_fp8_e4m3>(value);
   }
 }
 
@@ -561,4 +603,3 @@ __global__ void gqa_qkv_split_bias_bf16_kernel(
     }
   }
 }
-

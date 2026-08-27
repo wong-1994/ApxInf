@@ -113,6 +113,27 @@ __global__ void bias_silu_f16_kernel(
   }
 }
 
+__global__ void swiglu_quant_f16_e4m3_kernel(
+    const half* gate_up, const __nv_bfloat16* bias,
+    __nv_fp8_e4m3* output, int rows, int inner, float inverse_scale) {
+  const int64_t count = static_cast<int64_t>(rows) * inner;
+  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; index < count; index += stride) {
+    const int col = index % inner;
+    const int64_t row_base = index - col;
+    float gate = __half2float(gate_up[row_base * 2 + col]);
+    float up = __half2float(gate_up[row_base * 2 + inner + col]);
+    if (bias != nullptr) {
+      gate += __bfloat162float(bias[col]);
+      up += __bfloat162float(bias[inner + col]);
+    }
+    float value = (gate / (1.0f + expf(-gate))) * up * inverse_scale;
+    value = fminf(448.0f, fmaxf(-448.0f, value));
+    output[index] = static_cast<__nv_fp8_e4m3>(value);
+  }
+}
+
 __global__ void geglu_quant_f16_e4m3_kernel(
     const half* gate_up, __nv_fp8_e4m3* output, int rows, int inner,
     float inverse_scale) {

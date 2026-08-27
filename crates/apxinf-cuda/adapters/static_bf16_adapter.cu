@@ -176,12 +176,41 @@ extern "C" cudaError_t apxinf_static_swiglu_bf16(
   return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_static_swiglu_quant_f16_e4m3(
+    const void* gate_up, const void* bias, void* output,
+    int rows, int inner, float scale, cudaStream_t stream) {
+  if (gate_up == nullptr || output == nullptr || rows <= 0 || inner <= 0 ||
+      !std::isfinite(scale) || scale <= 0.0f)
+    return cudaErrorInvalidValue;
+  const int64_t count = static_cast<int64_t>(rows) * inner;
+  swiglu_quant_f16_e4m3_kernel<<<blocks_for(count), kThreads, 0, stream>>>(
+      static_cast<const half*>(gate_up),
+      static_cast<const __nv_bfloat16*>(bias),
+      static_cast<__nv_fp8_e4m3*>(output), rows, inner, 1.0f / scale);
+  return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_static_bias_residual_bf16(
     const void* projection, const void* bias, const void* residual,
     void* output, int rows, int cols, cudaStream_t stream) {
   const int64_t count = static_cast<int64_t>(rows) * cols;
   bias_residual_bf16_kernel<<<blocks_for(count), kThreads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(projection),
+      static_cast<const __nv_bfloat16*>(bias),
+      static_cast<const __nv_bfloat16*>(residual),
+      static_cast<__nv_bfloat16*>(output), count, cols);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_static_bias_residual_f16_bf16(
+    const void* projection, const void* bias, const void* residual,
+    void* output, int rows, int cols, cudaStream_t stream) {
+  if (projection == nullptr || residual == nullptr || output == nullptr ||
+      rows <= 0 || cols <= 0)
+    return cudaErrorInvalidValue;
+  const int64_t count = static_cast<int64_t>(rows) * cols;
+  bias_residual_f16_bf16_kernel<<<blocks_for(count), kThreads, 0, stream>>>(
+      static_cast<const half*>(projection),
       static_cast<const __nv_bfloat16*>(bias),
       static_cast<const __nv_bfloat16*>(residual),
       static_cast<__nv_bfloat16*>(output), count, cols);
@@ -195,6 +224,19 @@ extern "C" cudaError_t apxinf_static_rms_norm_bf16(
       static_cast<const __nv_bfloat16*>(input),
       static_cast<const __nv_bfloat16*>(weight),
       static_cast<__nv_bfloat16*>(output), rows, cols, eps);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_static_rms_norm_quant_bf16_e4m3(
+    const void* input, const void* weight, void* output,
+    int rows, int cols, float eps, float scale, cudaStream_t stream) {
+  if (input == nullptr || weight == nullptr || output == nullptr ||
+      rows <= 0 || cols <= 0 || !std::isfinite(scale) || scale <= 0.0f)
+    return cudaErrorInvalidValue;
+  rms_norm_quant_bf16_e4m3_kernel<<<rows, kThreads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<const __nv_bfloat16*>(weight),
+      static_cast<__nv_fp8_e4m3*>(output), rows, cols, eps, 1.0f / scale);
   return cudaGetLastError();
 }
 
@@ -220,6 +262,25 @@ extern "C" cudaError_t apxinf_static_bias_residual_rms_norm_bf16(
       static_cast<const __nv_bfloat16*>(weight),
       static_cast<__nv_bfloat16*>(hidden),
       static_cast<__nv_bfloat16*>(normalized), rows, cols, eps);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_static_bias_residual_rms_norm_quant_f16_bf16_e4m3(
+    const void* projection, const void* bias, const void* residual,
+    const void* weight, void* hidden, void* normalized,
+    int rows, int cols, float eps, float scale, cudaStream_t stream) {
+  if (projection == nullptr || residual == nullptr || weight == nullptr ||
+      hidden == nullptr || normalized == nullptr || rows <= 0 || cols <= 0 ||
+      !std::isfinite(scale) || scale <= 0.0f)
+    return cudaErrorInvalidValue;
+  bias_residual_rms_norm_quant_f16_bf16_e4m3_kernel<<<
+      rows, kThreads, 0, stream>>>(
+      static_cast<const half*>(projection),
+      static_cast<const __nv_bfloat16*>(bias),
+      static_cast<const __nv_bfloat16*>(residual),
+      static_cast<const __nv_bfloat16*>(weight),
+      static_cast<__nv_bfloat16*>(hidden),
+      static_cast<__nv_fp8_e4m3*>(normalized), rows, cols, eps, 1.0f / scale);
   return cudaGetLastError();
 }
 
