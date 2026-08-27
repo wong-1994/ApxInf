@@ -164,6 +164,18 @@ extern "C" cudaError_t apxinf_static_geglu_bf16(
   return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_static_swiglu_bf16(
+    const void* gate_up, void* output, int rows, int inner,
+    cudaStream_t stream) {
+  const int64_t count = static_cast<int64_t>(rows) * inner;
+  if (gate_up == nullptr || output == nullptr || rows <= 0 || inner <= 0)
+    return cudaErrorInvalidValue;
+  swiglu_bf16_kernel<<<blocks_for(count), kThreads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(gate_up),
+      static_cast<__nv_bfloat16*>(output), rows, inner);
+  return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_static_bias_residual_bf16(
     const void* projection, const void* bias, const void* residual,
     void* output, int rows, int cols, cudaStream_t stream) {

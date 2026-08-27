@@ -346,6 +346,21 @@ __global__ void geglu_bf16_kernel(
   }
 }
 
+__global__ void swiglu_bf16_kernel(
+    const __nv_bfloat16* gate_up, __nv_bfloat16* output,
+    int rows, int inner) {
+  const int64_t count = static_cast<int64_t>(rows) * inner;
+  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; index < count; index += stride) {
+    const int row = static_cast<int>(index / inner);
+    const int col = static_cast<int>(index % inner);
+    const float gate = __bfloat162float(gate_up[static_cast<int64_t>(row) * 2 * inner + col]);
+    const float up = __bfloat162float(gate_up[static_cast<int64_t>(row) * 2 * inner + inner + col]);
+    output[index] = __float2bfloat16((gate / (1.0f + expf(-gate))) * up);
+  }
+}
+
 __global__ void geglu_bf16_packed2_kernel(
     const __nv_bfloat16* gate_up, __nv_bfloat16* output,
     int rows, int inner) {

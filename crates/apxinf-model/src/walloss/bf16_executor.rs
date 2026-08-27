@@ -108,7 +108,7 @@ pub fn language_layer(
         config.rms_norm_eps,
     )?;
     let gate_up = kernels::gemm::bf16(context, &fused.normalized, &weights.gate_up)?;
-    let activated = kernels::activation::geglu_bf16(context, &gate_up)?;
+    let activated = kernels::activation::swiglu_bf16(context, &gate_up)?;
     let down = kernels::gemm::bf16(context, &activated, &weights.down)?;
     let hidden = kernels::fused::bias_residual_bf16(context, &down, None, &fused.hidden)?;
     Ok(LanguageLayerOutput {
@@ -205,7 +205,7 @@ pub fn action_layer(
         config.rms_norm_eps,
     )?;
     let gate_up = kernels::gemm::bf16(context, &fused.normalized, &weights.gate_up)?;
-    let activated = kernels::activation::geglu_bf16(context, &gate_up)?;
+    let activated = kernels::activation::swiglu_bf16(context, &gate_up)?;
     let down = kernels::gemm::bf16(context, &activated, &weights.down)?;
     let hidden = kernels::fused::bias_residual_bf16(context, &down, None, &fused.hidden)?;
     Ok(ActionLayerOutput {
@@ -327,7 +327,7 @@ pub fn vision_layer(
     )?;
     let gate_up = kernels::gemm::bf16(context, &fused.normalized, &weights.gate_up)?;
     let gate_up = kernels::elementwise::bias_bf16(context, &gate_up, Some(&weights.gate_up_bias))?;
-    let activated = kernels::activation::geglu_bf16(context, &gate_up)?;
+    let activated = kernels::activation::swiglu_bf16(context, &gate_up)?;
     let down = kernels::gemm::bf16(context, &activated, &weights.down)?;
     kernels::fused::bias_residual_bf16(
         context,

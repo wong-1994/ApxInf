@@ -399,6 +399,13 @@ extern "C" {
         inner: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub fn apxinf_static_swiglu_bf16(
+        gate_up: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        inner: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_static_bias_residual_bf16(
         projection: *const c_void,
         bias: *const c_void,

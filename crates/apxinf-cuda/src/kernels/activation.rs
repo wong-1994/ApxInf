@@ -189,6 +189,28 @@ pub fn geglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
     }
     Ok(matrix_tensor(ctx, rows, inner, output))
 }
+
+pub fn swiglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
+    let (rows, twice_inner) = matrix_shape(gate_up, "SwiGLU")?;
+    if gate_up.dtype() != DType::BF16 || twice_inner % 2 != 0 {
+        return Err(Error::Other(
+            "static inference BF16 SwiGLU expects [rows,2*inner]".into(),
+        ));
+    }
+    let inner = twice_inner / 2;
+    let output = bf16_output(ctx, rows, inner)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_swiglu_bf16(
+            gpu_ptr(gate_up)?,
+            output.ptr(),
+            rows as i32,
+            inner as i32,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(matrix_tensor(ctx, rows, inner, output))
+}
 pub fn bias_gelu_quant_f16_e4m3(
     ctx: &CudaContext,
     input: &Tensor,
