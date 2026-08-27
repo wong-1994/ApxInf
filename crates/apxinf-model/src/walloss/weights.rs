@@ -208,7 +208,7 @@ impl WallossVisionBlockWeights {
 }
 
 impl WallossActionWeights {
-    fn to_bf16_device(&self, backend: &dyn Backend) -> Result<Self> {
+    pub(super) fn to_bf16_device(&self, backend: &dyn Backend) -> Result<Self> {
         Ok(Self {
             noisy_action_projection: bf16_to_device(&self.noisy_action_projection, backend)?,
             dof_projection: bf16_to_device(&self.dof_projection, backend)?,
@@ -223,7 +223,7 @@ impl WallossActionWeights {
     }
 }
 
-fn bf16_to_device(tensor: &Tensor, backend: &dyn Backend) -> Result<Tensor> {
+pub(super) fn bf16_to_device(tensor: &Tensor, backend: &dyn Backend) -> Result<Tensor> {
     if tensor.dtype() == DType::F8E4M3 {
         return Err(Error::Other(
             "walloss BF16 upload cannot decode scale-less FP8 data".into(),
