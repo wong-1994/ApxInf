@@ -9,6 +9,7 @@ use apxinf_core::{
     Backend, DType, Device, Error, Graph, NormalGenerator, Result, SamplingBackend, Tensor,
 };
 
+use crate::accelerator::cuda::tuning;
 use crate::auto::{LoadOptions, LoadedModel, ModelPrecision};
 use crate::vla::{
     Action, InferenceSpec, InitialLatent, PreparedInference, VisionObservation, VlaRequest,
@@ -434,6 +435,14 @@ pub(super) fn load_registered(
     };
     let mut config = WallossConfig::from_json_file(&root.join("config.json"))?;
     let host_weights = WallossWeights::from_safetensors(&mut config, path)?;
+    let tuning_path = options.tuning_path.clone().or_else(|| {
+        let candidate = root.join("tactics.json");
+        candidate.is_file().then_some(candidate)
+    });
+    if let Some(path) = tuning_path.as_deref() {
+        let database = tuning::TuningDb::from_json_file(path)?;
+        crate::accelerator::cuda::kernels::gemm::install_tuning_db(backend.context(), &database)?;
+    }
     let weights = match options.precision {
         ModelPrecision::Fp8 => {
             let activation_scale = options.uniform_fp8_scale.ok_or_else(|| {
