@@ -14,6 +14,7 @@ use crate::vla::{
 };
 
 use super::backend::{DeviceBuffer, RuntimeBackend};
+use super::backend::kernels;
 use super::bf16_executor::{action_stack, language_prefix, solver_update, vision_tower};
 use super::{
     multimodal_position_ids, sinusoidal_time_embedding, solver_times, DeviceVisionGeometry,
@@ -21,6 +22,7 @@ use super::{
 };
 
 const DEFAULT_GRIDS: [[usize; 3]; 2] = [[1, 18, 18], [1, 18, 18]];
+const BF16_WORKSPACE_BYTES: usize = 12 * 1024 * 1024 * 1024;
 
 pub struct WallossBf16Runtime {
     backend: Arc<RuntimeBackend>,
@@ -40,10 +42,15 @@ pub struct WallossPreparedInference {
     geometry: Arc<DeviceVisionGeometry>,
     noise: Tensor,
     normal_generator: RefCell<Box<dyn NormalGenerator>>,
+    workspace: kernels::GraphWorkspace,
 }
 
 impl WallossPreparedInference {
     fn run_impl(&self, request: &VlaRequest<'_>) -> Result<Action> {
+        kernels::prepare_with_workspace(&self.workspace, || self.run_with_workspace(request))
+    }
+
+    fn run_with_workspace(&self, request: &VlaRequest<'_>) -> Result<Action> {
         let observation = request.observation;
         observation.validate()?;
         if !self.spec.matches(observation) {
@@ -207,6 +214,10 @@ impl WallossBf16Runtime {
         );
         let noise = self.backend.to_device(&noise_host)?;
         let normal_generator = self.backend.create_normal_generator(noise.clone())?;
+        let workspace = kernels::GraphWorkspace::new(
+            BF16_WORKSPACE_BYTES,
+            self.backend.context().device_id(),
+        )?;
         Ok(WallossPreparedInference {
             spec,
             backend: Arc::clone(&self.backend),
@@ -216,6 +227,7 @@ impl WallossBf16Runtime {
             geometry: Arc::clone(&self.geometry),
             noise,
             normal_generator: RefCell::new(normal_generator),
+            workspace,
         })
     }
 }
