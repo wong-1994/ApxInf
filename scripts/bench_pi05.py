@@ -147,10 +147,10 @@ def parse_args() -> argparse.Namespace:
         "--random-weights", action="store_true", help="checkpoint-free engine (L0/L1/L2)"
     )
 
-    # FP8 knobs. In random mode these feed `Model.random`; in checkpoint mode the
-    # loader reads calibration.json / tactics.json from the model dir.
+    # Tuning knobs. In random mode these feed `Model.random`; in checkpoint mode
+    # the loader reads calibration.json / tactics.json from the model dir.
     p.add_argument("--calibration", help="FP8 calibration json or `uniform:SCALE` (random mode)")
-    p.add_argument("--tactics", type=pathlib.Path, help="FP8 tactics json (random mode)")
+    p.add_argument("--tactics", type=pathlib.Path, help="BF16/FP8 tactics json (random mode)")
 
     # Architecture overrides — synthetic shapes. `--action-horizon` is the one
     # knob that also applies to a checkpoint (see below).
@@ -287,20 +287,22 @@ def main() -> None:
                 "--model-dir (they reshape synthetic weights; a checkpoint runs its "
                 "native config apart from --action-horizon)"
             )
-    # FP8 tuning knobs: synthetic + fp8 only (a checkpoint reads calibration/tactics
-    # from its own dir; bf16/int8 have no per-tensor FP8 scales).
-    fp8_knobs = [
+    # Synthetic BF16 and FP8 both use the exact-shape tactic store. Calibration
+    # remains FP8-only, while INT8 has no persisted tactic database. A checkpoint
+    # discovers both files from its model directory instead of these CLI knobs.
+    tuning_knobs = [
         name for name, value in (("--tactics", args.tactics), ("--calibration", args.calibration))
         if value is not None
     ]
-    if fp8_knobs:
-        if checkpoint:
-            raise SystemExit(
-                f"{', '.join(fp8_knobs)} only apply to synthetic weights (drop --model-dir); "
-                "a checkpoint loads calibration/tactics from its own directory"
-            )
-        if args.precision != "fp8":
-            raise SystemExit(f"{', '.join(fp8_knobs)} only apply to --precision fp8")
+    if checkpoint and tuning_knobs:
+        raise SystemExit(
+            f"{', '.join(tuning_knobs)} only apply to synthetic weights (drop --model-dir); "
+            "a checkpoint loads calibration/tactics from its own directory"
+        )
+    if args.calibration is not None and args.precision != "fp8":
+        raise SystemExit("--calibration only applies to --precision fp8")
+    if args.tactics is not None and args.precision == "int8":
+        raise SystemExit("--tactics only applies to --precision bf16 or fp8")
 
     handle = None
     policy = None
