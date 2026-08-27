@@ -4,8 +4,8 @@ use std::time::Instant;
 use apxinf_core::{DType, Device, Tensor};
 use apxinf_model::{
     AutoModel, LoadOptions, ModelPrecision, Observation, VisionObservation, VlaRequest,
-    WallossConfig,
 };
+use apxinf_model::walloss::WallossConfig;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let checkpoint = std::env::args_os()
@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .ok_or("usage: walloss_bf16_smoke CHECKPOINT")?;
     let config = WallossConfig::from_json_file(&checkpoint.join("config.json"))?;
-    let image_tokens_per_view = (18 / config.vision.spatial_merge_size).pow(2);
+    let image_tokens_per_view = (18usize / config.vision.spatial_merge_size).pow(2);
     let mut token_ids = vec![1, config.vision_start_token_id];
     token_ids.extend(std::iter::repeat_n(
         config.image_token_id,
