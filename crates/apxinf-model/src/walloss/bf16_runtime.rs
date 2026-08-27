@@ -16,10 +16,13 @@ use crate::vla::{
 };
 
 use super::backend::{kernels, transfers, DeviceBuffer, RuntimeBackend};
-use super::bf16_executor::{action_stack, language_prefix, solver_update, vision_tower};
+use super::bf16_executor::{
+    action_stack, language_prefix, solver_update, vision_tower, TransformerWeights,
+    VisionTowerWeights,
+};
 use super::{
     multimodal_position_ids, sinusoidal_time_embedding, solver_times, DeviceVisionGeometry,
-    VisionGeometry, WallossConfig, WallossWeights,
+    VisionGeometry, WallossConfig, WallossFp8Weights, WallossWeights,
 };
 
 const DEFAULT_GRIDS: [[usize; 3]; 2] = [[1, 18, 18], [1, 18, 18]];
@@ -28,7 +31,7 @@ const BF16_WORKSPACE_BYTES: usize = 12 * 1024 * 1024 * 1024;
 pub struct WallossBf16Runtime {
     backend: Arc<RuntimeBackend>,
     config: Arc<WallossConfig>,
-    weights: Arc<WallossWeights>,
+    weights: Arc<WallossDeviceWeights>,
     grids: Arc<Vec<[usize; 3]>>,
     geometry: Arc<DeviceVisionGeometry>,
     prepared: RefCell<Option<(InferenceSpec, Rc<WallossPreparedInference>)>>,
@@ -38,7 +41,7 @@ pub struct WallossPreparedInference {
     spec: InferenceSpec,
     backend: Arc<RuntimeBackend>,
     config: Arc<WallossConfig>,
-    weights: Arc<WallossWeights>,
+    weights: Arc<WallossDeviceWeights>,
     grids: Arc<Vec<[usize; 3]>>,
     geometry: Arc<DeviceVisionGeometry>,
     noise: Tensor,
@@ -75,6 +78,11 @@ struct WallossBf16CapturedGraph {
     graph: Box<dyn Graph>,
     output: Tensor,
     inputs: WallossDeviceInputs,
+}
+
+enum WallossDeviceWeights {
+    Bf16(WallossWeights),
+    Fp8(WallossFp8Weights),
 }
 
 impl WallossPreparedInference {
@@ -260,19 +268,52 @@ impl WallossPreparedInference {
     }
 
     fn execute(&self, inputs: &WallossDeviceInputs) -> Result<Tensor> {
+        match self.weights.as_ref() {
+            WallossDeviceWeights::Bf16(weights) => self.execute_with(
+                inputs,
+                &weights.vision,
+                &weights.language_layers,
+                &weights.action_layers,
+                &weights.token_embedding,
+                &weights.action,
+                &weights.action_norm,
+            ),
+            WallossDeviceWeights::Fp8(weights) => self.execute_with(
+                inputs,
+                &weights.vision,
+                &weights.language_layers,
+                &weights.action_layers,
+                &weights.token_embedding,
+                &weights.action,
+                &weights.action_norm,
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_with<V: VisionTowerWeights, T: TransformerWeights>(
+        &self,
+        inputs: &WallossDeviceInputs,
+        vision_weights: &V,
+        language_weights: &[T],
+        transformer_action_weights: &[T],
+        token_embedding: &Tensor,
+        action_weights: &super::WallossActionWeights,
+        action_norm: &Tensor,
+    ) -> Result<Tensor> {
         let context = self.backend.context();
         let vision = vision_tower(
             context,
             &self.config.vision,
-            &self.weights.vision,
+            vision_weights,
             &self.geometry,
             &inputs.patches,
         )?;
         let prefix = language_prefix(
             context,
             &self.config.text,
-            &self.weights.language_layers,
-            &self.weights.token_embedding,
+            language_weights,
+            token_embedding,
             &inputs.prefix_ids,
             &vision,
             &inputs.vision_row_map,
@@ -289,9 +330,9 @@ impl WallossPreparedInference {
             let velocity = action_stack(
                 context,
                 &self.config.text,
-                &self.weights.action_layers,
-                &self.weights.action,
-                &self.weights.action_norm,
+                transformer_action_weights,
+                action_weights,
+                action_norm,
                 &prefix,
                 &state,
                 &inputs.action_mask,
@@ -376,9 +417,12 @@ pub(super) fn load_registered(
     backend: Arc<dyn Backend>,
     options: &LoadOptions,
 ) -> Result<LoadedModel> {
-    if !matches!(options.precision, ModelPrecision::Auto | ModelPrecision::Bf16) {
+    if !matches!(
+        options.precision,
+        ModelPrecision::Auto | ModelPrecision::Bf16 | ModelPrecision::Fp8
+    ) {
         return Err(Error::Other(
-            "walloss currently accepts BF16 while the FP8 runtime is being connected".into(),
+            "walloss supports BF16 and static FP8 on CUDA".into(),
         ));
     }
     let backend = crate::accelerator::cuda::downcast_arc(backend)
@@ -390,7 +434,26 @@ pub(super) fn load_registered(
     };
     let mut config = WallossConfig::from_json_file(&root.join("config.json"))?;
     let host_weights = WallossWeights::from_safetensors(&mut config, path)?;
-    let weights = Arc::new(host_weights.to_bf16_device(&*backend)?);
+    let weights = match options.precision {
+        ModelPrecision::Fp8 => {
+            let activation_scale = options.uniform_fp8_scale.ok_or_else(|| {
+                Error::Other(
+                    "walloss FP8 currently requires LoadOptions.uniform_fp8_scale while named calibration is being connected"
+                        .into(),
+                )
+            })?;
+            WallossDeviceWeights::Fp8(WallossFp8Weights::from_host(
+                &host_weights,
+                &*backend,
+                activation_scale,
+            )?)
+        }
+        ModelPrecision::Auto | ModelPrecision::Bf16 => {
+            WallossDeviceWeights::Bf16(host_weights.to_bf16_device(&*backend)?)
+        }
+        ModelPrecision::W8A8 => unreachable!(),
+    };
+    let weights = Arc::new(weights);
     let grids = Arc::new(DEFAULT_GRIDS.to_vec());
     let host_geometry = VisionGeometry::new(&config.vision, &grids)?;
     let geometry = Arc::new(host_geometry.upload(backend.context())?);

@@ -10,6 +10,8 @@ mod config;
 mod geometry;
 #[cfg(feature = "cuda")]
 mod fp8_weights;
+#[cfg(feature = "cuda")]
+mod fp8_executor;
 mod schedule;
 mod weights;
 

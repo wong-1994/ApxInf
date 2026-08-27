@@ -21,6 +21,7 @@ pub struct WallossFp8Weights {
 }
 
 pub struct WallossFp8LayerWeights {
+    pub activation_scale: f32,
     pub input_norm: Tensor,
     pub post_attention_norm: Tensor,
     pub qkv: Fp8LinearWeights,
@@ -31,6 +32,7 @@ pub struct WallossFp8LayerWeights {
 }
 
 pub struct WallossFp8VisionWeights {
+    pub activation_scale: f32,
     pub patch_projection: Fp8LinearWeights,
     pub blocks: Vec<WallossFp8VisionBlockWeights>,
     pub merger_norm: Tensor,
@@ -41,6 +43,7 @@ pub struct WallossFp8VisionWeights {
 }
 
 pub struct WallossFp8VisionBlockWeights {
+    pub activation_scale: f32,
     pub input_norm: Tensor,
     pub qkv: Fp8LinearWeights,
     pub qkv_bias: Tensor,
@@ -54,30 +57,35 @@ pub struct WallossFp8VisionBlockWeights {
 }
 
 impl WallossFp8Weights {
-    pub fn from_host(weights: &WallossWeights, backend: &dyn Backend) -> Result<Self> {
+    pub fn from_host(
+        weights: &WallossWeights,
+        backend: &dyn Backend,
+        activation_scale: f32,
+    ) -> Result<Self> {
         Ok(Self {
             token_embedding: bf16_to_device(&weights.token_embedding, backend)?,
             language_layers: weights
                 .language_layers
                 .iter()
-                .map(|layer| WallossFp8LayerWeights::from_host(layer, backend))
+                .map(|layer| WallossFp8LayerWeights::from_host(layer, backend, activation_scale))
                 .collect::<Result<_>>()?,
             action_layers: weights
                 .action_layers
                 .iter()
-                .map(|layer| WallossFp8LayerWeights::from_host(layer, backend))
+                .map(|layer| WallossFp8LayerWeights::from_host(layer, backend, activation_scale))
                 .collect::<Result<_>>()?,
             language_norm: bf16_to_device(&weights.language_norm, backend)?,
             action_norm: bf16_to_device(&weights.action_norm, backend)?,
-            vision: WallossFp8VisionWeights::from_host(&weights.vision, backend)?,
+            vision: WallossFp8VisionWeights::from_host(&weights.vision, backend, activation_scale)?,
             action: weights.action.to_bf16_device(backend)?,
         })
     }
 }
 
 impl WallossFp8LayerWeights {
-    fn from_host(weights: &WallossLayerWeights, backend: &dyn Backend) -> Result<Self> {
+    fn from_host(weights: &WallossLayerWeights, backend: &dyn Backend, activation_scale: f32) -> Result<Self> {
         Ok(Self {
+            activation_scale,
             input_norm: bf16_to_device(&weights.input_norm, backend)?,
             post_attention_norm: bf16_to_device(&weights.post_attention_norm, backend)?,
             qkv: fp8_matrix(&weights.qkv, backend)?,
@@ -90,13 +98,14 @@ impl WallossFp8LayerWeights {
 }
 
 impl WallossFp8VisionWeights {
-    fn from_host(weights: &WallossVisionWeights, backend: &dyn Backend) -> Result<Self> {
+    fn from_host(weights: &WallossVisionWeights, backend: &dyn Backend, activation_scale: f32) -> Result<Self> {
         Ok(Self {
+            activation_scale,
             patch_projection: fp8_matrix(&weights.patch_projection, backend)?,
             blocks: weights
                 .blocks
                 .iter()
-                .map(|block| WallossFp8VisionBlockWeights::from_host(block, backend))
+                .map(|block| WallossFp8VisionBlockWeights::from_host(block, backend, activation_scale))
                 .collect::<Result<_>>()?,
             merger_norm: bf16_to_device(&weights.merger_norm, backend)?,
             merger_hidden: fp8_matrix(&weights.merger_hidden, backend)?,
@@ -108,8 +117,9 @@ impl WallossFp8VisionWeights {
 }
 
 impl WallossFp8VisionBlockWeights {
-    fn from_host(weights: &WallossVisionBlockWeights, backend: &dyn Backend) -> Result<Self> {
+    fn from_host(weights: &WallossVisionBlockWeights, backend: &dyn Backend, activation_scale: f32) -> Result<Self> {
         Ok(Self {
+            activation_scale,
             input_norm: bf16_to_device(&weights.input_norm, backend)?,
             qkv: fp8_matrix(&weights.qkv, backend)?,
             qkv_bias: bf16_to_device(&weights.qkv_bias, backend)?,

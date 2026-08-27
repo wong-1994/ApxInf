@@ -5,9 +5,126 @@ use apxinf_core::{Error, Result, Tensor};
 use super::backend::{kernels, Context, DeviceBuffer};
 use super::WallossActionWeights;
 use super::{
-    DeviceVisionGeometry, WallossLayerWeights, WallossTextConfig, WallossVisionBlockWeights,
+    DeviceVisionGeometry, WallossFp8LayerWeights, WallossFp8VisionBlockWeights,
+    WallossFp8VisionWeights, WallossLayerWeights, WallossTextConfig, WallossVisionBlockWeights,
     WallossVisionConfig, WallossVisionWeights,
 };
+
+pub(super) enum MatrixRef<'a> {
+    Bf16(&'a Tensor),
+    Fp8(&'a crate::pi05::Fp8LinearWeights, f32),
+}
+
+pub(super) trait TransformerWeights {
+    fn input_norm(&self) -> &Tensor;
+    fn post_attention_norm(&self) -> &Tensor;
+    fn qkv(&self) -> MatrixRef<'_>;
+    fn qkv_bias(&self) -> &Tensor;
+    fn output(&self) -> MatrixRef<'_>;
+    fn gate_up(&self) -> MatrixRef<'_>;
+    fn down(&self) -> MatrixRef<'_>;
+}
+
+pub(super) trait VisionBlockWeights {
+    fn input_norm(&self) -> &Tensor;
+    fn post_attention_norm(&self) -> &Tensor;
+    fn qkv(&self) -> MatrixRef<'_>;
+    fn qkv_bias(&self) -> &Tensor;
+    fn output(&self) -> MatrixRef<'_>;
+    fn output_bias(&self) -> &Tensor;
+    fn gate_up(&self) -> MatrixRef<'_>;
+    fn gate_up_bias(&self) -> &Tensor;
+    fn down(&self) -> MatrixRef<'_>;
+    fn down_bias(&self) -> &Tensor;
+}
+
+pub(super) trait VisionTowerWeights {
+    type Block: VisionBlockWeights;
+    fn patch_projection(&self) -> MatrixRef<'_>;
+    fn blocks(&self) -> &[Self::Block];
+    fn merger_norm(&self) -> &Tensor;
+    fn merger_hidden(&self) -> MatrixRef<'_>;
+    fn merger_hidden_bias(&self) -> &Tensor;
+    fn merger_output(&self) -> MatrixRef<'_>;
+    fn merger_output_bias(&self) -> &Tensor;
+}
+
+fn linear(context: &Context, input: &Tensor, weights: MatrixRef<'_>) -> Result<Tensor> {
+    match weights {
+        MatrixRef::Bf16(weight) => kernels::gemm::bf16(context, input, weight),
+        MatrixRef::Fp8(weight, scale) => {
+            super::fp8_executor::linear_bf16(context, input, scale, weight)
+        }
+    }
+}
+
+impl TransformerWeights for WallossLayerWeights {
+    fn input_norm(&self) -> &Tensor { &self.input_norm }
+    fn post_attention_norm(&self) -> &Tensor { &self.post_attention_norm }
+    fn qkv(&self) -> MatrixRef<'_> { MatrixRef::Bf16(&self.qkv) }
+    fn qkv_bias(&self) -> &Tensor { &self.qkv_bias }
+    fn output(&self) -> MatrixRef<'_> { MatrixRef::Bf16(&self.output) }
+    fn gate_up(&self) -> MatrixRef<'_> { MatrixRef::Bf16(&self.gate_up) }
+    fn down(&self) -> MatrixRef<'_> { MatrixRef::Bf16(&self.down) }
+}
+
+impl TransformerWeights for WallossFp8LayerWeights {
+    fn input_norm(&self) -> &Tensor { &self.input_norm }
+    fn post_attention_norm(&self) -> &Tensor { &self.post_attention_norm }
+    fn qkv(&self) -> MatrixRef<'_> { MatrixRef::Fp8(&self.qkv, self.activation_scale) }
+    fn qkv_bias(&self) -> &Tensor { &self.qkv_bias }
+    fn output(&self) -> MatrixRef<'_> { MatrixRef::Fp8(&self.output, self.activation_scale) }
+    fn gate_up(&self) -> MatrixRef<'_> { MatrixRef::Fp8(&self.gate_up, self.activation_scale) }
+    fn down(&self) -> MatrixRef<'_> { MatrixRef::Fp8(&self.down, self.activation_scale) }
+}
+
+impl VisionBlockWeights for WallossVisionBlockWeights {
+    fn input_norm(&self) -> &Tensor { &self.input_norm }
+    fn post_attention_norm(&self) -> &Tensor { &self.post_attention_norm }
+    fn qkv(&self) -> MatrixRef<'_> { MatrixRef::Bf16(&self.qkv) }
+    fn qkv_bias(&self) -> &Tensor { &self.qkv_bias }
+    fn output(&self) -> MatrixRef<'_> { MatrixRef::Bf16(&self.output) }
+    fn output_bias(&self) -> &Tensor { &self.output_bias }
+    fn gate_up(&self) -> MatrixRef<'_> { MatrixRef::Bf16(&self.gate_up) }
+    fn gate_up_bias(&self) -> &Tensor { &self.gate_up_bias }
+    fn down(&self) -> MatrixRef<'_> { MatrixRef::Bf16(&self.down) }
+    fn down_bias(&self) -> &Tensor { &self.down_bias }
+}
+
+impl VisionBlockWeights for WallossFp8VisionBlockWeights {
+    fn input_norm(&self) -> &Tensor { &self.input_norm }
+    fn post_attention_norm(&self) -> &Tensor { &self.post_attention_norm }
+    fn qkv(&self) -> MatrixRef<'_> { MatrixRef::Fp8(&self.qkv, self.activation_scale) }
+    fn qkv_bias(&self) -> &Tensor { &self.qkv_bias }
+    fn output(&self) -> MatrixRef<'_> { MatrixRef::Fp8(&self.output, self.activation_scale) }
+    fn output_bias(&self) -> &Tensor { &self.output_bias }
+    fn gate_up(&self) -> MatrixRef<'_> { MatrixRef::Fp8(&self.gate_up, self.activation_scale) }
+    fn gate_up_bias(&self) -> &Tensor { &self.gate_up_bias }
+    fn down(&self) -> MatrixRef<'_> { MatrixRef::Fp8(&self.down, self.activation_scale) }
+    fn down_bias(&self) -> &Tensor { &self.down_bias }
+}
+
+impl VisionTowerWeights for WallossVisionWeights {
+    type Block = WallossVisionBlockWeights;
+    fn patch_projection(&self) -> MatrixRef<'_> { MatrixRef::Bf16(&self.patch_projection) }
+    fn blocks(&self) -> &[Self::Block] { &self.blocks }
+    fn merger_norm(&self) -> &Tensor { &self.merger_norm }
+    fn merger_hidden(&self) -> MatrixRef<'_> { MatrixRef::Bf16(&self.merger_hidden) }
+    fn merger_hidden_bias(&self) -> &Tensor { &self.merger_hidden_bias }
+    fn merger_output(&self) -> MatrixRef<'_> { MatrixRef::Bf16(&self.merger_output) }
+    fn merger_output_bias(&self) -> &Tensor { &self.merger_output_bias }
+}
+
+impl VisionTowerWeights for WallossFp8VisionWeights {
+    type Block = WallossFp8VisionBlockWeights;
+    fn patch_projection(&self) -> MatrixRef<'_> { MatrixRef::Fp8(&self.patch_projection, self.activation_scale) }
+    fn blocks(&self) -> &[Self::Block] { &self.blocks }
+    fn merger_norm(&self) -> &Tensor { &self.merger_norm }
+    fn merger_hidden(&self) -> MatrixRef<'_> { MatrixRef::Fp8(&self.merger_hidden, self.activation_scale) }
+    fn merger_hidden_bias(&self) -> &Tensor { &self.merger_hidden_bias }
+    fn merger_output(&self) -> MatrixRef<'_> { MatrixRef::Fp8(&self.merger_output, self.activation_scale) }
+    fn merger_output_bias(&self) -> &Tensor { &self.merger_output_bias }
+}
 
 pub struct LanguageLayerOutput {
     pub hidden: Tensor,
@@ -26,10 +143,10 @@ pub struct PrefixCache {
     pub values: Vec<Tensor>,
 }
 
-pub fn language_prefix(
+pub(super) fn language_prefix<W: TransformerWeights>(
     context: &Context,
     config: &WallossTextConfig,
-    weights: &[WallossLayerWeights],
+    weights: &[W],
     token_embedding: &Tensor,
     token_ids: &DeviceBuffer,
     vision_tokens: &Tensor,
@@ -55,10 +172,10 @@ pub fn language_prefix(
     Ok(PrefixCache { keys, values })
 }
 
-pub fn language_layer(
+fn language_layer<W: TransformerWeights>(
     context: &Context,
     config: &WallossTextConfig,
-    weights: &WallossLayerWeights,
+    weights: &W,
     input: &Tensor,
     position_ids: &DeviceBuffer,
 ) -> Result<LanguageLayerOutput> {
@@ -66,14 +183,14 @@ pub fn language_layer(
     let normalized = kernels::norm::rms_bf16(
         context,
         input,
-        &weights.input_norm,
+        weights.input_norm(),
         config.rms_norm_eps,
     )?;
-    let qkv = kernels::gemm::bf16(context, &normalized, &weights.qkv)?;
+    let qkv = linear(context, &normalized, weights.qkv())?;
     let qkv = kernels::attention::split_gqa_qkv_bias_bf16(
         context,
         &qkv,
-        Some(&weights.qkv_bias),
+        Some(weights.qkv_bias()),
         config.num_attention_heads,
         config.num_kv_heads,
         config.head_dim,
@@ -98,18 +215,18 @@ pub fn language_layer(
     )?;
     let attention = kernels::attention::causal_gqa_bf16(context, &q, &k, &qkv.v, tokens)?
         .reshape(vec![tokens, config.num_attention_heads * config.head_dim])?;
-    let projected = kernels::gemm::bf16(context, &attention, &weights.output)?;
+    let projected = linear(context, &attention, weights.output())?;
     let fused = kernels::fused::bias_residual_rms_bf16(
         context,
         &projected,
         None,
         input,
-        &weights.post_attention_norm,
+        weights.post_attention_norm(),
         config.rms_norm_eps,
     )?;
-    let gate_up = kernels::gemm::bf16(context, &fused.normalized, &weights.gate_up)?;
+    let gate_up = linear(context, &fused.normalized, weights.gate_up())?;
     let activated = kernels::activation::swiglu_bf16(context, &gate_up)?;
-    let down = kernels::gemm::bf16(context, &activated, &weights.down)?;
+    let down = linear(context, &activated, weights.down())?;
     let hidden = kernels::fused::bias_residual_bf16(context, &down, None, &fused.hidden)?;
     Ok(LanguageLayerOutput {
         hidden,
@@ -119,10 +236,10 @@ pub fn language_layer(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn action_layer(
+fn action_layer<W: TransformerWeights>(
     context: &Context,
     config: &WallossTextConfig,
-    weights: &WallossLayerWeights,
+    weights: &W,
     input: &Tensor,
     prefix_key: &Tensor,
     prefix_value: &Tensor,
@@ -134,14 +251,14 @@ pub fn action_layer(
     let normalized = kernels::norm::rms_bf16(
         context,
         input,
-        &weights.input_norm,
+        weights.input_norm(),
         config.rms_norm_eps,
     )?;
-    let qkv = kernels::gemm::bf16(context, &normalized, &weights.qkv)?;
+    let qkv = linear(context, &normalized, weights.qkv())?;
     let qkv = kernels::attention::split_gqa_qkv_bias_bf16(
         context,
         &qkv,
-        Some(&weights.qkv_bias),
+        Some(weights.qkv_bias()),
         config.num_attention_heads,
         config.num_kv_heads,
         config.head_dim,
@@ -195,18 +312,18 @@ pub fn action_layer(
         action_tokens,
         config.num_attention_heads * config.head_dim,
     ])?;
-    let projected = kernels::gemm::bf16(context, &attention, &weights.output)?;
+    let projected = linear(context, &attention, weights.output())?;
     let fused = kernels::fused::bias_residual_rms_bf16(
         context,
         &projected,
         None,
         input,
-        &weights.post_attention_norm,
+        weights.post_attention_norm(),
         config.rms_norm_eps,
     )?;
-    let gate_up = kernels::gemm::bf16(context, &fused.normalized, &weights.gate_up)?;
+    let gate_up = linear(context, &fused.normalized, weights.gate_up())?;
     let activated = kernels::activation::swiglu_bf16(context, &gate_up)?;
-    let down = kernels::gemm::bf16(context, &activated, &weights.down)?;
+    let down = linear(context, &activated, weights.down())?;
     let hidden = kernels::fused::bias_residual_bf16(context, &down, None, &fused.hidden)?;
     Ok(ActionLayerOutput {
         hidden,
@@ -216,10 +333,10 @@ pub fn action_layer(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn action_stack(
+pub(super) fn action_stack<W: TransformerWeights>(
     context: &Context,
     config: &WallossTextConfig,
-    transformer_weights: &[WallossLayerWeights],
+    transformer_weights: &[W],
     action_weights: &WallossActionWeights,
     final_norm: &Tensor,
     prefix: &PrefixCache,
@@ -264,10 +381,10 @@ pub fn action_stack(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn vision_layer(
+fn vision_layer<W: VisionBlockWeights>(
     context: &Context,
     config: &WallossVisionConfig,
-    weights: &WallossVisionBlockWeights,
+    weights: &W,
     input: &Tensor,
     position_ids: &DeviceBuffer,
     attention_offsets: &DeviceBuffer,
@@ -280,14 +397,14 @@ pub fn vision_layer(
     let normalized = kernels::norm::rms_bf16(
         context,
         input,
-        &weights.input_norm,
+        weights.input_norm(),
         config.rms_norm_eps,
     )?;
-    let qkv = kernels::gemm::bf16(context, &normalized, &weights.qkv)?;
+    let qkv = linear(context, &normalized, weights.qkv())?;
     let qkv = kernels::attention::split_qkv_bias_bf16(
         context,
         &qkv,
-        Some(&weights.qkv_bias),
+        Some(weights.qkv_bias()),
         config.num_heads,
         head_dim,
     )?;
@@ -318,31 +435,31 @@ pub fn vision_layer(
         max_segment_tokens,
     )?
     .reshape(vec![tokens, config.hidden_size])?;
-    let projected = kernels::gemm::bf16(context, &attention, &weights.output)?;
+    let projected = linear(context, &attention, weights.output())?;
     let fused = kernels::fused::bias_residual_rms_bf16(
         context,
         &projected,
-        Some(&weights.output_bias),
+        Some(weights.output_bias()),
         input,
-        &weights.post_attention_norm,
+        weights.post_attention_norm(),
         config.rms_norm_eps,
     )?;
-    let gate_up = kernels::gemm::bf16(context, &fused.normalized, &weights.gate_up)?;
-    let gate_up = kernels::elementwise::bias_bf16(context, &gate_up, Some(&weights.gate_up_bias))?;
+    let gate_up = linear(context, &fused.normalized, weights.gate_up())?;
+    let gate_up = kernels::elementwise::bias_bf16(context, &gate_up, Some(weights.gate_up_bias()))?;
     let activated = kernels::activation::swiglu_bf16(context, &gate_up)?;
-    let down = kernels::gemm::bf16(context, &activated, &weights.down)?;
+    let down = linear(context, &activated, weights.down())?;
     kernels::fused::bias_residual_bf16(
         context,
         &down,
-        Some(&weights.down_bias),
+        Some(weights.down_bias()),
         &fused.hidden,
     )
 }
 
-pub fn vision_tower(
+pub(super) fn vision_tower<W: VisionTowerWeights>(
     context: &Context,
     config: &WallossVisionConfig,
-    weights: &WallossVisionWeights,
+    weights: &W,
     geometry: &DeviceVisionGeometry,
     patches: &Tensor,
 ) -> Result<Tensor> {
@@ -352,8 +469,8 @@ pub fn vision_tower(
         &geometry.patch_order,
         geometry.patch_order.len() / std::mem::size_of::<u32>(),
     )?;
-    let mut hidden = kernels::gemm::bf16(context, &ordered_patches, &weights.patch_projection)?;
-    for (layer_index, block) in weights.blocks.iter().enumerate() {
+    let mut hidden = linear(context, &ordered_patches, weights.patch_projection())?;
+    for (layer_index, block) in weights.blocks().iter().enumerate() {
         let full_attention = config.full_attention_blocks.contains(&layer_index);
         let (offsets, host_offsets, segments, max_tokens) = if full_attention {
             (
@@ -391,10 +508,10 @@ pub fn vision_tower(
     )
 }
 
-pub fn vision_merger(
+fn vision_merger<W: VisionTowerWeights>(
     context: &Context,
     config: &WallossVisionConfig,
-    weights: &WallossVisionWeights,
+    weights: &W,
     input: &Tensor,
     reverse_indices: &DeviceBuffer,
 ) -> Result<Tensor> {
@@ -409,21 +526,21 @@ pub fn vision_merger(
     let normalized = kernels::norm::rms_bf16(
         context,
         input,
-        &weights.merger_norm,
+        weights.merger_norm(),
         config.rms_norm_eps,
     )?
     .reshape(vec![merged_tokens, merge_unit * config.hidden_size])?;
-    let hidden = kernels::gemm::bf16(context, &normalized, &weights.merger_hidden)?;
+    let hidden = linear(context, &normalized, weights.merger_hidden())?;
     let hidden = kernels::activation::bias_gelu_bf16(
         context,
         &hidden,
-        Some(&weights.merger_hidden_bias),
+        Some(weights.merger_hidden_bias()),
     )?;
-    let output = kernels::gemm::bf16(context, &hidden, &weights.merger_output)?;
+    let output = linear(context, &hidden, weights.merger_output())?;
     let output = kernels::elementwise::bias_bf16(
         context,
         &output,
-        Some(&weights.merger_output_bias),
+        Some(weights.merger_output_bias()),
     )?;
     kernels::elementwise::gather_rows_bf16(
         context,
