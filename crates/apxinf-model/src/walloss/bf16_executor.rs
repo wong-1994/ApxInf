@@ -74,8 +74,7 @@ fn qkv_after_rms(
         MatrixRef::Fp8(weight, scale) => {
             let normalized =
                 kernels::norm::rms_quant_bf16_e4m3(context, input, norm_weight, eps, scale)?;
-            let qkv = kernels::gemm::fp8(context, &normalized, scale, weight.as_kernel_view())?;
-            kernels::quantization::cast_f16_bf16(context, &qkv)
+            kernels::gemm::fp8(context, &normalized, scale, weight.as_kernel_view())
         }
     }
 }

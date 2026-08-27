@@ -621,7 +621,7 @@ pub fn split_gqa_qkv_mrope_cache_bf16(
     let q_width = q_heads * head_dim;
     let kv_width = kv_heads * head_dim;
     let expected_width = q_width + 2 * kv_width;
-    if qkv.dtype() != DType::BF16
+    if !matches!(qkv.dtype(), DType::BF16 | DType::F16)
         || width != expected_width
         || q_heads == 0
         || kv_heads == 0
@@ -675,8 +675,13 @@ pub fn split_gqa_qkv_mrope_cache_bf16(
             0,
         )
     };
-    unsafe {
-        ffi::check_cuda(ffi::apxinf_static_gqa_qkv_mrope_cache_bf16(
+    let status = unsafe {
+        let launch = if qkv.dtype() == DType::F16 {
+            ffi::apxinf_static_gqa_qkv_mrope_cache_f16
+        } else {
+            ffi::apxinf_static_gqa_qkv_mrope_cache_bf16
+        };
+        launch(
             gpu_ptr(qkv)?,
             optional_ptr(bias)?,
             position_ids.ptr().cast(),
@@ -692,9 +697,9 @@ pub fn split_gqa_qkv_mrope_cache_bf16(
             sections[2] as i32,
             cache_offset as i32,
             ctx.stream().handle(),
-        ))
-        .map_err(Error::Cuda)?;
-    }
+        )
+    };
+    ffi::check_cuda(status).map_err(Error::Cuda)?;
     let q = make_gpu_tensor(
         Shape::new(vec![tokens, q_heads, head_dim]),
         DType::BF16,
@@ -738,7 +743,7 @@ pub fn split_vision_qkv_rope_bf16(
     let (tokens, width) = matrix_shape(qkv, "vision QKV RoPE")?;
     let projection_width = heads * head_dim;
     let expected_width = 3 * projection_width;
-    if qkv.dtype() != DType::BF16
+    if !matches!(qkv.dtype(), DType::BF16 | DType::F16)
         || width != expected_width
         || heads == 0
         || head_dim == 0
@@ -758,8 +763,13 @@ pub fn split_vision_qkv_rope_bf16(
     let q = bf16_output(ctx, tokens, projection_width)?;
     let k = bf16_output(ctx, tokens, projection_width)?;
     let v = bf16_output(ctx, tokens, projection_width)?;
-    unsafe {
-        ffi::check_cuda(ffi::apxinf_static_vision_qkv_rope_bf16(
+    let status = unsafe {
+        let launch = if qkv.dtype() == DType::F16 {
+            ffi::apxinf_static_vision_qkv_rope_f16
+        } else {
+            ffi::apxinf_static_vision_qkv_rope_bf16
+        };
+        launch(
             gpu_ptr(qkv)?,
             optional_ptr(bias)?,
             position_ids.ptr().cast(),
@@ -771,9 +781,9 @@ pub fn split_vision_qkv_rope_bf16(
             head_dim as i32,
             theta,
             ctx.stream().handle(),
-        ))
-        .map_err(Error::Cuda)?;
-    }
+        )
+    };
+    ffi::check_cuda(status).map_err(Error::Cuda)?;
     let shape = Shape::new(vec![tokens, heads, head_dim]);
     Ok(QkvTensors {
         q: make_gpu_tensor(shape.clone(), DType::BF16, ctx.device_id(), q),

@@ -612,8 +612,17 @@ __device__ __forceinline__ int fused_mrope_axis(
   return 0;
 }
 
-__global__ void gqa_qkv_mrope_cache_bf16_kernel(
-    const __nv_bfloat16* qkv, const __nv_bfloat16* bias,
+__device__ __forceinline__ float qkv_input_as_bf16(__nv_bfloat16 value) {
+  return __bfloat162float(value);
+}
+
+__device__ __forceinline__ float qkv_input_as_bf16(half value) {
+  return __bfloat162float(__float2bfloat16(__half2float(value)));
+}
+
+template <typename Input>
+__global__ void gqa_qkv_mrope_cache_kernel(
+    const Input* qkv, const __nv_bfloat16* bias,
     const uint32_t* position_ids, __nv_bfloat16* q,
     __nv_bfloat16* k_cache, __nv_bfloat16* v_cache,
     int tokens, int q_heads, int kv_heads, int head_dim,
@@ -633,8 +642,8 @@ __global__ void gqa_qkv_mrope_cache_bf16_kernel(
     const int head = is_query ? projection_head : projection_head - q_heads;
     const int source_base = token * fused_width +
         (is_query ? head * head_dim : q_width + head * head_dim);
-    float first = __bfloat162float(qkv[source_base + pair]);
-    float second = __bfloat162float(qkv[source_base + half_dim + pair]);
+    float first = qkv_input_as_bf16(qkv[source_base + pair]);
+    float second = qkv_input_as_bf16(qkv[source_base + half_dim + pair]);
     if (bias != nullptr) {
       const int bias_base = is_query ? head * head_dim : q_width + head * head_dim;
       first += __bfloat162float(bias[bias_base + pair]);
@@ -658,8 +667,8 @@ __global__ void gqa_qkv_mrope_cache_bf16_kernel(
   const int source_base = token * fused_width + q_width + kv_width + head * head_dim;
   const int bias_base = q_width + kv_width + head * head_dim;
   const int destination_base = ((cache_offset + token) * kv_heads + head) * head_dim;
-  float first = __bfloat162float(qkv[source_base + pair]);
-  float second = __bfloat162float(qkv[source_base + half_dim + pair]);
+  float first = qkv_input_as_bf16(qkv[source_base + pair]);
+  float second = qkv_input_as_bf16(qkv[source_base + half_dim + pair]);
   if (bias != nullptr) {
     first += __bfloat162float(bias[bias_base + pair]);
     second += __bfloat162float(bias[bias_base + half_dim + pair]);
@@ -668,8 +677,9 @@ __global__ void gqa_qkv_mrope_cache_bf16_kernel(
   v_cache[destination_base + half_dim + pair] = __float2bfloat16(second);
 }
 
-__global__ void vision_qkv_rope_bf16_kernel(
-    const __nv_bfloat16* qkv, const __nv_bfloat16* bias,
+template <typename Input>
+__global__ void vision_qkv_rope_kernel(
+    const Input* qkv, const __nv_bfloat16* bias,
     const uint32_t* position_ids, __nv_bfloat16* q,
     __nv_bfloat16* k, __nv_bfloat16* v,
     int tokens, int heads, int head_dim, float theta) {
@@ -688,8 +698,8 @@ __global__ void vision_qkv_rope_bf16_kernel(
     const int projection_offset = is_key ? projection_width : 0;
     const int source = token * fused_width + projection_offset + head * head_dim;
     const int bias_base = projection_offset + head * head_dim;
-    float first = __bfloat162float(qkv[source + pair]);
-    float second = __bfloat162float(qkv[source + half_dim + pair]);
+    float first = qkv_input_as_bf16(qkv[source + pair]);
+    float second = qkv_input_as_bf16(qkv[source + half_dim + pair]);
     if (bias != nullptr) {
       first += __bfloat162float(bias[bias_base + pair]);
       second += __bfloat162float(bias[bias_base + half_dim + pair]);
@@ -712,7 +722,7 @@ __global__ void vision_qkv_rope_bf16_kernel(
 
   for (int col = threadIdx.x; col < projection_width; col += blockDim.x) {
     const int source = token * fused_width + 2 * projection_width + col;
-    float value = __bfloat162float(qkv[source]);
+    float value = qkv_input_as_bf16(qkv[source]);
     if (bias != nullptr) value += __bfloat162float(bias[2 * projection_width + col]);
     v[token * projection_width + col] = __float2bfloat16(value);
   }

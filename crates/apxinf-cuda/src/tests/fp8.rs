@@ -235,6 +235,123 @@ fn fused_vision_qkv_rope_matches_composed_kernels() {
     assert_eq!(fused_v, reference_v);
 }
 
+#[test]
+fn f16_qkv_fusions_match_explicit_bf16_cast() {
+    const TOKENS: usize = 3;
+    const Q_HEADS: usize = 4;
+    const KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 8;
+    const GQA_WIDTH: usize = (Q_HEADS + 2 * KV_HEADS) * HEAD_DIM;
+    const VISION_HEADS: usize = 2;
+    const VISION_WIDTH: usize = 3 * VISION_HEADS * HEAD_DIM;
+    let backend = CudaBackend::new(0).unwrap();
+    let upload_f16 = |width: usize, offset: usize| {
+        let values = (0..TOKENS * width)
+            .map(|index| f16::from_f32(((index * 17 + offset) % 251) as f32 / 73.0 - 1.6))
+            .collect::<Vec<_>>();
+        backend
+            .to_device(&Tensor::from_f16(vec![TOKENS, width], &values).unwrap())
+            .unwrap()
+    };
+    let upload_bias = |width: usize| {
+        let values = (0..width)
+            .map(|index| bf16::from_f32((index as f32 - width as f32 / 2.0) / 97.0))
+            .collect::<Vec<_>>();
+        backend
+            .to_device(&Tensor::from_bf16(vec![width], &values).unwrap())
+            .unwrap()
+    };
+
+    let gqa = upload_f16(GQA_WIDTH, 11);
+    let gqa_rounded = cast_f16_bf16(backend.context(), &gqa).unwrap();
+    let gqa_bias = upload_bias(GQA_WIDTH);
+    let gqa_positions = [2u32, 3, 5, 7, 11, 13, 17, 19, 23];
+    let gqa_position_bytes = gqa_positions
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect::<Vec<_>>();
+    let gqa_position_ids =
+        CudaBuffer::alloc(gqa_position_bytes.len(), backend.device_id()).unwrap();
+    gqa_position_ids
+        .copy_from_host(&gqa_position_bytes)
+        .unwrap();
+    let gqa_reference = split_gqa_qkv_mrope_cache_bf16(
+        backend.context(),
+        &gqa_rounded,
+        Some(&gqa_bias),
+        &gqa_position_ids,
+        Q_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+        10_000.0,
+        [2, 1, 1],
+        TOKENS,
+        None,
+    )
+    .unwrap();
+    let gqa_fused = split_gqa_qkv_mrope_cache_bf16(
+        backend.context(),
+        &gqa,
+        Some(&gqa_bias),
+        &gqa_position_ids,
+        Q_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+        10_000.0,
+        [2, 1, 1],
+        TOKENS,
+        None,
+    )
+    .unwrap();
+
+    let vision = upload_f16(VISION_WIDTH, 29);
+    let vision_rounded = cast_f16_bf16(backend.context(), &vision).unwrap();
+    let vision_bias = upload_bias(VISION_WIDTH);
+    let vision_positions = [2u32, 3, 5, 7, 11, 13];
+    let vision_position_bytes = vision_positions
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect::<Vec<_>>();
+    let vision_position_ids =
+        CudaBuffer::alloc(vision_position_bytes.len(), backend.device_id()).unwrap();
+    vision_position_ids
+        .copy_from_host(&vision_position_bytes)
+        .unwrap();
+    let vision_reference = split_vision_qkv_rope_bf16(
+        backend.context(),
+        &vision_rounded,
+        Some(&vision_bias),
+        &vision_position_ids,
+        VISION_HEADS,
+        HEAD_DIM,
+        10_000.0,
+    )
+    .unwrap();
+    let vision_fused = split_vision_qkv_rope_bf16(
+        backend.context(),
+        &vision,
+        Some(&vision_bias),
+        &vision_position_ids,
+        VISION_HEADS,
+        HEAD_DIM,
+        10_000.0,
+    )
+    .unwrap();
+    backend.synchronize().unwrap();
+
+    let exact = |reference: &Tensor, actual: &Tensor| {
+        let reference = backend.to_cpu(reference).unwrap();
+        let actual = backend.to_cpu(actual).unwrap();
+        assert_eq!(actual.as_bf16().unwrap(), reference.as_bf16().unwrap());
+    };
+    exact(&gqa_reference.q, &gqa_fused.q);
+    exact(&gqa_reference.k, &gqa_fused.k);
+    exact(&gqa_reference.v, &gqa_fused.v);
+    exact(&vision_reference.q, &vision_fused.q);
+    exact(&vision_reference.k, &vision_fused.k);
+    exact(&vision_reference.v, &vision_fused.v);
+}
+
 fn make_gpu_tensor(shape: Shape, dtype: DType, _device: usize, buffer: CudaBuffer) -> Tensor {
     buffer.into_tensor(shape, dtype)
 }
@@ -946,6 +1063,59 @@ fn geglu_matches_gelu_tanh_reference() {
         assert!(
             (actual - reference).abs() < 0.08,
             "GeGLU output {actual} differs from reference {reference}"
+        );
+    }
+}
+
+#[test]
+fn packed_swiglu_quant_matches_silu_reference_with_bias() {
+    const ROWS: usize = 3;
+    const INNER: usize = 12;
+    const SCALE: f32 = 0.02;
+    let backend = CudaBackend::new(0).unwrap();
+    let mut source = Vec::with_capacity(ROWS * 2 * INNER);
+    for row in 0..ROWS {
+        source.extend(
+            (0..INNER).map(|col| f16::from_f32(((row * 13 + col * 7) % 29) as f32 / 8.0 - 1.75)),
+        );
+        source.extend(
+            (0..INNER).map(|col| f16::from_f32(((row * 11 + col * 5) % 23) as f32 / 9.0 - 1.1)),
+        );
+    }
+    let bias = (0..2 * INNER)
+        .map(|index| bf16::from_f32((index as f32 - INNER as f32) / 64.0))
+        .collect::<Vec<_>>();
+    let source_gpu = backend
+        .to_device(&Tensor::from_f16(vec![ROWS, 2 * INNER], &source).unwrap())
+        .unwrap();
+    let bias_gpu = backend
+        .to_device(&Tensor::from_bf16(vec![2 * INNER], &bias).unwrap())
+        .unwrap();
+    let output =
+        swiglu_quant_f16_e4m3(backend.context(), &source_gpu, Some(&bias_gpu), SCALE).unwrap();
+    let output = backend.to_cpu(&output).unwrap();
+    let decode_e4m3 = |bits: u8| {
+        let sign = if bits & 0x80 == 0 { 1.0 } else { -1.0 };
+        let exponent = ((bits >> 3) & 0x0f) as i32;
+        let mantissa = (bits & 0x07) as f32;
+        if exponent == 0 {
+            sign * (mantissa / 8.0) * 2.0f32.powi(-6)
+        } else {
+            sign * (1.0 + mantissa / 8.0) * 2.0f32.powi(exponent - 7)
+        }
+    };
+    for (index, bits) in output.as_f8_e4m3().unwrap().iter().enumerate() {
+        let row = index / INNER;
+        let col = index % INNER;
+        let row_base = row * 2 * INNER;
+        let gate = source[row_base + col].to_f32() + bias[col].to_f32();
+        let up = source[row_base + INNER + col].to_f32() + bias[INNER + col].to_f32();
+        let expected = gate / (1.0 + (-gate).exp()) * up;
+        let actual = decode_e4m3(*bits) * SCALE;
+        let tolerance = expected.abs() * 0.065 + SCALE;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "packed SwiGLU output {actual} differs from {expected} at {index} (tolerance {tolerance})"
         );
     }
 }

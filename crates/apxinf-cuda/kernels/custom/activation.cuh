@@ -113,6 +113,18 @@ __global__ void bias_silu_f16_kernel(
   }
 }
 
+struct alignas(4) Fp8x4 {
+  __nv_fp8x2_e4m3 low;
+  __nv_fp8x2_e4m3 high;
+};
+
+struct alignas(8) Fp8x8 {
+  __nv_fp8x2_e4m3 pair0;
+  __nv_fp8x2_e4m3 pair1;
+  __nv_fp8x2_e4m3 pair2;
+  __nv_fp8x2_e4m3 pair3;
+};
+
 __global__ void swiglu_quant_f16_e4m3_kernel(
     const half* gate_up, const __nv_bfloat16* bias,
     __nv_fp8_e4m3* output, int rows, int inner, float inverse_scale) {
@@ -131,6 +143,60 @@ __global__ void swiglu_quant_f16_e4m3_kernel(
     float value = (gate / (1.0f + expf(-gate))) * up * inverse_scale;
     value = fminf(448.0f, fmaxf(-448.0f, value));
     output[index] = static_cast<__nv_fp8_e4m3>(value);
+  }
+}
+
+__global__ void swiglu_quant_f16_e4m3_packed4_kernel(
+    const half* gate_up, const __nv_bfloat16* bias,
+    __nv_fp8_e4m3* output, int rows, int inner, float inverse_scale) {
+  const int groups_per_row = inner / 4;
+  const int group_count = rows * groups_per_row;
+  int group_index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = blockDim.x * gridDim.x;
+  for (; group_index < group_count; group_index += stride) {
+    const int row = group_index / groups_per_row;
+    const int group_col = group_index - row * groups_per_row;
+    const int pair_col = group_col * 2;
+    const half* row_input = gate_up + static_cast<int64_t>(row) * 2 * inner;
+    const half2* gate2 = reinterpret_cast<const half2*>(row_input);
+    const half2* up2 = reinterpret_cast<const half2*>(row_input + inner);
+    const float2 gate_low_raw = __half22float2(gate2[pair_col]);
+    const float2 gate_high_raw = __half22float2(gate2[pair_col + 1]);
+    const float2 up_low_raw = __half22float2(up2[pair_col]);
+    const float2 up_high_raw = __half22float2(up2[pair_col + 1]);
+    float gates[4] = {
+        gate_low_raw.x, gate_low_raw.y, gate_high_raw.x, gate_high_raw.y};
+    float ups[4] = {
+        up_low_raw.x, up_low_raw.y, up_high_raw.x, up_high_raw.y};
+    if (bias != nullptr) {
+      const __nv_bfloat162* gate_bias2 =
+          reinterpret_cast<const __nv_bfloat162*>(bias);
+      const __nv_bfloat162* up_bias2 =
+          reinterpret_cast<const __nv_bfloat162*>(bias + inner);
+      const __nv_bfloat162 gate_bias_low = gate_bias2[pair_col];
+      const __nv_bfloat162 gate_bias_high = gate_bias2[pair_col + 1];
+      const __nv_bfloat162 up_bias_low = up_bias2[pair_col];
+      const __nv_bfloat162 up_bias_high = up_bias2[pair_col + 1];
+      gates[0] += __bfloat162float(gate_bias_low.x);
+      gates[1] += __bfloat162float(gate_bias_low.y);
+      gates[2] += __bfloat162float(gate_bias_high.x);
+      gates[3] += __bfloat162float(gate_bias_high.y);
+      ups[0] += __bfloat162float(up_bias_low.x);
+      ups[1] += __bfloat162float(up_bias_low.y);
+      ups[2] += __bfloat162float(up_bias_high.x);
+      ups[3] += __bfloat162float(up_bias_high.y);
+    }
+    float values[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      values[i] = (gates[i] / (1.0f + expf(-gates[i]))) * ups[i] *
+                  inverse_scale;
+      values[i] = fminf(448.0f, fmaxf(-448.0f, values[i]));
+    }
+    reinterpret_cast<Fp8x4*>(output + static_cast<int64_t>(row) * inner)
+        [group_col] = {
+            static_cast<__nv_fp8x2_e4m3>(make_float2(values[0], values[1])),
+            static_cast<__nv_fp8x2_e4m3>(make_float2(values[2], values[3]))};
   }
 }
 
@@ -157,18 +223,6 @@ __global__ void geglu_quant_f16_e4m3_kernel(
         [col_pair] = static_cast<__nv_fp8x2_e4m3>(value);
   }
 }
-
-struct alignas(4) Fp8x4 {
-  __nv_fp8x2_e4m3 low;
-  __nv_fp8x2_e4m3 high;
-};
-
-struct alignas(8) Fp8x8 {
-  __nv_fp8x2_e4m3 pair0;
-  __nv_fp8x2_e4m3 pair1;
-  __nv_fp8x2_e4m3 pair2;
-  __nv_fp8x2_e4m3 pair3;
-};
 
 // Eight output values per thread. This increases independent arithmetic per
 // thread on the language path and further amortizes address/loop work. Each

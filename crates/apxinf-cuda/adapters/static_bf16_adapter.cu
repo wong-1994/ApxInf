@@ -183,10 +183,24 @@ extern "C" cudaError_t apxinf_static_swiglu_quant_f16_e4m3(
       !std::isfinite(scale) || scale <= 0.0f)
     return cudaErrorInvalidValue;
   const int64_t count = static_cast<int64_t>(rows) * inner;
-  swiglu_quant_f16_e4m3_kernel<<<blocks_for(count), kThreads, 0, stream>>>(
-      static_cast<const half*>(gate_up),
-      static_cast<const __nv_bfloat16*>(bias),
-      static_cast<__nv_fp8_e4m3*>(output), rows, inner, 1.0f / scale);
+  const bool packed4 =
+      inner % 4 == 0 &&
+      reinterpret_cast<uintptr_t>(gate_up) % alignof(half2) == 0 &&
+      (bias == nullptr ||
+       reinterpret_cast<uintptr_t>(bias) % alignof(__nv_bfloat162) == 0) &&
+      reinterpret_cast<uintptr_t>(output) % alignof(Fp8x4) == 0;
+  if (packed4) {
+    swiglu_quant_f16_e4m3_packed4_kernel
+        <<<blocks_for(count / 4), kThreads, 0, stream>>>(
+            static_cast<const half*>(gate_up),
+            static_cast<const __nv_bfloat16*>(bias),
+            static_cast<__nv_fp8_e4m3*>(output), rows, inner, 1.0f / scale);
+  } else {
+    swiglu_quant_f16_e4m3_kernel<<<blocks_for(count), kThreads, 0, stream>>>(
+        static_cast<const half*>(gate_up),
+        static_cast<const __nv_bfloat16*>(bias),
+        static_cast<__nv_fp8_e4m3*>(output), rows, inner, 1.0f / scale);
+  }
   return cudaGetLastError();
 }
 
@@ -392,8 +406,34 @@ extern "C" cudaError_t apxinf_static_gqa_qkv_mrope_cache_bf16(
     return cudaErrorInvalidValue;
   }
   dim3 grid(tokens, q_heads + 2 * kv_heads, 1);
-  gqa_qkv_mrope_cache_bf16_kernel<<<grid, head_dim / 2, 0, stream>>>(
+  gqa_qkv_mrope_cache_kernel<__nv_bfloat16>
+      <<<grid, head_dim / 2, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(qkv),
+      static_cast<const __nv_bfloat16*>(bias), position_ids,
+      static_cast<__nv_bfloat16*>(q),
+      static_cast<__nv_bfloat16*>(k_cache),
+      static_cast<__nv_bfloat16*>(v_cache), tokens, q_heads, kv_heads,
+      head_dim, theta, section_h, section_w, cache_offset);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_static_gqa_qkv_mrope_cache_f16(
+    const void* qkv, const void* bias, const uint32_t* position_ids,
+    void* q, void* k_cache, void* v_cache, int tokens,
+    int q_heads, int kv_heads, int head_dim, float theta,
+    int section_h, int section_w, int cache_offset,
+    cudaStream_t stream) {
+  if (qkv == nullptr || position_ids == nullptr || q == nullptr ||
+      k_cache == nullptr || v_cache == nullptr || tokens <= 0 ||
+      q_heads <= 0 || kv_heads <= 0 || q_heads % kv_heads != 0 ||
+      head_dim <= 0 || head_dim > 256 || head_dim % 2 != 0 ||
+      !(theta > 0.0f) || section_h < 0 || section_w < 0 ||
+      section_h + section_w > head_dim / 2 || cache_offset < 0) {
+    return cudaErrorInvalidValue;
+  }
+  dim3 grid(tokens, q_heads + 2 * kv_heads, 1);
+  gqa_qkv_mrope_cache_kernel<half><<<grid, head_dim / 2, 0, stream>>>(
+      static_cast<const half*>(qkv),
       static_cast<const __nv_bfloat16*>(bias), position_ids,
       static_cast<__nv_bfloat16*>(q),
       static_cast<__nv_bfloat16*>(k_cache),
@@ -412,8 +452,26 @@ extern "C" cudaError_t apxinf_static_vision_qkv_rope_bf16(
       !(theta > 0.0f)) {
     return cudaErrorInvalidValue;
   }
-  vision_qkv_rope_bf16_kernel<<<tokens, kThreads, 0, stream>>>(
+  vision_qkv_rope_kernel<__nv_bfloat16><<<tokens, kThreads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(qkv),
+      static_cast<const __nv_bfloat16*>(bias), position_ids,
+      static_cast<__nv_bfloat16*>(q), static_cast<__nv_bfloat16*>(k),
+      static_cast<__nv_bfloat16*>(v), tokens, heads, head_dim, theta);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_static_vision_qkv_rope_f16(
+    const void* qkv, const void* bias, const uint32_t* position_ids,
+    void* q, void* k, void* v, int tokens, int heads, int head_dim,
+    float theta, cudaStream_t stream) {
+  if (qkv == nullptr || position_ids == nullptr || q == nullptr ||
+      k == nullptr || v == nullptr || tokens <= 0 || heads <= 0 ||
+      head_dim <= 0 || head_dim > 256 || head_dim % 4 != 0 ||
+      !(theta > 0.0f)) {
+    return cudaErrorInvalidValue;
+  }
+  vision_qkv_rope_kernel<half><<<tokens, kThreads, 0, stream>>>(
+      static_cast<const half*>(qkv),
       static_cast<const __nv_bfloat16*>(bias), position_ids,
       static_cast<__nv_bfloat16*>(q), static_cast<__nv_bfloat16*>(k),
       static_cast<__nv_bfloat16*>(v), tokens, heads, head_dim, theta);

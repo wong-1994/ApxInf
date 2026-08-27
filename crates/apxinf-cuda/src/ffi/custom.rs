@@ -428,6 +428,36 @@ extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub fn apxinf_static_gqa_qkv_mrope_cache_f16(
+        qkv: *const c_void,
+        bias: *const c_void,
+        position_ids: *const u32,
+        q: *mut c_void,
+        k_cache: *mut c_void,
+        v_cache: *mut c_void,
+        tokens: i32,
+        q_heads: i32,
+        kv_heads: i32,
+        head_dim: i32,
+        theta: f32,
+        section_h: i32,
+        section_w: i32,
+        cache_offset: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_static_vision_qkv_rope_f16(
+        qkv: *const c_void,
+        bias: *const c_void,
+        position_ids: *const u32,
+        q: *mut c_void,
+        k: *mut c_void,
+        v: *mut c_void,
+        tokens: i32,
+        heads: i32,
+        head_dim: i32,
+        theta: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_static_bias_residual_bf16(
         projection: *const c_void,
         bias: *const c_void,
