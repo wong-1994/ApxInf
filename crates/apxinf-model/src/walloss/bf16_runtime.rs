@@ -5,7 +5,9 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use apxinf_core::{Backend, DType, Device, Error, NormalGenerator, Result, SamplingBackend, Tensor};
+use apxinf_core::{
+    Backend, DType, Device, Error, Graph, NormalGenerator, Result, SamplingBackend, Tensor,
+};
 
 use crate::auto::{LoadOptions, LoadedModel, ModelPrecision};
 use crate::vla::{
@@ -13,8 +15,7 @@ use crate::vla::{
     VlaRuntime,
 };
 
-use super::backend::{DeviceBuffer, RuntimeBackend};
-use super::backend::kernels;
+use super::backend::{kernels, transfers, DeviceBuffer, RuntimeBackend};
 use super::bf16_executor::{action_stack, language_prefix, solver_update, vision_tower};
 use super::{
     multimodal_position_ids, sinusoidal_time_embedding, solver_times, DeviceVisionGeometry,
@@ -43,14 +44,73 @@ pub struct WallossPreparedInference {
     noise: Tensor,
     normal_generator: RefCell<Box<dyn NormalGenerator>>,
     workspace: kernels::GraphWorkspace,
+    captured: RefCell<Option<WallossBf16CapturedGraph>>,
+}
+
+struct WallossHostInputs {
+    patches: Tensor,
+    prefix_ids: Vec<u32>,
+    vision_row_map: Vec<u32>,
+    prefix_position_ids: Vec<u32>,
+    action_position_ids: Vec<u32>,
+    initial_state: Option<Tensor>,
+    action_mask: Tensor,
+    time_embeddings: Vec<Tensor>,
+}
+
+struct WallossDeviceInputs {
+    patches: Tensor,
+    prefix_ids: DeviceBuffer,
+    vision_row_map: DeviceBuffer,
+    prefix_position_ids: DeviceBuffer,
+    action_position_ids: DeviceBuffer,
+    initial_state: Tensor,
+    action_mask: Tensor,
+    time_embeddings: Vec<Tensor>,
+    prefix_tokens: usize,
+    generated_latent: bool,
+}
+
+struct WallossBf16CapturedGraph {
+    graph: Box<dyn Graph>,
+    output: Tensor,
+    inputs: WallossDeviceInputs,
 }
 
 impl WallossPreparedInference {
     fn run_impl(&self, request: &VlaRequest<'_>) -> Result<Action> {
-        kernels::prepare_with_workspace(&self.workspace, || self.run_with_workspace(request))
+        let host = self.prepare_host_inputs(request)?;
+        if let Some(captured) = self.captured.borrow_mut().as_mut() {
+            self.update_device_inputs(&mut captured.inputs, &host)?;
+            captured.graph.replay()?;
+            return Ok(Action::new(captured.output.clone()));
+        }
+
+        let inputs = self.upload_inputs(&host)?;
+        let eager_output = kernels::prepare_with_workspace(&self.workspace, || {
+            self.execute(&inputs)
+        })?;
+        self.backend.synchronize()?;
+        drop(eager_output);
+
+        self.backend.begin_capture()?;
+        let output = match kernels::with_workspace(&self.workspace, || self.execute(&inputs)) {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = self.backend.end_capture();
+                return Err(error);
+            }
+        };
+        let graph = self.backend.end_capture()?;
+        *self.captured.borrow_mut() = Some(WallossBf16CapturedGraph {
+            graph,
+            output: output.clone(),
+            inputs,
+        });
+        Ok(Action::new(output))
     }
 
-    fn run_with_workspace(&self, request: &VlaRequest<'_>) -> Result<Action> {
+    fn prepare_host_inputs(&self, request: &VlaRequest<'_>) -> Result<WallossHostInputs> {
         let observation = request.observation;
         observation.validate()?;
         if !self.spec.matches(observation) {
@@ -73,20 +133,9 @@ impl WallossPreparedInference {
                 ))
             }
         };
-        let patches = self.backend.to_device(&patches)?;
-        let context = self.backend.context();
-        let vision = vision_tower(
-            context,
-            &self.config.vision,
-            &self.weights.vision,
-            &self.geometry,
-            &patches,
-        )?;
-
         let action_tokens = self.config.action.action_horizon;
         let prefix_tokens = observation.token_ids.len() - action_tokens;
-        let prefix_ids = &observation.token_ids[..prefix_tokens];
-        let token_ids = upload_u32(context.device_id(), prefix_ids)?;
+        let prefix_ids = observation.token_ids[..prefix_tokens].to_vec();
         let vision_rows = self.geometry.reverse_indices.len() / std::mem::size_of::<u32>();
         let mut vision_row_map = vec![u32::MAX; prefix_tokens];
         let mut vision_row = 0u32;
@@ -101,42 +150,21 @@ impl WallossPreparedInference {
                 "walloss prompt has {vision_row} image tokens, expected {vision_rows}"
             )));
         }
-        let vision_row_map = upload_u32(context.device_id(), &vision_row_map)?;
         let position_ids = multimodal_position_ids(
             &observation.token_ids,
             &self.grids,
             self.config.image_token_id,
             self.config.vision.spatial_merge_size,
         )?;
-        let prefix_position_ids = upload_u32(
-            context.device_id(),
-            &position_ids[..prefix_tokens * 3],
-        )?;
-        let action_position_ids = upload_u32(
-            context.device_id(),
-            &position_ids[prefix_tokens * 3..],
-        )?;
-        let prefix = language_prefix(
-            context,
-            &self.config.text,
-            &self.weights.language_layers,
-            &self.weights.token_embedding,
-            &token_ids,
-            &vision,
-            &vision_row_map,
-            &prefix_position_ids,
-            prefix_tokens,
-        )?;
-
-        let mut state = match request.initial_latent {
-            InitialLatent::Provided(value) => self.backend.to_device(&normalize_host_bf16(
+        let initial_state = match request.initial_latent {
+            InitialLatent::Provided(value) => Some(normalize_host_bf16(
                 value,
                 vec![action_tokens, self.config.action.action_dim],
                 "initial latent",
-            )?)?,
+            )?),
             InitialLatent::Generate { rng } => {
                 self.normal_generator.borrow_mut().generate(rng)?;
-                self.noise.clone()
+                None
             }
         };
         let mask_host = match observation.action_mask.as_ref() {
@@ -150,15 +178,15 @@ impl WallossPreparedInference {
                 &vec![half::bf16::ONE; action_tokens * self.config.action.action_dim],
             )?,
         };
-        let action_mask = self.backend.to_device(&mask_host)?;
         let times = solver_times(
             self.config.action.solver_steps,
             self.config.action.scheduler_s,
             1.0,
         )?;
-        for step in 0..self.config.action.solver_steps {
+        let mut time_embeddings = Vec::with_capacity(self.config.action.solver_steps);
+        for &time in times.iter().take(self.config.action.solver_steps) {
             let embedding = sinusoidal_time_embedding(
-                times[step],
+                time,
                 self.config.action.hidden_size,
             )?;
             let repeated = embedding
@@ -168,10 +196,96 @@ impl WallossPreparedInference {
                 .take(action_tokens * embedding.len())
                 .map(half::bf16::from_f32)
                 .collect::<Vec<_>>();
-            let time_embedding = self.backend.to_device(&Tensor::from_bf16(
+            time_embeddings.push(Tensor::from_bf16(
                 vec![action_tokens, self.config.action.hidden_size],
                 &repeated,
-            )?)?;
+            )?);
+        }
+        Ok(WallossHostInputs {
+            patches,
+            prefix_ids,
+            vision_row_map,
+            prefix_position_ids: position_ids[..prefix_tokens * 3].to_vec(),
+            action_position_ids: position_ids[prefix_tokens * 3..].to_vec(),
+            initial_state,
+            action_mask: mask_host,
+            time_embeddings,
+        })
+    }
+
+    fn upload_inputs(&self, host: &WallossHostInputs) -> Result<WallossDeviceInputs> {
+        let device = self.backend.context().device_id();
+        Ok(WallossDeviceInputs {
+            patches: self.backend.to_device(&host.patches)?,
+            prefix_ids: upload_u32(device, &host.prefix_ids)?,
+            vision_row_map: upload_u32(device, &host.vision_row_map)?,
+            prefix_position_ids: upload_u32(device, &host.prefix_position_ids)?,
+            action_position_ids: upload_u32(device, &host.action_position_ids)?,
+            initial_state: match &host.initial_state {
+                Some(state) => self.backend.to_device(state)?,
+                None => self.noise.clone(),
+            },
+            action_mask: self.backend.to_device(&host.action_mask)?,
+            time_embeddings: host
+                .time_embeddings
+                .iter()
+                .map(|value| self.backend.to_device(value))
+                .collect::<Result<Vec<_>>>()?,
+            prefix_tokens: host.prefix_ids.len(),
+            generated_latent: host.initial_state.is_none(),
+        })
+    }
+
+    fn update_device_inputs(
+        &self,
+        device: &mut WallossDeviceInputs,
+        host: &WallossHostInputs,
+    ) -> Result<()> {
+        if device.generated_latent != host.initial_state.is_none() {
+            return Err(Error::Other(
+                "walloss captured inference cannot switch initial-latent mode".into(),
+            ));
+        }
+        self.backend.synchronize()?;
+        transfers::copy_cpu_to_cuda(&host.patches, &device.patches)?;
+        transfers::copy_cpu_to_cuda(&host.action_mask, &device.action_mask)?;
+        if let Some(state) = &host.initial_state {
+            transfers::copy_cpu_to_cuda(state, &device.initial_state)?;
+        }
+        copy_u32(&device.prefix_ids, &host.prefix_ids)?;
+        copy_u32(&device.vision_row_map, &host.vision_row_map)?;
+        copy_u32(&device.prefix_position_ids, &host.prefix_position_ids)?;
+        copy_u32(&device.action_position_ids, &host.action_position_ids)?;
+        Ok(())
+    }
+
+    fn execute(&self, inputs: &WallossDeviceInputs) -> Result<Tensor> {
+        let context = self.backend.context();
+        let vision = vision_tower(
+            context,
+            &self.config.vision,
+            &self.weights.vision,
+            &self.geometry,
+            &inputs.patches,
+        )?;
+        let prefix = language_prefix(
+            context,
+            &self.config.text,
+            &self.weights.language_layers,
+            &self.weights.token_embedding,
+            &inputs.prefix_ids,
+            &vision,
+            &inputs.vision_row_map,
+            &inputs.prefix_position_ids,
+            inputs.prefix_tokens,
+        )?;
+        let times = solver_times(
+            self.config.action.solver_steps,
+            self.config.action.scheduler_s,
+            1.0,
+        )?;
+        let mut state = inputs.initial_state.clone();
+        for (step, time_embedding) in inputs.time_embeddings.iter().enumerate() {
             let velocity = action_stack(
                 context,
                 &self.config.text,
@@ -180,13 +294,13 @@ impl WallossPreparedInference {
                 &self.weights.action_norm,
                 &prefix,
                 &state,
-                &action_mask,
-                &time_embedding,
-                &action_position_ids,
+                &inputs.action_mask,
+                time_embedding,
+                &inputs.action_position_ids,
             )?;
             state = solver_update(context, &state, &velocity, times[step + 1] - times[step])?;
         }
-        Ok(Action::new(state))
+        Ok(state)
     }
 }
 
@@ -228,6 +342,7 @@ impl WallossBf16Runtime {
             noise,
             normal_generator: RefCell::new(normal_generator),
             workspace,
+            captured: RefCell::new(None),
         })
     }
 }
@@ -316,4 +431,19 @@ fn upload_u32(device_id: usize, values: &[u32]) -> Result<DeviceBuffer> {
     let buffer = DeviceBuffer::alloc_zeros(bytes.len(), device_id).map_err(Error::Cuda)?;
     buffer.copy_from_host(&bytes).map_err(Error::Cuda)?;
     Ok(buffer)
+}
+
+fn copy_u32(buffer: &DeviceBuffer, values: &[u32]) -> Result<()> {
+    let bytes = values
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect::<Vec<_>>();
+    if bytes.len() != buffer.len() {
+        return Err(Error::Other(format!(
+            "walloss captured u32 input has {} bytes, expected {}",
+            bytes.len(),
+            buffer.len()
+        )));
+    }
+    buffer.copy_from_host(&bytes).map_err(Error::Cuda)
 }
