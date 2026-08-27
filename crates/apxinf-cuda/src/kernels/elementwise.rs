@@ -130,7 +130,7 @@ pub fn add(ctx: &CudaContext, a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let count = a.numel() as u32;
 
     let out_bytes = a.size_in_bytes();
-    let out_buf = CudaBuffer::alloc_zeros(out_bytes, device_id).map_err(Error::Cuda)?;
+    let out_buf = output_buffer(ctx, out_bytes)?;
 
     unsafe {
         let res = match a.dtype() {

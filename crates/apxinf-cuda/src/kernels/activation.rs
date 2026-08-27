@@ -9,6 +9,7 @@ use super::contracts::{
 use crate::buffer::CudaBuffer;
 use crate::context::CudaContext;
 use crate::ffi;
+use crate::workspace::output_buffer;
 
 /// Allocation-free SiLU into caller-owned decode storage.
 pub fn silu_into(
@@ -87,7 +88,7 @@ pub fn silu(ctx: &CudaContext, input: &Tensor) -> Result<Tensor> {
     let count = input.numel() as u32;
 
     let out_bytes = input.size_in_bytes();
-    let out_buf = CudaBuffer::alloc_zeros(out_bytes, device_id).map_err(Error::Cuda)?;
+    let out_buf = output_buffer(ctx, out_bytes)?;
 
     unsafe {
         let res = match input.dtype() {
