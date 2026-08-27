@@ -55,19 +55,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("load_ms={:.3}", load_start.elapsed().as_secs_f64() * 1e3);
     let request = VlaRequest::provided(&observation, &latent);
     let profile = std::env::var_os("APXINF_PROFILE_RUN").is_some();
+    let mut reference = None::<Vec<f32>>;
     for run in 0..4 {
         if profile && run == 2 {
             apxinf_cuda::profiler::start().map_err(std::io::Error::other)?;
         }
         let infer_start = Instant::now();
         let action = model.infer_host_f32(&request)?;
+        let max_abs_diff = reference
+            .as_ref()
+            .map(|expected| {
+                expected
+                    .iter()
+                    .zip(&action)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max)
+            })
+            .unwrap_or(0.0);
         eprintln!(
-            "infer_run={} infer_ms={:.3} output={} finite={}",
+            "infer_run={} infer_ms={:.3} output={} finite={} max_abs_diff={:.6}",
             run + 1,
             infer_start.elapsed().as_secs_f64() * 1e3,
             action.len(),
-            action.iter().all(|value| value.is_finite())
+            action.iter().all(|value| value.is_finite()),
+            max_abs_diff,
         );
+        reference.get_or_insert(action);
         if profile && run == 2 {
             apxinf_cuda::profiler::stop().map_err(std::io::Error::other)?;
         }
