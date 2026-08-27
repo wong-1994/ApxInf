@@ -364,7 +364,7 @@ impl StaticFp8Calibration {
         self.scales
             .get(name)
             .copied()
-            .ok_or_else(|| Error::Other(format!("missing π0.5 FP8 activation scale `{name}`")))
+            .ok_or_else(|| Error::Other(format!("missing static FP8 activation scale `{name}`")))
     }
 
     pub fn len(&self) -> usize {

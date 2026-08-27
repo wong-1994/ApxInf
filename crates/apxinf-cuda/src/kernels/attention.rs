@@ -726,6 +726,62 @@ pub fn split_gqa_qkv_mrope_cache_bf16(
     }
 }
 
+pub fn split_vision_qkv_rope_bf16(
+    ctx: &CudaContext,
+    qkv: &Tensor,
+    bias: Option<&Tensor>,
+    position_ids: &CudaBuffer,
+    heads: usize,
+    head_dim: usize,
+    theta: f32,
+) -> Result<QkvTensors> {
+    let (tokens, width) = matrix_shape(qkv, "vision QKV RoPE")?;
+    let projection_width = heads * head_dim;
+    let expected_width = 3 * projection_width;
+    if qkv.dtype() != DType::BF16
+        || width != expected_width
+        || heads == 0
+        || head_dim == 0
+        || head_dim > 256
+        || head_dim % 4 != 0
+        || !theta.is_finite()
+        || theta <= 0.0
+        || position_ids.len() < tokens * 2 * std::mem::size_of::<u32>()
+        || bias.is_some_and(|value| {
+            value.dtype() != DType::BF16 || value.shape().dims() != [expected_width]
+        })
+    {
+        return Err(Error::Other(
+            "static inference BF16 vision QKV RoPE shape mismatch".into(),
+        ));
+    }
+    let q = bf16_output(ctx, tokens, projection_width)?;
+    let k = bf16_output(ctx, tokens, projection_width)?;
+    let v = bf16_output(ctx, tokens, projection_width)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_vision_qkv_rope_bf16(
+            gpu_ptr(qkv)?,
+            optional_ptr(bias)?,
+            position_ids.ptr().cast(),
+            q.ptr(),
+            k.ptr(),
+            v.ptr(),
+            tokens as i32,
+            heads as i32,
+            head_dim as i32,
+            theta,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    let shape = Shape::new(vec![tokens, heads, head_dim]);
+    Ok(QkvTensors {
+        q: make_gpu_tensor(shape.clone(), DType::BF16, ctx.device_id(), q),
+        k: make_gpu_tensor(shape.clone(), DType::BF16, ctx.device_id(), k),
+        v: make_gpu_tensor(shape, DType::BF16, ctx.device_id(), v),
+    })
+}
+
 #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
 #[allow(clippy::too_many_arguments)]
 fn fa2_attention(

@@ -190,19 +190,19 @@ impl TransformerWeights for WallossFp8LayerWeights {
         &self.post_attention_norm
     }
     fn qkv(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.qkv, self.activation_scale)
+        MatrixRef::Fp8(&self.qkv, self.qkv_scale)
     }
     fn qkv_bias(&self) -> &Tensor {
         &self.qkv_bias
     }
     fn output(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.output, self.activation_scale)
+        MatrixRef::Fp8(&self.output, self.output_scale)
     }
     fn gate_up(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.gate_up, self.activation_scale)
+        MatrixRef::Fp8(&self.gate_up, self.gate_up_scale)
     }
     fn down(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.down, self.activation_scale)
+        MatrixRef::Fp8(&self.down, self.down_scale)
     }
 }
 
@@ -247,25 +247,25 @@ impl VisionBlockWeights for WallossFp8VisionBlockWeights {
         &self.post_attention_norm
     }
     fn qkv(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.qkv, self.activation_scale)
+        MatrixRef::Fp8(&self.qkv, self.qkv_scale)
     }
     fn qkv_bias(&self) -> &Tensor {
         &self.qkv_bias
     }
     fn output(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.output, self.activation_scale)
+        MatrixRef::Fp8(&self.output, self.output_scale)
     }
     fn output_bias(&self) -> &Tensor {
         &self.output_bias
     }
     fn gate_up(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.gate_up, self.activation_scale)
+        MatrixRef::Fp8(&self.gate_up, self.gate_up_scale)
     }
     fn gate_up_bias(&self) -> &Tensor {
         &self.gate_up_bias
     }
     fn down(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.down, self.activation_scale)
+        MatrixRef::Fp8(&self.down, self.down_scale)
     }
     fn down_bias(&self) -> &Tensor {
         &self.down_bias
@@ -300,7 +300,7 @@ impl VisionTowerWeights for WallossVisionWeights {
 impl VisionTowerWeights for WallossFp8VisionWeights {
     type Block = WallossFp8VisionBlockWeights;
     fn patch_projection(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.patch_projection, self.activation_scale)
+        MatrixRef::Fp8(&self.patch_projection, self.patch_scale)
     }
     fn blocks(&self) -> &[Self::Block] {
         &self.blocks
@@ -309,13 +309,13 @@ impl VisionTowerWeights for WallossFp8VisionWeights {
         &self.merger_norm
     }
     fn merger_hidden(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.merger_hidden, self.activation_scale)
+        MatrixRef::Fp8(&self.merger_hidden, self.merger_norm_scale)
     }
     fn merger_hidden_bias(&self) -> &Tensor {
         &self.merger_hidden_bias
     }
     fn merger_output(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.merger_output, self.activation_scale)
+        MatrixRef::Fp8(&self.merger_output, self.merger_hidden_scale)
     }
     fn merger_output_bias(&self) -> &Tensor {
         &self.merger_output_bias
@@ -542,33 +542,19 @@ fn vision_layer<W: VisionBlockWeights>(
         config.rms_norm_eps,
         weights.qkv(),
     )?;
-    let qkv = kernels::attention::split_qkv_bias_bf16(
+    let qkv = kernels::attention::split_vision_qkv_rope_bf16(
         context,
         &qkv,
         Some(weights.qkv_bias()),
-        config.num_heads,
-        head_dim,
-    )?;
-    let q = kernels::rope::apply_vision_2d(
-        context,
-        &qkv.q,
+        position_ids,
         config.num_heads,
         head_dim,
         config.rope_theta,
-        position_ids,
-    )?;
-    let k = kernels::rope::apply_vision_2d(
-        context,
-        &qkv.k,
-        config.num_heads,
-        head_dim,
-        config.rope_theta,
-        position_ids,
     )?;
     let attention = kernels::attention::segmented_mha_bf16(
         context,
-        &q,
-        &k,
+        &qkv.q,
+        &qkv.k,
         &qkv.v,
         attention_offsets,
         host_attention_offsets,

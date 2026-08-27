@@ -667,3 +667,53 @@ __global__ void gqa_qkv_mrope_cache_bf16_kernel(
   v_cache[destination_base + pair] = __float2bfloat16(first);
   v_cache[destination_base + half_dim + pair] = __float2bfloat16(second);
 }
+
+__global__ void vision_qkv_rope_bf16_kernel(
+    const __nv_bfloat16* qkv, const __nv_bfloat16* bias,
+    const uint32_t* position_ids, __nv_bfloat16* q,
+    __nv_bfloat16* k, __nv_bfloat16* v,
+    int tokens, int heads, int head_dim, float theta) {
+  const int token = blockIdx.x;
+  const int half_dim = head_dim / 2;
+  const int projection_width = heads * head_dim;
+  const int fused_width = 3 * projection_width;
+  const int pairs_per_projection = heads * half_dim;
+
+  for (int work = threadIdx.x; work < 2 * pairs_per_projection;
+       work += blockDim.x) {
+    const bool is_key = work >= pairs_per_projection;
+    const int local = is_key ? work - pairs_per_projection : work;
+    const int head = local / half_dim;
+    const int pair = local - head * half_dim;
+    const int projection_offset = is_key ? projection_width : 0;
+    const int source = token * fused_width + projection_offset + head * head_dim;
+    const int bias_base = projection_offset + head * head_dim;
+    float first = __bfloat162float(qkv[source + pair]);
+    float second = __bfloat162float(qkv[source + half_dim + pair]);
+    if (bias != nullptr) {
+      first += __bfloat162float(bias[bias_base + pair]);
+      second += __bfloat162float(bias[bias_base + half_dim + pair]);
+    }
+    first = __bfloat162float(__float2bfloat16(first));
+    second = __bfloat162float(__float2bfloat16(second));
+    const int axis = pair < half_dim / 2 ? 0 : 1;
+    const int pair_in_axis = pair < half_dim / 2 ? pair : pair - half_dim / 2;
+    const float position = static_cast<float>(position_ids[token * 2 + axis]);
+    const float frequency =
+        powf(theta, -2.0f * static_cast<float>(pair_in_axis) / half_dim);
+    float sine, cosine;
+    sincosf(position * frequency, &sine, &cosine);
+    __nv_bfloat16* destination = (is_key ? k : q) +
+        (token * heads + head) * head_dim;
+    destination[pair] = __float2bfloat16(first * cosine - second * sine);
+    destination[half_dim + pair] =
+        __float2bfloat16(first * sine + second * cosine);
+  }
+
+  for (int col = threadIdx.x; col < projection_width; col += blockDim.x) {
+    const int source = token * fused_width + 2 * projection_width + col;
+    float value = __bfloat162float(qkv[source]);
+    if (bias != nullptr) value += __bfloat162float(bias[2 * projection_width + col]);
+    v[token * projection_width + col] = __float2bfloat16(value);
+  }
+}

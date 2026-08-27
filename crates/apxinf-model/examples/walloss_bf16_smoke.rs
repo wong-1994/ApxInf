@@ -44,14 +44,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .map(|value| value.parse::<f32>())
         .transpose()?;
+    let calibration_path = std::env::var_os("APXINF_WALLOSS_CALIBRATION").map(PathBuf::from);
     let options = LoadOptions {
         model_name: Some("walloss".into()),
-        precision: if fp8_scale.is_some() {
+        precision: if fp8_scale.is_some() || calibration_path.is_some() {
             ModelPrecision::Fp8
         } else {
             ModelPrecision::Bf16
         },
         uniform_fp8_scale: fp8_scale,
+        calibration_path,
         ..LoadOptions::default()
     };
     let load_start = Instant::now();

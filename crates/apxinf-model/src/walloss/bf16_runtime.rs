@@ -23,8 +23,9 @@ use super::bf16_executor::{
 };
 use super::{
     multimodal_position_ids, sinusoidal_time_embedding, solver_times, DeviceVisionGeometry,
-    VisionGeometry, WallossConfig, WallossFp8Weights, WallossWeights,
+    VisionGeometry, WallossActivationScales, WallossConfig, WallossFp8Weights, WallossWeights,
 };
+use crate::pi05::StaticFp8Calibration;
 
 const DEFAULT_GRIDS: [[usize; 3]; 2] = [[1, 18, 18], [1, 18, 18]];
 const BF16_WORKSPACE_BYTES: usize = 12 * 1024 * 1024 * 1024;
@@ -445,16 +446,29 @@ pub(super) fn load_registered(
     }
     let weights = match options.precision {
         ModelPrecision::Fp8 => {
-            let activation_scale = options.uniform_fp8_scale.ok_or_else(|| {
-                Error::Other(
-                    "walloss FP8 currently requires LoadOptions.uniform_fp8_scale while named calibration is being connected"
-                        .into(),
-                )
-            })?;
+            let scales = if let Some(scale) = options.uniform_fp8_scale {
+                WallossActivationScales::uniform(&host_weights, scale)?
+            } else {
+                let calibration_path = options
+                    .calibration_path
+                    .clone()
+                    .or_else(|| {
+                        let candidate = root.join("calibration.json");
+                        candidate.is_file().then_some(candidate)
+                    })
+                    .ok_or_else(|| {
+                        Error::Other(
+                            "walloss FP8 requires LoadOptions.calibration_path, calibration.json, or an explicit uniform scale"
+                                .into(),
+                        )
+                    })?;
+                let calibration = StaticFp8Calibration::from_json_file(&calibration_path)?;
+                WallossActivationScales::from_calibration(&host_weights, &calibration)?
+            };
             WallossDeviceWeights::Fp8(WallossFp8Weights::from_host(
                 &host_weights,
                 &*backend,
-                activation_scale,
+                &scales,
             )?)
         }
         ModelPrecision::Auto | ModelPrecision::Bf16 => {

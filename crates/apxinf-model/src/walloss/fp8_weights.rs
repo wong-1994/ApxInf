@@ -1,8 +1,8 @@
 //! Device-resident static-FP8 matrices for WallOSS inference.
 
-use apxinf_core::{Backend, Result, Tensor};
+use apxinf_core::{Backend, Error, Result, Tensor};
 
-use crate::pi05::{Fp8LinearWeights, LinearWeights};
+use crate::pi05::{Fp8LinearWeights, LinearWeights, StaticFp8Calibration};
 
 use super::weights::bf16_to_device;
 use super::{
@@ -21,7 +21,10 @@ pub struct WallossFp8Weights {
 }
 
 pub struct WallossFp8LayerWeights {
-    pub activation_scale: f32,
+    pub qkv_scale: f32,
+    pub output_scale: f32,
+    pub gate_up_scale: f32,
+    pub down_scale: f32,
     pub input_norm: Tensor,
     pub post_attention_norm: Tensor,
     pub qkv: Fp8LinearWeights,
@@ -32,7 +35,9 @@ pub struct WallossFp8LayerWeights {
 }
 
 pub struct WallossFp8VisionWeights {
-    pub activation_scale: f32,
+    pub patch_scale: f32,
+    pub merger_norm_scale: f32,
+    pub merger_hidden_scale: f32,
     pub patch_projection: Fp8LinearWeights,
     pub blocks: Vec<WallossFp8VisionBlockWeights>,
     pub merger_norm: Tensor,
@@ -43,7 +48,10 @@ pub struct WallossFp8VisionWeights {
 }
 
 pub struct WallossFp8VisionBlockWeights {
-    pub activation_scale: f32,
+    pub qkv_scale: f32,
+    pub output_scale: f32,
+    pub gate_up_scale: f32,
+    pub down_scale: f32,
     pub input_norm: Tensor,
     pub qkv: Fp8LinearWeights,
     pub qkv_bias: Tensor,
@@ -56,36 +64,120 @@ pub struct WallossFp8VisionBlockWeights {
     pub down_bias: Tensor,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct WallossLayerActivationScales {
+    pub qkv: f32,
+    pub output: f32,
+    pub gate_up: f32,
+    pub down: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct WallossActivationScales {
+    pub vision_patch: f32,
+    pub vision_layers: Vec<WallossLayerActivationScales>,
+    pub vision_merger_norm: f32,
+    pub vision_merger_hidden: f32,
+    pub language_layers: Vec<WallossLayerActivationScales>,
+    pub action_layers: Vec<WallossLayerActivationScales>,
+}
+
+impl WallossActivationScales {
+    pub fn uniform(weights: &WallossWeights, scale: f32) -> Result<Self> {
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(Error::Other(format!("invalid uniform FP8 scale {scale}")));
+        }
+        let layer = WallossLayerActivationScales {
+            qkv: scale,
+            output: scale,
+            gate_up: scale,
+            down: scale,
+        };
+        Ok(Self {
+            vision_patch: scale,
+            vision_layers: vec![layer; weights.vision.blocks.len()],
+            vision_merger_norm: scale,
+            vision_merger_hidden: scale,
+            language_layers: vec![layer; weights.language_layers.len()],
+            action_layers: vec![layer; weights.action_layers.len()],
+        })
+    }
+
+    pub fn from_calibration(
+        weights: &WallossWeights,
+        calibration: &StaticFp8Calibration,
+    ) -> Result<Self> {
+        let layers = |prefix: &str, depth: usize| {
+            (0..depth)
+                .map(|index| {
+                    let name = |suffix: &str| format!("{prefix}.layers.{index}.{suffix}");
+                    Ok(WallossLayerActivationScales {
+                        qkv: calibration.scale(&name("attention_norm"))?,
+                        output: calibration.scale(&name("attention_output"))?,
+                        gate_up: calibration.scale(&name("mlp_norm"))?,
+                        down: calibration.scale(&name("mlp_activation"))?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        };
+        Ok(Self {
+            vision_patch: calibration.scale("vision.patch_input")?,
+            vision_layers: layers("vision", weights.vision.blocks.len())?,
+            vision_merger_norm: calibration.scale("vision.merger_norm")?,
+            vision_merger_hidden: calibration.scale("vision.merger_hidden")?,
+            language_layers: layers("language", weights.language_layers.len())?,
+            action_layers: layers("action", weights.action_layers.len())?,
+        })
+    }
+}
+
 impl WallossFp8Weights {
     pub fn from_host(
         weights: &WallossWeights,
         backend: &dyn Backend,
-        activation_scale: f32,
+        scales: &WallossActivationScales,
     ) -> Result<Self> {
+        if scales.language_layers.len() != weights.language_layers.len()
+            || scales.action_layers.len() != weights.action_layers.len()
+            || scales.vision_layers.len() != weights.vision.blocks.len()
+        {
+            return Err(Error::Other(
+                "walloss FP8 activation calibration depth mismatch".into(),
+            ));
+        }
         Ok(Self {
             token_embedding: bf16_to_device(&weights.token_embedding, backend)?,
             language_layers: weights
                 .language_layers
                 .iter()
-                .map(|layer| WallossFp8LayerWeights::from_host(layer, backend, activation_scale))
+                .zip(&scales.language_layers)
+                .map(|(layer, scale)| WallossFp8LayerWeights::from_host(layer, backend, *scale))
                 .collect::<Result<_>>()?,
             action_layers: weights
                 .action_layers
                 .iter()
-                .map(|layer| WallossFp8LayerWeights::from_host(layer, backend, activation_scale))
+                .zip(&scales.action_layers)
+                .map(|(layer, scale)| WallossFp8LayerWeights::from_host(layer, backend, *scale))
                 .collect::<Result<_>>()?,
             language_norm: bf16_to_device(&weights.language_norm, backend)?,
             action_norm: bf16_to_device(&weights.action_norm, backend)?,
-            vision: WallossFp8VisionWeights::from_host(&weights.vision, backend, activation_scale)?,
+            vision: WallossFp8VisionWeights::from_host(&weights.vision, backend, scales)?,
             action: weights.action.to_bf16_device(backend)?,
         })
     }
 }
 
 impl WallossFp8LayerWeights {
-    fn from_host(weights: &WallossLayerWeights, backend: &dyn Backend, activation_scale: f32) -> Result<Self> {
+    fn from_host(
+        weights: &WallossLayerWeights,
+        backend: &dyn Backend,
+        scales: WallossLayerActivationScales,
+    ) -> Result<Self> {
         Ok(Self {
-            activation_scale,
+            qkv_scale: scales.qkv,
+            output_scale: scales.output,
+            gate_up_scale: scales.gate_up,
+            down_scale: scales.down,
             input_norm: bf16_to_device(&weights.input_norm, backend)?,
             post_attention_norm: bf16_to_device(&weights.post_attention_norm, backend)?,
             qkv: fp8_matrix(&weights.qkv, backend)?,
@@ -98,18 +190,27 @@ impl WallossFp8LayerWeights {
 }
 
 impl WallossFp8VisionWeights {
-    fn from_host(weights: &WallossVisionWeights, backend: &dyn Backend, activation_scale: f32) -> Result<Self> {
+    fn from_host(
+        weights: &WallossVisionWeights,
+        backend: &dyn Backend,
+        scales: &WallossActivationScales,
+    ) -> Result<Self> {
         Ok(Self {
-            activation_scale,
+            patch_scale: scales.vision_patch,
             patch_projection: fp8_matrix(&weights.patch_projection, backend)?,
             blocks: weights
                 .blocks
                 .iter()
-                .map(|block| WallossFp8VisionBlockWeights::from_host(block, backend, activation_scale))
+                .zip(&scales.vision_layers)
+                .map(|(block, scale)| {
+                    WallossFp8VisionBlockWeights::from_host(block, backend, *scale)
+                })
                 .collect::<Result<_>>()?,
             merger_norm: bf16_to_device(&weights.merger_norm, backend)?,
+            merger_norm_scale: scales.vision_merger_norm,
             merger_hidden: fp8_matrix(&weights.merger_hidden, backend)?,
             merger_hidden_bias: bf16_to_device(&weights.merger_hidden_bias, backend)?,
+            merger_hidden_scale: scales.vision_merger_hidden,
             merger_output: fp8_matrix(&weights.merger_output, backend)?,
             merger_output_bias: bf16_to_device(&weights.merger_output_bias, backend)?,
         })
@@ -117,9 +218,16 @@ impl WallossFp8VisionWeights {
 }
 
 impl WallossFp8VisionBlockWeights {
-    fn from_host(weights: &WallossVisionBlockWeights, backend: &dyn Backend, activation_scale: f32) -> Result<Self> {
+    fn from_host(
+        weights: &WallossVisionBlockWeights,
+        backend: &dyn Backend,
+        scales: WallossLayerActivationScales,
+    ) -> Result<Self> {
         Ok(Self {
-            activation_scale,
+            qkv_scale: scales.qkv,
+            output_scale: scales.output,
+            gate_up_scale: scales.gate_up,
+            down_scale: scales.down,
             input_norm: bf16_to_device(&weights.input_norm, backend)?,
             qkv: fp8_matrix(&weights.qkv, backend)?,
             qkv_bias: bf16_to_device(&weights.qkv_bias, backend)?,

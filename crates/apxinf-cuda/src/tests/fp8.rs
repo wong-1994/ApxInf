@@ -166,6 +166,75 @@ fn fused_gqa_qkv_mrope_cache_matches_composed_kernels() {
     assert_eq!(&fused_v[..kv_elements], reference_v.as_slice());
 }
 
+#[test]
+fn fused_vision_qkv_rope_matches_composed_kernels() {
+    const TOKENS: usize = 3;
+    const HEADS: usize = 2;
+    const HEAD_DIM: usize = 8;
+    const WIDTH: usize = 3 * HEADS * HEAD_DIM;
+    let backend = CudaBackend::new(0).unwrap();
+    let values = (0..TOKENS * WIDTH)
+        .map(|index| bf16::from_f32((index as f32 - 43.0) / 61.0))
+        .collect::<Vec<_>>();
+    let bias = (0..WIDTH)
+        .map(|index| bf16::from_f32((index as f32 - 17.0) / 101.0))
+        .collect::<Vec<_>>();
+    let qkv = backend
+        .to_device(&Tensor::from_bf16(vec![TOKENS, WIDTH], &values).unwrap())
+        .unwrap();
+    let bias = backend
+        .to_device(&Tensor::from_bf16(vec![WIDTH], &bias).unwrap())
+        .unwrap();
+    let positions = [2u32, 3, 5, 7, 11, 13];
+    let position_bytes = positions
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect::<Vec<_>>();
+    let position_ids = CudaBuffer::alloc(position_bytes.len(), backend.device_id()).unwrap();
+    position_ids.copy_from_host(&position_bytes).unwrap();
+
+    let split = split_qkv_bias_bf16(backend.context(), &qkv, Some(&bias), HEADS, HEAD_DIM).unwrap();
+    let reference_q = crate::kernels::rope::apply_vision_2d(
+        backend.context(),
+        &split.q,
+        HEADS,
+        HEAD_DIM,
+        10_000.0,
+        &position_ids,
+    )
+    .unwrap();
+    let reference_k = crate::kernels::rope::apply_vision_2d(
+        backend.context(),
+        &split.k,
+        HEADS,
+        HEAD_DIM,
+        10_000.0,
+        &position_ids,
+    )
+    .unwrap();
+    let fused = split_vision_qkv_rope_bf16(
+        backend.context(),
+        &qkv,
+        Some(&bias),
+        &position_ids,
+        HEADS,
+        HEAD_DIM,
+        10_000.0,
+    )
+    .unwrap();
+    backend.synchronize().unwrap();
+
+    let reference_q = backend.to_cpu(&reference_q).unwrap().to_f32_vec().unwrap();
+    let reference_k = backend.to_cpu(&reference_k).unwrap().to_f32_vec().unwrap();
+    let reference_v = backend.to_cpu(&split.v).unwrap().to_f32_vec().unwrap();
+    let fused_q = backend.to_cpu(&fused.q).unwrap().to_f32_vec().unwrap();
+    let fused_k = backend.to_cpu(&fused.k).unwrap().to_f32_vec().unwrap();
+    let fused_v = backend.to_cpu(&fused.v).unwrap().to_f32_vec().unwrap();
+    assert_eq!(fused_q, reference_q);
+    assert_eq!(fused_k, reference_k);
+    assert_eq!(fused_v, reference_v);
+}
+
 fn make_gpu_tensor(shape: Shape, dtype: DType, _device: usize, buffer: CudaBuffer) -> Tensor {
     buffer.into_tensor(shape, dtype)
 }

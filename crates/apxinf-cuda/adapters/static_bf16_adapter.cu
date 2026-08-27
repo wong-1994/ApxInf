@@ -402,6 +402,24 @@ extern "C" cudaError_t apxinf_static_gqa_qkv_mrope_cache_bf16(
   return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_static_vision_qkv_rope_bf16(
+    const void* qkv, const void* bias, const uint32_t* position_ids,
+    void* q, void* k, void* v, int tokens, int heads, int head_dim,
+    float theta, cudaStream_t stream) {
+  if (qkv == nullptr || position_ids == nullptr || q == nullptr ||
+      k == nullptr || v == nullptr || tokens <= 0 || heads <= 0 ||
+      head_dim <= 0 || head_dim > 256 || head_dim % 4 != 0 ||
+      !(theta > 0.0f)) {
+    return cudaErrorInvalidValue;
+  }
+  vision_qkv_rope_bf16_kernel<<<tokens, kThreads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(qkv),
+      static_cast<const __nv_bfloat16*>(bias), position_ids,
+      static_cast<__nv_bfloat16*>(q), static_cast<__nv_bfloat16*>(k),
+      static_cast<__nv_bfloat16*>(v), tokens, heads, head_dim, theta);
+  return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_static_mqa_bf16(
     const void* q, const void* k, const void* v, void* output,
     int query_tokens, int key_tokens, int heads, int head_dim,
