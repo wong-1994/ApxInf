@@ -163,7 +163,11 @@ impl WallossConfig {
             },
             action: WallossActionConfig {
                 hidden_size: action_hidden_size,
-                state_hidden_size: usize_field(&value, "state_hidden_size")?,
+                state_hidden_size: value
+                    .get("state_hidden_size")
+                    .map(|field| value_as_usize(field, "state_hidden_size"))
+                    .transpose()?
+                    .unwrap_or(hidden_size),
                 intermediate_size: usize_field(action_expert, "intermediate_size")?,
                 action_dim: 26,
                 proprio_dim: 26,
