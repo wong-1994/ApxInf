@@ -50,6 +50,11 @@ from typing import Optional, Protocol, Tuple
 import numpy as np
 from PIL import Image
 
+try:
+    from _pi05_tactics import select_pi05_tactics
+except ModuleNotFoundError:  # imported as ``scripts.eval_libero`` in tests/tools
+    from scripts._pi05_tactics import select_pi05_tactics
+
 # --- rollout protocol constants (OpenPI's public PI0.5 LIBERO configuration) ---
 LIBERO_ACTION_DIM = 7
 MAX_STEPS = 520
@@ -363,6 +368,12 @@ class InProcessBackend:
             sys.path.insert(0, str(package_dir))
         from apxinf import AutoPolicy
 
+        tactics = select_pi05_tactics(
+            args.device, args.precision, repo_root, override=args.tactics
+        )
+        if tactics is not None:
+            print(f"using {args.precision} tactics for {args.device}: {tactics}", file=sys.stderr)
+
         self._policy = AutoPolicy.from_pretrained(
             args.model_dir,
             model_type=args.model_type,
@@ -370,7 +381,7 @@ class InProcessBackend:
             device=args.device,
             precision=args.precision,
             calibration=args.calibration,
-            tactics=args.tactics,
+            tactics=tactics,
             tokenizer_path=args.tokenizer,
             norm_key=args.norm_key,
             action_dim=(args.action_dim or None),
@@ -553,7 +564,7 @@ def parse_args() -> argparse.Namespace:
     in_process.add_argument("--checkpoint", type=pathlib.Path)
     in_process.add_argument("--device", default="cuda:0")
     in_process.add_argument("--calibration", type=pathlib.Path)
-    in_process.add_argument("--tactics", type=pathlib.Path)
+    in_process.add_argument("--tactics", type=pathlib.Path, help=argparse.SUPPRESS)
     in_process.add_argument("--tokenizer", type=pathlib.Path)
     in_process.add_argument("--norm-key", default="actions")
     in_process.add_argument("--action-dim", type=int, default=7, help="0 keeps the full vector")

@@ -49,7 +49,6 @@ server (``--host/--port``) and needs no local weights — serve with
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import os
 import pathlib
@@ -59,6 +58,11 @@ import sys
 import time
 
 import numpy as np
+
+try:
+    from _pi05_tactics import select_pi05_tactics
+except ModuleNotFoundError:  # imported as ``scripts.bench_pi05`` in tests/tools
+    from scripts._pi05_tactics import select_pi05_tactics
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _APXINF_PKG = _REPO_ROOT / "python" / "apxinf"
@@ -75,14 +79,6 @@ PROMPT_T21 = (
 
 ALL_LAYERS = ("l0", "l1", "l2", "l3")
 IN_PROCESS = ("l0", "l1", "l2")
-
-_DEFAULT_TACTICS = {
-    (87, "bf16"): "orin_sm87_bf16_v2_v3_h10_tactics.json",
-    (89, "bf16"): "rtx4090_sm89_bf16_v2_v3_h10_tactics.json",
-    (101, "fp8"): "thor_u_cutlass_tactics.json",
-    (110, "bf16"): "thor_sm110_bf16_v2_v3_h10_tactics.json",
-    (110, "fp8"): "thor_sm110_fp8_native_v2_v3_h10_tactics.json",
-}
 
 
 def _stats(samples_ms):
@@ -108,48 +104,6 @@ def _time_loop(fn, warmup, samples):
         fn()
         out.append((time.perf_counter() - t) * 1000.0)
     return out
-
-
-def _cuda_sm(device: str) -> int | None:
-    """Return CUDA's integer compute capability for ``cuda:N`` (e.g. 110)."""
-    if device == "cuda":
-        device_index = 0
-    elif device.startswith("cuda:"):
-        try:
-            device_index = int(device.removeprefix("cuda:"))
-        except ValueError as error:
-            raise SystemExit(f"invalid CUDA device {device!r}; expected cuda:N") from error
-    else:
-        return None
-
-    try:
-        cudart = ctypes.CDLL("libcudart.so")
-    except OSError as error:
-        raise SystemExit(f"cannot query {device}: failed to load CUDA runtime: {error}") from error
-
-    # cudaDevAttrComputeCapabilityMajor/Minor from cuda_runtime_api.h.
-    def attribute(code: int) -> int:
-        value = ctypes.c_int()
-        status = cudart.cudaDeviceGetAttribute(ctypes.byref(value), code, device_index)
-        if status != 0:
-            raise SystemExit(
-                f"cannot query {device} compute capability: cudaDeviceGetAttribute "
-                f"returned {status}"
-            )
-        return value.value
-
-    return attribute(75) * 10 + attribute(76)
-
-
-def _default_tactics(device: str, precision: str) -> pathlib.Path | None:
-    sm = _cuda_sm(device)
-    filename = _DEFAULT_TACTICS.get((sm, precision))
-    if filename is None:
-        return None
-    path = _REPO_ROOT / "configs" / "pi05" / filename
-    if not path.is_file():
-        raise SystemExit(f"default tactics for SM{sm} {precision} are missing: {path}")
-    return path
 
 
 def _git_commit():
@@ -357,7 +311,9 @@ def main() -> None:
     observation = rgb = token_ids = noise = patches = None
 
     if in_process:
-        tactics = args.tactics or _default_tactics(args.device, args.precision)
+        tactics = select_pi05_tactics(
+            args.device, args.precision, _REPO_ROOT, override=args.tactics
+        )
         if tactics is not None:
             print(f"using {args.precision} tactics for {args.device}: {tactics}", file=sys.stderr)
         if random:
