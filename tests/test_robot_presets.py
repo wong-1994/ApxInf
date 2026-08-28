@@ -60,6 +60,7 @@ from apxinf.processors.transforms import (  # noqa: E402
     lookup_key,
     set_key,
 )
+from apxinf.policies.impls import pi05 as pi05_module  # noqa: E402
 from apxinf.robots import unitree_g1 as robot_adapter  # noqa: E402
 from apxinf.robots.presets import (  # noqa: E402
     ROBOT_PRESETS,
@@ -597,6 +598,76 @@ class UnitreeG1AdapterTest(unittest.TestCase):
         # A concrete policy reappearing here is the regression to catch.
         source = pathlib.Path(robot_adapter.__file__).read_text()
         self.assertNotIn("Pi05Policy", source)
+
+
+class ModelLayerHoldsNoWireKeysTest(unittest.TestCase):
+    """The policy layer must not carry any dataset's wire contract.
+
+    ``Pi05Policy`` used to default ``image_keys`` to LIBERO's
+    ``observation/image`` / ``observation/wrist_image``. As *the* default those
+    two keys silently applied to every checkpoint, so a G1 checkpoint served bare
+    ran LIBERO's contract and looked like an accuracy problem. The fallback is
+    now the model's own view slots, which cannot masquerade as anyone's keys.
+    """
+
+    def _policy(self, num_views: int) -> Pi05Policy:
+        model = MockModel(num_views=num_views)
+        input_pipeline, output_pipeline = Pi05Policy.default_pipelines(
+            model,
+            tokenizer=RecordingTokenizer(),
+            unnormalizer=_identity_unnormalizer(),
+        )
+        return Pi05Policy(
+            model, input_pipeline=input_pipeline, output_pipeline=output_pipeline
+        )
+
+    def test_unnamed_cameras_fall_back_to_the_models_own_slots(self) -> None:
+        policy = self._policy(2)
+        self.assertEqual(policy.image_keys, VIEW_SLOTS[:2])
+        # Same list in the published contract, so a client reading metadata sees
+        # exactly what the ImageStack step resolves.
+        self.assertEqual(policy.metadata["image_keys"], list(VIEW_SLOTS[:2]))
+
+    def test_the_fallback_is_not_any_datasets_convention(self) -> None:
+        policy = self._policy(2)
+        for key in ("observation/image", "observation/wrist_image", "images/cam_high"):
+            self.assertNotIn(key, policy.image_keys)
+
+    def test_a_libero_client_against_the_fallback_fails_loudly(self) -> None:
+        # The point of dropping the default: a mismatch is an error naming both
+        # sides, not a silent run on the wrong cameras.
+        policy = self._policy(2)
+        observation = {
+            "observation/image": np.zeros((IMAGE_SIZE, IMAGE_SIZE, 3), np.uint8),
+            "observation/wrist_image": np.zeros((IMAGE_SIZE, IMAGE_SIZE, 3), np.uint8),
+            "prompt": "pick up the block",
+        }
+        with self.assertRaises(KeyError) as caught:
+            policy.infer(observation)
+        message = str(caught.exception)
+        self.assertIn(VIEW_SLOTS[0], message)
+
+    def test_the_fallback_stays_total_beyond_the_declared_slots(self) -> None:
+        # default_pipelines requires len(image_keys) == model.num_views, so the
+        # fallback has to name *every* view a model claims, slots or not.
+        policy = self._policy(len(VIEW_SLOTS) + 1)
+        self.assertEqual(len(policy.image_keys), len(VIEW_SLOTS) + 1)
+        self.assertEqual(policy.image_keys[: len(VIEW_SLOTS)], VIEW_SLOTS)
+        self.assertEqual(len(set(policy.image_keys)), len(policy.image_keys))
+
+    def test_no_constructor_defaults_a_camera_key(self) -> None:
+        # Asserted on the signatures rather than by grepping the source, so the
+        # prose explaining the old LIBERO default does not trip the check. Every
+        # entry point that takes image_keys must leave them unnamed.
+        for func in (
+            pi05_module.Pi05Policy.__init__,
+            pi05_module.Pi05Policy.default_pipelines,
+            pi05_module.Pi05Policy.from_pretrained,
+            pi05_module.Pi05Policy.from_random,
+        ):
+            with self.subTest(entry_point=func.__qualname__):
+                default = inspect.signature(func).parameters["image_keys"].default
+                self.assertIsNone(default)
 
 
 class RunningServer:

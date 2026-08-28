@@ -11,19 +11,24 @@ launch flag on both sides rather than a code edit on ours:
     openpi:  serve_policy.py --policy.config pi05_UnitreeG1_groundwire
     apxinf:  pi05_openpi_websocket_server.py --robot unitree_g1
 
-**Why a table and not a default.** ``Pi05Policy``'s ``_DEFAULT_IMAGE_KEYS`` is
-LIBERO's wire contract. As *the* default it silently applied to every checkpoint,
-so a G1 checkpoint served without extra arguments ran LIBERO's keys, dropped
-state, and skipped the G1 delta→absolute and 32→16 steps — every symptom of a
-"model accuracy problem" with nothing in the logs. A preset makes the embodiment
-an explicit, named choice.
+**Why a table and not a default.** ``Pi05Policy`` used to default ``image_keys``
+to ``("observation/image", "observation/wrist_image")`` — LIBERO's wire contract,
+living in the model layer as *the* default for every checkpoint. A G1 checkpoint
+served without extra arguments therefore ran LIBERO's keys, dropped state, and
+skipped the G1 delta→absolute and 32→16 steps — every symptom of a "model
+accuracy problem" with nothing in the logs. The policy now names its cameras
+after its own :data:`~apxinf.policies.base.VIEW_SLOTS` when the caller names
+none, so no dataset's convention can pass for a model default; a preset makes the
+embodiment an explicit, named choice.
 
 **Why slot names.** ``image_keys`` is order-significant: entry ``i`` is stacked
 into model view slot ``i``, which the checkpoint trained as openpi's
 ``base_0_rgb`` / ``left_wrist_0_rgb`` / ``right_wrist_0_rgb``. A tuple written in
 the wrong order still stacks, still has the right shape, and silently feeds the
 wrong camera to each slot. Pairing every wire key with the slot it fills makes
-that order reviewable instead of positional.
+that order reviewable instead of positional. The slot vocabulary itself is a
+*model* fact, so it is imported from :mod:`apxinf.policies.base` rather than
+restated here.
 
 **Naming rule: ``<arm>_<convention>``.** The arm alone does not determine the
 contract — LIBERO and DROID are both Franka Panda, yet LIBERO sends
@@ -41,7 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 from ..policies.auto import AutoPolicy
-from ..policies.base import Policy
+from ..policies.base import VIEW_SLOTS, Policy
 from ..processors.robots.unitree_g1 import G1_CAMERAS, G1_STATE_KEY
 from .unitree_g1 import build_unitree_g1_policy
 
@@ -54,11 +59,6 @@ __all__ = [
     "get_robot_preset",
     "build_robot_policy",
 ]
-
-#: pi05 model view slots in order, as named by openpi's ``model.IMAGE_KEYS``.
-#: A checkpoint's ``num_views`` is how many of these its weights were trained on;
-#: the names are openpi's convention, the *order* is baked into the weights.
-VIEW_SLOTS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
 
 
 def _build_generic(model_dir, **kwargs) -> Policy:

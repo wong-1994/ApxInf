@@ -31,6 +31,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--precision", choices=("auto", "fp8", "bf16", "int8"), default="bf16")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--action-dim", type=int, default=7, help="0 keeps the full vector")
+    parser.add_argument(
+        "--image-keys",
+        default=None,
+        help=(
+            "comma-separated camera wire keys, in model view-slot order. Omitted, "
+            "the policy names them after its own view slots (base_0_rgb, ...) — a "
+            "real deployment states its robot's keys, or uses --robot on "
+            "scripts/pi05_openpi_websocket_server.py, which has the preset table."
+        ),
+    )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     return parser.parse_args()
@@ -45,6 +55,11 @@ def main() -> None:
         device=args.device,
         precision=args.precision,
         action_dim=(args.action_dim or None),
+        image_keys=(
+            tuple(key.strip() for key in args.image_keys.split(",") if key.strip())
+            if args.image_keys
+            else None
+        ),
         # Extra metadata is sent to the client on connect (get_server_metadata).
         metadata={"protocol": "openpi.websocket_policy", "precision": args.precision},
     )

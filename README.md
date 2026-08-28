@@ -42,7 +42,16 @@ Reported latency is P50 over 30 samples after 10 warm-up iterations
 import numpy as np
 from apxinf import AutoPolicy
 
-policy = AutoPolicy.from_pretrained("<path-to-model>", precision="bf16", action_dim=7)
+# image_keys / state_key are the wire contract — the policy holds no dataset's
+# convention as a default, so state the ones your client actually sends. These
+# are LIBERO's; `--robot <preset>` on the server does this for you from a table.
+policy = AutoPolicy.from_pretrained(
+    "<path-to-model>",
+    precision="bf16",
+    action_dim=7,
+    image_keys=("observation/image", "observation/wrist_image"),
+    state_key="observation/state",
+)
 
 result = policy.infer({
     "observation/image":       np.zeros((256, 256, 3), np.uint8),

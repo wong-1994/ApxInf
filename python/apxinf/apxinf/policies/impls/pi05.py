@@ -45,7 +45,7 @@ from typing import Any, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from ..._tactics import resolve_pi05_tactics
-from ..base import BareModel
+from ..base import VIEW_SLOTS, BareModel
 from ...processors import (
     GaussianNoise,
     ImageStack,
@@ -77,7 +77,6 @@ from ..registry import register_policy
 
 __all__ = ["Pi05Policy"]
 
-_DEFAULT_IMAGE_KEYS = ("observation/image", "observation/wrist_image")
 _STATE_KEY = "observation/state"
 _PROMPT_KEY = "prompt"
 
@@ -92,7 +91,7 @@ class Pi05Policy:
         *,
         input_pipeline: Pipeline,
         output_pipeline: Pipeline,
-        image_keys: Sequence[str] = _DEFAULT_IMAGE_KEYS,
+        image_keys: Optional[Sequence[str]] = None,
         prompt_key: str = _PROMPT_KEY,
         state_key: str = _STATE_KEY,
         action_dim: Optional[int] = None,
@@ -101,7 +100,9 @@ class Pi05Policy:
         self.model = model
         self.input_pipeline = input_pipeline
         self.output_pipeline = output_pipeline
-        self.image_keys = tuple(image_keys)
+        self.image_keys = tuple(
+            image_keys if image_keys is not None else _default_image_keys(model.num_views)
+        )
         self.prompt_key = prompt_key
         self.state_key = state_key
         self.action_dim_out = (
@@ -166,7 +167,7 @@ class Pi05Policy:
         image_pipeline: Optional[Pipeline] = None,
         noise: Optional[GaussianNoise] = None,
         state_normalizer: Optional[Normalizer] = None,
-        image_keys: Sequence[str] = _DEFAULT_IMAGE_KEYS,
+        image_keys: Optional[Sequence[str]] = None,
         state_key: str = _STATE_KEY,
     ) -> Tuple[Pipeline, Pipeline]:
         """Assemble the default ``(input_pipeline, output_pipeline)`` from parts.
@@ -177,12 +178,19 @@ class Pi05Policy:
         fewer. Absent cameras are never sent, so there is no padding: the model
         runs the real view shape directly.
 
+        Omitting ``image_keys`` names the cameras after the model's own
+        :data:`~apxinf.policies.base.VIEW_SLOTS`, because this layer has no
+        business guessing anyone's wire keys — see :func:`_default_image_keys`.
+        A real deployment states them, usually via a robot preset.
+
         A deployment with *fewer* cameras than the checkpoint declares is served
         by loading with ``num_views=`` (``--num-views`` on the server), which
         drops the trailing view slots at load time rather than zero-filling them
         per request.
         """
-        image_keys = tuple(image_keys)
+        image_keys = tuple(
+            image_keys if image_keys is not None else _default_image_keys(model.num_views)
+        )
         if len(image_keys) != model.num_views:
             fix = (
                 f"load with num_views={len(image_keys)} to serve fewer cameras "
@@ -238,7 +246,7 @@ class Pi05Policy:
         discrete_state: bool = False,
         state_norm_key: str = "state",
         image_pipeline: Optional[Pipeline] = None,
-        image_keys: Sequence[str] = _DEFAULT_IMAGE_KEYS,
+        image_keys: Optional[Sequence[str]] = None,
         prompt_key: str = _PROMPT_KEY,
         state_key: str = _STATE_KEY,
         num_views: Optional[int] = None,
@@ -418,7 +426,9 @@ class Pi05Policy:
             reset_sampling(int(seed))
 
         if image_keys is None:
-            image_keys = _synthetic_image_keys(model.num_views)
+            # Resolved here rather than left to the two consumers below, so the
+            # published metadata and the ImageStack step cannot drift apart.
+            image_keys = _default_image_keys(model.num_views)
 
         input_pipeline, output_pipeline = cls.default_pipelines(
             model,
@@ -625,18 +635,26 @@ class Pi05Policy:
         )
 
 
-def _synthetic_image_keys(num_views: int) -> Tuple[str, ...]:
-    """Generate exactly ``num_views`` camera keys for a checkpoint-free policy.
+def _default_image_keys(num_views: int) -> Tuple[str, ...]:
+    """Name exactly ``num_views`` cameras when the caller names none.
 
-    Reuses the default ``image``/``wrist_image`` names for the first two views and
-    appends ``image_2``, ``image_3``, ... beyond that, so ``default_pipelines``'
+    Returns the model's own :data:`~apxinf.policies.base.VIEW_SLOTS` vocabulary,
+    truncated to the loaded view count, so the fallback describes the *model*
+    rather than some dataset. That is the whole point of not having a default
+    here: ``("observation/image", "observation/wrist_image")`` used to be it, and
+    those are LIBERO's wire keys — as *the* default they silently applied to
+    every checkpoint, so a G1 checkpoint served bare ran LIBERO's contract and
+    looked like an accuracy problem. Slot names cannot masquerade as anyone's
+    wire keys: a client sending LIBERO keys against this fallback gets a
+    ``KeyError`` naming both sides, which is the loud failure we want.
+
+    Beyond the declared slots the names continue as ``view_3_rgb``, ... so the
     ``len(image_keys) == model.num_views`` contract holds for any view count.
     """
-    base = list(_DEFAULT_IMAGE_KEYS)
-    if num_views <= len(base):
-        return tuple(base[:num_views])
-    extra = [f"observation/image_{i}" for i in range(len(base), num_views)]
-    return tuple(base + extra)
+    if num_views <= len(VIEW_SLOTS):
+        return tuple(VIEW_SLOTS[:num_views])
+    extra = [f"view_{index}_rgb" for index in range(len(VIEW_SLOTS), num_views)]
+    return tuple(VIEW_SLOTS) + tuple(extra)
 
 
 def _resolve_tokenizer(model_dir: Path, tokenizer_path) -> Path:

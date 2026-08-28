@@ -24,7 +24,8 @@ if _APXINF_PKG.is_dir() and str(_APXINF_PKG) not in sys.path:
 
 def synthetic_observation(
     *,
-    image_keys: Sequence[str] = ("observation/image", "observation/wrist_image"),
+    image_keys: Sequence[str],
+    state_key: str = "observation/state",
     height: int = 256,
     width: int = 256,
     state_dim: int = 8,
@@ -36,12 +37,17 @@ def synthetic_observation(
     Random ``uint8`` camera frames (raw ``HWC``; the policy's own resize step
     handles them) plus a float32 state vector and a text prompt. This is only to
     exercise the interface end-to-end — the actions it yields are meaningless.
+
+    ``image_keys`` has no default on purpose: camera wire keys are a dataset's
+    convention, and every caller here can read the real ones off the policy
+    (``policy.image_keys`` / ``policy.state_key``). A helper that guessed them
+    would drift from whatever the policy is actually serving.
     """
     rng = np.random.default_rng(seed)
     observation: Dict[str, Any] = {
         key: rng.integers(0, 256, size=(height, width, 3), dtype=np.uint8)
         for key in image_keys
     }
-    observation["observation/state"] = rng.standard_normal(state_dim).astype(np.float32)
+    observation[state_key] = rng.standard_normal(state_dim).astype(np.float32)
     observation["prompt"] = prompt
     return observation
