@@ -40,6 +40,7 @@ from typing import Any, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
+from ...calibration import CalibrationContext, CalibrationPlan
 from ..._tactics import resolve_pi05_tactics
 from ..base import BareModel
 from ...processors import (
@@ -467,6 +468,31 @@ class Pi05Policy:
         if not callable(calibrate):
             raise RuntimeError("the loaded model does not support PI0.5 calibration")
         return calibrate(rgb, "nhwc", token_ids, selected_noise)
+
+    def calibration_plan(self) -> CalibrationPlan:
+        """Return the stable sites selected by the native FP8 execution plan."""
+        native_plan = getattr(self.model, "_calibration_plan", None)
+        if not callable(native_plan):
+            raise RuntimeError("the loaded model does not expose an FP8 calibration plan")
+        return CalibrationPlan.runtime_validated_sites(
+            model_family="pi05",
+            sites=native_plan(),
+            schema="apxinf.pi05.fp8-calibration.v1",
+            seed_algorithm="numpy-pcg64-seed-sequence-v1",
+        )
+
+    def collect_calibration(
+        self, observation: Mapping[str, Any], context: CalibrationContext
+    ) -> Mapping[str, float]:
+        """Implement the common runner seam using normal PI0.5 preprocessing."""
+        rng = np.random.default_rng(
+            np.random.SeedSequence([context.seed, context.sample_index])
+        )
+        noise = np.ascontiguousarray(
+            rng.standard_normal((self.model.action_horizon, self.model.action_dim)),
+            dtype=np.float32,
+        )
+        return self.calibrate_observation(observation, noise=noise)
 
     def infer(self, observation: Mapping[str, Any], *, noise: Optional[np.ndarray] = None) -> dict:
         """Run pre-pipeline -> model -> post-pipeline on one raw observation dict.

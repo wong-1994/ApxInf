@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable, Mapping
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -11,7 +13,6 @@ import pathlib
 import platform
 import subprocess
 import sys
-from collections.abc import Iterable, Mapping
 
 import numpy as np
 
@@ -22,10 +23,6 @@ if _APXINF_PKG.is_dir() and str(_APXINF_PKG) not in sys.path:
     sys.path.insert(0, str(_APXINF_PKG))
 
 SCHEMA = "apxinf.pi05.fp8-calibration.v1"
-FP8_FORMAT = "e4m3fn"
-STATISTIC = "absmax"
-SCALE_RULE = "max(amax*margin/448,1e-8)"
-FP8_MAX = 448.0
 
 
 def parse_args(argv=None):
@@ -136,11 +133,9 @@ def deterministic_noise(policy, seed: int, sample_index: int) -> np.ndarray:
 
 
 def merge_records(aggregate, records):
-    for name, value in records.items():
-        value = float(value)
-        if not np.isfinite(value) or value < 0.0:
-            raise ValueError(f"native calibration returned invalid amax for {name}: {value}")
-        aggregate[name] = max(aggregate.get(name, 0.0), value)
+    from apxinf.calibration import merge_records as merge
+
+    merge(aggregate, records)
 
 
 def _hash_files(paths: Iterable[pathlib.Path], root: pathlib.Path) -> str:
@@ -215,49 +210,36 @@ def calibration_document(
     device,
     revision=None,
 ):
+    from apxinf.calibration import (
+        CalibrationPlan,
+        build_calibration_document,
+    )
+
     required = tuple(required_sites)
-    observed = set(records)
-    missing = sorted(set(required) - observed)
-    unknown = sorted(observed - set(required))
-    if missing or unknown:
-        raise ValueError(f"calibration site coverage mismatch: missing={missing}, unknown={unknown}")
-    scales = {}
-    for name in sorted(records):
-        amax = float(records[name])
-        if bootstrap and name == "vision.patch_input":
-            amax = max(amax, 1.0 / margin)
-        if bootstrap and name == "action.input":
-            amax = max(amax, 5.0 / margin)
-        scales[name] = {
-            "amax": amax,
-            "scale": max(amax * margin / FP8_MAX, 1.0e-8),
-        }
-    return {
-        "schema": SCHEMA,
-        "model": {"family": "pi05", "checkpoint": checkpoint},
-        "quantization": {
-            "format": FP8_FORMAT,
-            "statistic": STATISTIC,
-            "scale_rule": SCALE_RULE,
-            "margin": margin,
-        },
-        "calibration_data": {
-            "identity": data_identity,
-            "kind": "synthetic-zero-fixture" if bootstrap else "representative",
-            "production": not bootstrap,
-            "sample_count": sample_count,
-        },
-        "seed_policy": {
-            "algorithm": "numpy-pcg64-seed-sequence-v1",
-            "base_seed": seed,
-            "sample_sequence": "[base_seed,sample_index]",
-        },
-        "source_revision": source_revision(revision),
-        "device": {"requested": device, "host": platform.platform()},
-        "plan": {"sites": list(required)},
-        "observed_sites": sorted(observed),
-        "scales": scales,
-    }
+    minimum_amax = (
+        {"vision.patch_input": 1.0 / margin, "action.input": 5.0 / margin}
+        if bootstrap
+        else {}
+    )
+    plan = CalibrationPlan.runtime_validated_sites(
+        model_family="pi05",
+        sites=required,
+        schema=SCHEMA,
+        seed_algorithm="numpy-pcg64-seed-sequence-v1",
+    )
+    plan = replace(plan, minimum_amax=minimum_amax)
+    return build_calibration_document(
+        records,
+        plan=plan,
+        checkpoint=checkpoint,
+        data_identity=data_identity,
+        source_revision=source_revision(revision),
+        device={"requested": device, "host": platform.platform()},
+        margin=margin,
+        seed=seed,
+        bootstrap=bootstrap,
+        sample_count=sample_count,
+    )
 
 
 def write_profile(output: pathlib.Path, document, *, force: bool) -> None:
@@ -277,6 +259,7 @@ def main(argv=None):
     args = parse_args(argv)
     output, checkpoint = validate_args(args)
     from apxinf import Pi05Policy
+    from apxinf.calibration import CalibrationRunner
 
     policy_options = {
         "checkpoint": checkpoint,
@@ -296,31 +279,38 @@ def main(argv=None):
     if args.action_horizon is not None:
         policy_options["action_horizon"] = args.action_horizon
     policy = Pi05Policy.from_pretrained(args.model_dir, **policy_options)
-    aggregate = {}
-    sample_count = 0
     try:
-        required_sites = policy.model._calibration_plan()
-        for sample_count, observation in enumerate(load_observations(args, policy), start=1):
-            noise = deterministic_noise(policy, args.seed, sample_count - 1)
-            merge_records(
-                aggregate, policy.calibrate_observation(observation, noise=noise)
+        plan = policy.calibration_plan()
+        if args.zero_fixture:
+            plan = replace(
+                plan,
+                minimum_amax={
+                    "vision.patch_input": 1.0 / args.margin,
+                    "action.input": 5.0 / args.margin,
+                },
             )
+        runner = CalibrationRunner(
+            policy,
+            plan,
+            checkpoint=checkpoint_identity(checkpoint),
+            data_identity=calibration_data_identity(args.input, args.data_id),
+            source_revision=source_revision(args.source_revision),
+            device={"requested": args.device, "host": platform.platform()},
+            margin=args.margin,
+            seed=args.seed,
+            bootstrap=args.zero_fixture,
+        )
+        document = runner.run(load_observations(args, policy))
     finally:
         policy.close()
-    document = calibration_document(
-        aggregate,
-        margin=args.margin,
-        sample_count=sample_count,
-        bootstrap=args.zero_fixture,
-        required_sites=required_sites,
-        checkpoint=checkpoint_identity(checkpoint),
-        data_identity=calibration_data_identity(args.input, args.data_id),
-        seed=args.seed,
-        device=args.device,
-        revision=args.source_revision,
-    )
+    if document is None:
+        print("dynamic activation FP8 is calibration-free; no profile was generated")
+        return
     write_profile(output, document, force=args.force)
-    print(f"wrote {len(aggregate)} activation scales from {sample_count} sample(s): {output}")
+    print(
+        f"wrote {len(document['scales'])} activation scales from "
+        f"{document['calibration_data']['sample_count']} sample(s): {output}"
+    )
     if args.zero_fixture:
         print("warning: synthetic profile is non-production; calibrate representative data")
 

@@ -6,6 +6,7 @@ from unittest import mock
 
 import numpy as np
 
+from apxinf.calibration import CalibrationPlan
 from scripts import calibrate_pi05
 
 
@@ -29,9 +30,19 @@ class CalibratePi05Test(unittest.TestCase):
             state_key = "observation/state"
             discrete_state = False
 
-            def calibrate_observation(self, observation, *, noise):
+            def calibration_plan(self):
+                return CalibrationPlan.runtime_validated_sites(
+                    model_family="pi05",
+                    sites=("vision.patch_input",),
+                    schema=calibrate_pi05.SCHEMA,
+                    seed_algorithm="numpy-pcg64-seed-sequence-v1",
+                )
+
+            def collect_calibration(self, observation, context):
                 self.last_observation = observation
-                self.last_noise = noise
+                self.last_noise = calibrate_pi05.deterministic_noise(
+                    self, context.seed, context.sample_index
+                )
                 return {"vision.patch_input": 4.0}
 
             def close(self):
@@ -86,6 +97,11 @@ class CalibratePi05Test(unittest.TestCase):
             document = json.loads(output.read_text())
             self.assertEqual(document["calibration_data"]["identity"], "dataset:test-v1")
             self.assertEqual(document["observed_sites"], ["vision.patch_input"])
+            self.assertEqual(document["plan"], {"sites": ["vision.patch_input"]})
+            self.assertEqual(
+                document["seed_policy"]["algorithm"],
+                "numpy-pcg64-seed-sequence-v1",
+            )
             self.assertEqual(policy.last_observation["prompt"], "move")
             self.assertEqual(policy.last_noise.shape, (2, 3))
             self.assertEqual(captured_options["image_keys"], ("observation/image",))
