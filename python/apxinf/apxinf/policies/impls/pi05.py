@@ -23,13 +23,21 @@ returns the **unnormalized-domain** chunk. The intermediate normalized action is
 also returned (``normalized_actions``) so the layering invariant
 ``L2 minus unnormalize == L1`` can be checked directly.
 
-**State injection (opt-in, off by default):** ``observation/state`` is dropped by
-default so the numerics match today's serving link. Enable it with
-``discrete_state=True``: the raw state is first mapped to ``[-1, 1]`` by a
-``state_normalizer`` (a :class:`~apxinf.processors.Normalizer` over
-``norm_stats["state"]`` by default), then discretized into the prompt — matching
-openpi's "normalize then discretize" order. This path does **not** assume the
-incoming state is already in ``[-1, 1]``.
+**State injection (opt-in, off by default):** state is dropped by default so the
+numerics match today's serving link. Enable it with ``discrete_state=True``: the
+raw state is first mapped to ``[-1, 1]`` by a ``state_normalizer`` (a
+:class:`~apxinf.processors.Normalizer` over ``norm_stats["state"]`` by default),
+then discretized into the prompt — matching openpi's "normalize then discretize"
+order. This path does **not** assume the incoming state is already in ``[-1, 1]``.
+
+**This module names no dataset's wire keys.** ``image_keys`` falls back to the
+model's own :data:`~apxinf.policies.base.VIEW_SLOTS`, and ``state_key`` has no
+fallback at all — it is required exactly when state is read and may stay ``None``
+when state is dropped. ``("observation/image", "observation/wrist_image")`` and
+``"observation/state"`` used to be the defaults here, which is LIBERO's dialect
+applied to every checkpoint: a G1 checkpoint served bare ran LIBERO's contract
+and looked like an accuracy problem. Wire keys belong to
+:mod:`apxinf.conventions`; a robot preset pairs one with a body.
 
 This module registers ``Pi05Policy`` under ``model_type="pi05"`` so
 :class:`~apxinf.policies.auto.AutoPolicy` can dispatch to it.
@@ -77,7 +85,9 @@ from ..registry import register_policy
 
 __all__ = ["Pi05Policy"]
 
-_STATE_KEY = "observation/state"
+#: ``prompt`` is openpi's *protocol*-level name for the instruction field — every
+#: dialect on this wire uses it — so unlike the camera and state keys it is not
+#: any one dataset's convention and keeps a default here.
 _PROMPT_KEY = "prompt"
 
 
@@ -93,7 +103,7 @@ class Pi05Policy:
         output_pipeline: Pipeline,
         image_keys: Optional[Sequence[str]] = None,
         prompt_key: str = _PROMPT_KEY,
-        state_key: str = _STATE_KEY,
+        state_key: Optional[str] = None,
         action_dim: Optional[int] = None,
         metadata: Optional[Mapping[str, Any]] = None,
     ):
@@ -115,6 +125,16 @@ class Pi05Policy:
         tokenizer = getattr(tokenize, "tokenizer", None)
         self.discrete_state = bool(getattr(tokenizer, "discrete_state", False))
         state_normalized = getattr(tokenize, "state_normalizer", None) is not None
+        if self.discrete_state and self.state_key is None:
+            # The chain reads state but nothing says from where. Left alone this
+            # would serve a policy whose published state_key is null while its
+            # tokenizer quietly injects nothing — proprioception lost in silence.
+            raise ValueError(
+                "Pi05Policy: this chain discretizes state into the prompt but no "
+                "state_key was given. Name the wire key your client sends (see "
+                "apxinf.conventions, or a robot preset), or build the policy with "
+                "discrete_state=False to drop state deliberately."
+            )
 
         # Kept apart from the derived half so ``with_adapter`` can carry the
         # caller's description forward while the rewired policy recomputes what
@@ -168,7 +188,7 @@ class Pi05Policy:
         noise: Optional[GaussianNoise] = None,
         state_normalizer: Optional[Normalizer] = None,
         image_keys: Optional[Sequence[str]] = None,
-        state_key: str = _STATE_KEY,
+        state_key: Optional[str] = None,
     ) -> Tuple[Pipeline, Pipeline]:
         """Assemble the default ``(input_pipeline, output_pipeline)`` from parts.
 
@@ -182,6 +202,12 @@ class Pi05Policy:
         :data:`~apxinf.policies.base.VIEW_SLOTS`, because this layer has no
         business guessing anyone's wire keys — see :func:`_default_image_keys`.
         A real deployment states them, usually via a robot preset.
+
+        ``state_key`` has no such fallback and none is possible: there is no
+        model-side vocabulary for a state key the way ``VIEW_SLOTS`` is one for
+        cameras. It is therefore required exactly when it is read — i.e. when
+        ``state_normalizer`` / the tokenizer put state into the prompt — and may
+        stay ``None`` when state is dropped, in which case nothing looks it up.
 
         A deployment with *fewer* cameras than the checkpoint declares is served
         by loading with ``num_views=`` (``--num-views`` on the server), which
@@ -248,7 +274,7 @@ class Pi05Policy:
         image_pipeline: Optional[Pipeline] = None,
         image_keys: Optional[Sequence[str]] = None,
         prompt_key: str = _PROMPT_KEY,
-        state_key: str = _STATE_KEY,
+        state_key: Optional[str] = None,
         num_views: Optional[int] = None,
         metadata: Optional[Mapping[str, Any]] = None,
     ) -> "Pi05Policy":
@@ -276,7 +302,9 @@ class Pi05Policy:
         validator accepts). State injection is off by default; with
         ``discrete_state=True`` a state normalizer is built from
         ``norm_stats[state_norm_key]`` to map raw state to ``[-1, 1]`` before it is
-        discretized into the prompt.
+        discretized into the prompt, and ``state_key`` becomes **required** —
+        there is no dataset-neutral name to fall back to, and guessing one would
+        drop proprioception silently.
 
         ``num_views`` loads the checkpoint for fewer cameras than it declares, for
         a deployment that has fewer. It must equal ``len(image_keys)``. This drops
@@ -295,6 +323,16 @@ class Pi05Policy:
         :meth:`__init__` (or mutate ``policy.input_pipeline`` after construction).
         """
         model_dir = Path(model_dir)
+        if discrete_state and state_key is None:
+            # Caught here rather than deeper in Tokenize so the message can name
+            # the two flags the caller actually passed. discrete_state=True with
+            # no key would inject nothing and publish state_key=null.
+            raise ValueError(
+                "Pi05Policy.from_pretrained: discrete_state=True needs a state_key — "
+                "the wire key your client sends state under (see apxinf.conventions, "
+                "or use a robot preset via build_robot_policy). Pass "
+                "discrete_state=False to drop state instead."
+            )
         if unnormalizer is not None and action_dim is not None and int(action_dim) != unnormalizer.width:
             # Both name the deployable width; an injected map already fixes it, so
             # a disagreeing action_dim would silently lose to the injection.
@@ -389,7 +427,7 @@ class Pi05Policy:
         seed: int = 0,
         image_keys: Optional[Sequence[str]] = None,
         prompt_key: str = _PROMPT_KEY,
-        state_key: str = _STATE_KEY,
+        state_key: Optional[str] = None,
         metadata: Optional[Mapping[str, Any]] = None,
         warn: bool = True,
     ) -> "Pi05Policy":

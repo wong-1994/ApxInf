@@ -318,7 +318,10 @@ def main() -> None:
             metadata=metadata,
         )
     # Clients read the served wire contract off this metadata rather than assuming
-    # one: a key mismatch is silent on the wire but visible here.
+    # one: a key mismatch is silent on the wire but visible here. A null state_key
+    # is not a gap — it says this policy drops state, so there is no key to send
+    # one under; rendered as "(dropped)" so the log line cannot read as an omission.
+    served_state_key = policy.metadata["state_key"]
     logging.info(
         "serving robot=%s robot_steps=%s H=%d x D=%d image_keys=%s state=%s "
         "discrete_state=%s",
@@ -327,7 +330,7 @@ def main() -> None:
         policy.metadata["action_horizon"],
         policy.metadata["action_dim"],
         policy.metadata["image_keys"],
-        policy.metadata["state_key"],
+        served_state_key if served_state_key is not None else "(dropped)",
         policy.metadata["discrete_state"],
     )
     server = WebsocketPolicyServer(policy, args.host, args.port)

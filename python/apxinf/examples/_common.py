@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
-from typing import Any, Dict, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 
@@ -25,7 +25,8 @@ if _APXINF_PKG.is_dir() and str(_APXINF_PKG) not in sys.path:
 def synthetic_observation(
     *,
     image_keys: Sequence[str],
-    state_key: str = "observation/state",
+    state_key: Optional[str] = None,
+    prompt_key: str = "prompt",
     height: int = 256,
     width: int = 256,
     state_dim: int = 8,
@@ -42,12 +43,17 @@ def synthetic_observation(
     convention, and every caller here can read the real ones off the policy
     (``policy.image_keys`` / ``policy.state_key``). A helper that guessed them
     would drift from whatever the policy is actually serving.
+
+    ``state_key`` is ``None`` by default for the same reason, and ``None`` is
+    also what a policy that *drops* state publishes — so no state is put in the
+    dict, which is exactly what such a policy reads.
     """
     rng = np.random.default_rng(seed)
     observation: Dict[str, Any] = {
         key: rng.integers(0, 256, size=(height, width, 3), dtype=np.uint8)
         for key in image_keys
     }
-    observation[state_key] = rng.standard_normal(state_dim).astype(np.float32)
-    observation["prompt"] = prompt
+    if state_key is not None:
+        observation[state_key] = rng.standard_normal(state_dim).astype(np.float32)
+    observation[prompt_key] = prompt
     return observation

@@ -41,7 +41,7 @@ things and they never need to be equal.
 | | what it is | where it lives | on the wire? |
 |---|---|---|---|
 | **view slots** | `base_0_rgb`, `left_wrist_0_rgb`, `right_wrist_0_rgb` | `VIEW_SLOTS` in `policies/base.py` | never — the *order* is baked into the weights |
-| **wire keys** | `observation/image`, `images/cam_high`, … | a preset's `Convention` | yes — this is what the client sends |
+| **wire keys** | `observation/image`, `images/cam_high`, … | a `Convention` in `conventions.py` | yes — this is what the client sends |
 | **training feature names** | LeRobot `config.json` `input_features` | the checkpoint | no |
 
 A preset pairs each view slot with the wire key that fills it. `image_keys` is
@@ -221,7 +221,10 @@ through `AutoPolicy` — so `config.json` decides which model it is, not this fi
 from ..policies.auto import AutoPolicy
 from ..policies.base import ComposablePolicy, Policy
 
-def build_<robot>_policy(model_dir, *, state_key=..., image_keys=..., **load_kwargs):
+# state_key / image_keys are required and have no defaults — they belong to the
+# dataset (Step 4), not to this body. A default here would mean the same arm,
+# re-recorded under new keys, silently keeps serving the old ones.
+def build_<robot>_policy(model_dir, *, state_key, image_keys, **load_kwargs):
     base = AutoPolicy.from_pretrained(
         model_dir,
         image_keys=tuple(image_keys),
@@ -265,7 +268,8 @@ width instead of advertising one nothing emits.
 
 ### Step 4 — register the preset
 
-One entry in `python/apxinf/apxinf/robots/presets.py`. This is the whole
+Two entries: a `Convention` in `python/apxinf/apxinf/conventions.py` and a body +
+pairing in `python/apxinf/apxinf/robots/presets.py`. That is the whole
 registration step — OpenPI's `training/config.py` equivalent.
 
 A preset is two halves, because the arm and the key convention vary
@@ -273,9 +277,19 @@ independently. An `Embodiment` is the **body**: camera count, deployable action
 width, which pre/post steps its actions need. It survives a change of dataset. A
 `Convention` is a **dataset's recording dialect**: the wire keys and the state
 routing that follows from how the data was recorded. It survives a change of
-robot.
+robot, which is why it lives in its own module and not under `robots/` — a
+dialect that lived in one robot's file could only ever be that robot's.
 
 ```python
+# apxinf/conventions.py — the dialect, independent of any arm
+MY_DATASET_KEYS = Convention(
+    name="mydataset",
+    image_keys=("observation/image", "observation/wrist_image"),  # in view-slot order
+    state_key="observation/state",
+    discrete_state=False,       # False *drops* state entirely — not "keeps it raw"
+)
+
+# apxinf/robots/presets.py — the body, and the pairing
 MY_ARM = Embodiment(
     name="myarm",
     num_cameras=2,
@@ -284,17 +298,10 @@ MY_ARM = Embodiment(
     builder_kwargs={},          # constants the builder always receives
 )
 
-MY_DATASET_KEYS = Convention(
-    name="mydataset",
-    image_keys=("observation/image", "observation/wrist_image"),  # in view-slot order
-    state_key="observation/state",
-    discrete_state=False,       # False *drops* state entirely — not "keeps it raw"
-)
-
 MY_ROBOT = RobotPreset(
     name="myarm_mydataset",
     embodiment=MY_ARM,
-    convention=MY_DATASET_KEYS,
+    convention=conventions.MY_DATASET_KEYS,
     summary="MyArm, MyDataset keys: 2 cameras, 7-dim action",
 )
 
@@ -303,6 +310,13 @@ ROBOT_PRESETS = {p.name: p for p in (FRANKA_LIBERO, UNITREE_G1, MY_ROBOT)}
 
 Serving the same arm under a second dataset's keys is then one more `Convention`
 and one more pairing — no builder edit, no duplicated action width.
+
+If your robot lives in **your own package**, do not patch either file. Call
+`register_convention(...)` and `register_robot_preset(..., aliases=(...))` at
+your module scope; importing that module before the server starts is enough to
+make it `--robot <name>`. Re-registering an existing name needs an explicit
+`replace=True`, and an alias may never shadow a canonical preset name — a silent
+overwrite would change what a launch command already in production resolves to.
 
 Only the *pairing* is deployable, so `--robot` stays a single flag over
 `ROBOT_PRESETS` rather than becoming `--robot` + `--convention`. Separate flags
@@ -397,7 +411,10 @@ the encode step.
 1. **`discrete_state=False` drops state; it does not pass it through raw.**
    There is no third state. A joint-space robot served with `discrete_state=False`
    loses its proprioception silently, which also makes any delta→absolute step a
-   no-op (a delta cannot be resolved without current joint positions).
+   no-op (a delta cannot be resolved without current joint positions). This is
+   also why `state_key` is **required whenever it is read**: a wrong camera key
+   raises on the first inference, but a missing state key is silent, so the
+   policy refuses to be built with `discrete_state=True` and no key.
 2. **`image_keys` order is the view slot order.** Wrong order → right shape,
    wrong cameras, no error. This is why presets pair keys with slot names.
 3. **Truncate after unnormalize, not before.** Unnormalize at full model width so
@@ -429,6 +446,7 @@ the encode step.
    omission should fail at startup.
 2. **Robot steps are model-agnostic; adapters are where they meet a policy.**
    `processors/robots/` imports no policy symbols; `robots/` does the assembly.
+   Neither holds a wire key: those are a dataset's, and live in `conventions.py`.
 3. **Fail loudly with the served contract in the message.** Every error in this
    layer names what the server is actually serving, because the person reading it
    is comparing two dialects.
@@ -443,6 +461,7 @@ The Unitree G1 port is the reference implementation — it exercises every step,
 including the ones `franka_libero` skips:
 
 - `python/apxinf/apxinf/robots/presets.py` — the registry and both presets
+- `python/apxinf/apxinf/conventions.py` — the LIBERO and G1 wire dialects
 - `python/apxinf/apxinf/processors/robots/unitree_g1.py` — decode-state,
   delta→absolute, 32→16 encode
 - `python/apxinf/apxinf/robots/unitree_g1.py` — the adapter that splices them in

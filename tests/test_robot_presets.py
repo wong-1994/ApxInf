@@ -47,15 +47,29 @@ os.environ["no_proxy"] = "127.0.0.1,localhost"
 from apxinf import Pi05Policy  # noqa: E402
 from apxinf.policies.base import ComposablePolicy  # noqa: E402
 from apxinf.processors import Pipeline, ProcessorStep, PromptTokenizer, Unnormalizer  # noqa: E402
+from apxinf import conventions as conventions_module  # noqa: E402
+from apxinf.conventions import (  # noqa: E402
+    CONVENTIONS,
+    LIBERO as LIBERO_CONVENTION,
+    UNITREE_G1 as G1_CONVENTION,
+    Convention,
+    available_conventions,
+    get_convention,
+    register_convention,
+)
 from apxinf.processors.robots.unitree_g1 import (  # noqa: E402
-    G1_CAMERAS,
     G1_ROBOT_DIM,
-    G1_STATE_KEY,
     UnitreeG1AbsoluteActions,
     UnitreeG1DecodeState,
     UnitreeG1EncodeActions,
 )
+
+# The G1 client's wire keys are a recording convention, not a fact about the
+# body, so the tests read them from the convention the preset pairs with.
+G1_CAMERAS = G1_CONVENTION.image_keys
+G1_STATE_KEY = G1_CONVENTION.state_key
 from apxinf.processors.transforms import (  # noqa: E402
+    Tokenize,
     has_key,
     lookup_key,
     set_key,
@@ -63,14 +77,15 @@ from apxinf.processors.transforms import (  # noqa: E402
 from apxinf.policies.impls import pi05 as pi05_module  # noqa: E402
 from apxinf.robots import unitree_g1 as robot_adapter  # noqa: E402
 from apxinf.robots.presets import (  # noqa: E402
+    ROBOT_ALIASES,
     ROBOT_PRESETS,
     VIEW_SLOTS,
-    Convention,
     Embodiment,
     RobotPreset,
     available_robots,
     build_robot_policy,
     get_robot_preset,
+    register_robot_preset,
 )
 from apxinf.robots.unitree_g1 import build_unitree_g1_policy  # noqa: E402
 from apxinf.serving import WebsocketPolicyServer  # noqa: E402
@@ -628,10 +643,25 @@ class UnitreeG1AdapterTest(unittest.TestCase):
         # Advertising 16 regardless would publish a width no step produces.
         stub = _StubComposable()
         with self._patched_loader({}, stub):
-            build_unitree_g1_policy("/nowhere", adapt_to_pi=False)
+            build_unitree_g1_policy(
+                "/nowhere",
+                state_key=G1_STATE_KEY,
+                image_keys=G1_CAMERAS,
+                adapt_to_pi=False,
+            )
         self.assertEqual(stub.wrapped["before"], [])
         self.assertEqual(stub.wrapped["after"], ["g1_absolute"])
         self.assertIsNone(stub.wrapped["action_dim"])
+
+    def test_the_wire_keys_are_required_arguments(self) -> None:
+        # They are a recording convention, not a fact about this body. A default
+        # here would rebuild the robot<->dataset coupling one layer up: the same
+        # G1 re-recorded under different keys would silently serve the old ones.
+        with self._patched_loader({}, _StubComposable()):
+            with self.assertRaises(TypeError):
+                build_unitree_g1_policy("/nowhere", image_keys=G1_CAMERAS)
+            with self.assertRaises(TypeError):
+                build_unitree_g1_policy("/nowhere", state_key=G1_STATE_KEY)
 
     def test_a_policy_that_cannot_be_wrapped_is_named_in_the_error(self) -> None:
         class Unwrappable:
@@ -639,7 +669,9 @@ class UnitreeG1AdapterTest(unittest.TestCase):
 
         with self._patched_loader({}, Unwrappable()):
             with self.assertRaises(TypeError) as caught:
-                build_unitree_g1_policy("/nowhere")
+                build_unitree_g1_policy(
+                    "/nowhere", state_key=G1_STATE_KEY, image_keys=G1_CAMERAS
+                )
         message = str(caught.exception)
         self.assertIn("Unwrappable", message)
         self.assertIn("with_adapter", message)
@@ -663,13 +695,20 @@ class ModelLayerHoldsNoWireKeysTest(unittest.TestCase):
 
     def _policy(self, num_views: int) -> Pi05Policy:
         model = MockModel(num_views=num_views)
+        # A state key has to be named because RecordingTokenizer discretizes
+        # state; these tests are about the *camera* fallback, so it is a neutral
+        # spelling rather than any dataset's.
         input_pipeline, output_pipeline = Pi05Policy.default_pipelines(
             model,
             tokenizer=RecordingTokenizer(),
             unnormalizer=_identity_unnormalizer(),
+            state_key="state",
         )
         return Pi05Policy(
-            model, input_pipeline=input_pipeline, output_pipeline=output_pipeline
+            model,
+            input_pipeline=input_pipeline,
+            output_pipeline=output_pipeline,
+            state_key="state",
         )
 
     def test_unnamed_cameras_fall_back_to_the_models_own_slots(self) -> None:
@@ -917,6 +956,236 @@ class ImageSlotOrderTest(unittest.TestCase):
                 "/nonexistent", model=MockModel(num_views=3), num_views=2
             )
         self.assertIn("pass num_views to the load call", str(caught.exception))
+
+
+class ConventionsAreTheirOwnLayerTest(unittest.TestCase):
+    """A recording dialect is not a robot's property, so it has its own module.
+
+    The G1's wire keys used to live in ``processors/robots/unitree_g1.py`` — a
+    *dataset* fact defined inside a *body*'s processing steps, so re-recording the
+    same robot meant editing its steps. They now live in :mod:`apxinf.conventions`,
+    which depends on neither a body nor a policy implementation.
+    """
+
+    def test_the_shipped_conventions_are_registered_under_their_names(self) -> None:
+        self.assertIs(get_convention("libero"), LIBERO_CONVENTION)
+        self.assertIs(get_convention("unitree_g1"), G1_CONVENTION)
+        for name in ("libero", "unitree_g1"):
+            self.assertIn(name, available_conventions())
+
+    def test_a_preset_reuses_the_convention_object_rather_than_restating_it(self) -> None:
+        # If a preset copied the keys instead, the two could drift and only a
+        # client would notice — on the wire, silently.
+        self.assertIs(get_robot_preset("unitree_g1").convention, G1_CONVENTION)
+        self.assertIs(get_robot_preset("franka_libero").convention, LIBERO_CONVENTION)
+
+    def test_the_g1_steps_no_longer_hold_the_g1s_wire_keys(self) -> None:
+        # The regression to catch: a body's processing steps naming a dataset's
+        # keys again. Checked on the module's exports, not by grepping prose.
+        from apxinf.processors.robots import unitree_g1 as g1_steps
+
+        self.assertFalse(hasattr(g1_steps, "G1_CAMERAS"))
+        self.assertFalse(hasattr(g1_steps, "G1_STATE_KEY"))
+        for step in (UnitreeG1DecodeState, UnitreeG1AbsoluteActions):
+            with self.subTest(step=step.__name__):
+                default = inspect.signature(step).parameters["state_key"].default
+                self.assertIs(default, inspect.Parameter.empty)
+
+    def test_conventions_import_no_body_and_no_policy_implementation(self) -> None:
+        # The layering rule: a dialect may read the model's VIEW_SLOTS vocabulary
+        # and nothing else. Anything more and the third axis is coupled again.
+        source = pathlib.Path(conventions_module.__file__).read_text()
+        for forbidden in ("Embodiment", "RobotPreset", "Pi05Policy", "AutoPolicy"):
+            with self.subTest(name=forbidden):
+                self.assertNotIn(f"import {forbidden}", source)
+                self.assertNotIn(f"{forbidden}(", source)
+
+
+class RegistrationFromOutsideTest(unittest.TestCase):
+    """A third-party robot or dialect must not have to patch our files.
+
+    Both registries are process-local dicts, so each test restores them; the
+    point under test is the guard rails, not the mutation.
+    """
+
+    def setUp(self) -> None:
+        self._presets = dict(ROBOT_PRESETS)
+        self._aliases = dict(ROBOT_ALIASES)
+        self._conventions = dict(CONVENTIONS)
+
+    def tearDown(self) -> None:
+        ROBOT_PRESETS.clear()
+        ROBOT_PRESETS.update(self._presets)
+        ROBOT_ALIASES.clear()
+        ROBOT_ALIASES.update(self._aliases)
+        CONVENTIONS.clear()
+        CONVENTIONS.update(self._conventions)
+
+    def _preset(self, name: str = "myarm_mydataset") -> RobotPreset:
+        return RobotPreset(
+            name=name,
+            embodiment=Embodiment(name="myarm", num_cameras=1, action_dim=6),
+            convention=Convention(name="mydataset", image_keys=("rgb",), state_key="q"),
+        )
+
+    def test_a_registered_preset_is_reachable_as_a_robot_flag(self) -> None:
+        preset = register_robot_preset(self._preset(), aliases=("myarm",))
+        self.assertIs(get_robot_preset("myarm_mydataset"), preset)
+        self.assertIs(get_robot_preset("myarm"), preset)
+        self.assertIn("myarm_mydataset", available_robots())
+        self.assertIn("myarm", available_robots(include_aliases=True))
+
+    def test_re_registering_a_name_needs_an_explicit_replace(self) -> None:
+        # A silent overwrite would change what a launch command already in
+        # production resolves to — the invisible failure --robot exists to prevent.
+        register_robot_preset(self._preset())
+        with self.assertRaises(ValueError) as caught:
+            register_robot_preset(self._preset())
+        self.assertIn("replace=True", str(caught.exception))
+        replacement = self._preset()
+        self.assertIs(
+            register_robot_preset(replacement, replace=True),
+            get_robot_preset("myarm_mydataset"),
+        )
+
+    def test_an_alias_may_never_shadow_a_canonical_preset(self) -> None:
+        # Even with replace=True: an alias winning over a real preset would
+        # silently redirect a --robot spelling that already names something.
+        with self.assertRaises(ValueError) as caught:
+            register_robot_preset(self._preset(), aliases=("unitree_g1",), replace=True)
+        self.assertIn("unitree_g1", str(caught.exception))
+        self.assertIs(get_robot_preset("unitree_g1").embodiment.builder, build_unitree_g1_policy)
+
+    def test_moving_an_existing_alias_needs_an_explicit_replace(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            register_robot_preset(self._preset(), aliases=("libero",))
+        self.assertIn("franka_libero", str(caught.exception))
+        self.assertIs(get_robot_preset("libero"), get_robot_preset("franka_libero"))
+        register_robot_preset(self._preset(), aliases=("libero",), replace=True)
+        self.assertEqual(get_robot_preset("libero").name, "myarm_mydataset")
+
+    def test_a_failed_registration_leaves_both_tables_untouched(self) -> None:
+        # The alias check runs before either dict is written, so a rejected call
+        # cannot half-register a preset under its canonical name.
+        with self.assertRaises(ValueError):
+            register_robot_preset(self._preset(), aliases=("unitree_g1",))
+        self.assertNotIn("myarm_mydataset", ROBOT_PRESETS)
+
+    def test_registering_something_that_is_not_a_preset_is_a_type_error(self) -> None:
+        with self.assertRaises(TypeError):
+            register_robot_preset(Convention(name="x", image_keys=("a",), state_key="q"))
+
+    def test_a_registered_convention_pairs_with_a_shipped_body(self) -> None:
+        droid_like = register_convention(
+            Convention(
+                name="franka_droid_like",
+                image_keys=("observation/exterior_image_1_left", "observation/wrist_image_left"),
+                state_key="observation/joint_position",
+            )
+        )
+        self.assertIs(get_convention("franka_droid_like"), droid_like)
+        # The payoff of the split: a new dialect on an existing body needs no
+        # new Embodiment, no builder, and no edit to either shipped module.
+        preset = RobotPreset(
+            name="franka_droid_like",
+            embodiment=get_robot_preset("franka_libero").embodiment,
+            convention=droid_like,
+        )
+        self.assertEqual(preset.action_dim, 7)
+        self.assertEqual(preset.state_key, "observation/joint_position")
+
+    def test_re_registering_a_convention_needs_an_explicit_replace(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            register_convention(
+                Convention(name="libero", image_keys=("a", "b"), state_key="q")
+            )
+        self.assertIn("replace=True", str(caught.exception))
+        self.assertIs(get_convention("libero"), LIBERO_CONVENTION)
+
+    def test_registering_something_that_is_not_a_convention_is_a_type_error(self) -> None:
+        with self.assertRaises(TypeError):
+            register_convention(Embodiment(name="myarm", num_cameras=1))
+
+
+class StateKeyIsRequiredWhenItIsReadTest(unittest.TestCase):
+    """``state_key`` has no default, and is demanded exactly when state is read.
+
+    The model layer used to default it to LIBERO's ``observation/state``, the same
+    dataset-in-the-model coupling the camera keys had. Dropping the default leaves
+    an asymmetry with ``image_keys``: a wrong camera key raises ``KeyError`` on the
+    first inference, but a missing state key is silent — the tokenizer just
+    injects nothing and the policy publishes ``state_key=null`` while proprioception
+    quietly disappears. So it is required whenever the chain discretizes state, and
+    allowed to stay ``None`` only when state is deliberately dropped.
+    """
+
+    def test_the_model_layer_defaults_no_state_key(self) -> None:
+        # Asserted on the signatures, not by grepping the source, so the prose
+        # explaining the old LIBERO default does not trip the check.
+        for func in (
+            pi05_module.Pi05Policy.__init__,
+            pi05_module.Pi05Policy.default_pipelines,
+            pi05_module.Pi05Policy.from_pretrained,
+            pi05_module.Pi05Policy.from_random,
+            Tokenize.__init__,
+        ):
+            with self.subTest(entry_point=func.__qualname__):
+                self.assertIsNone(inspect.signature(func).parameters["state_key"].default)
+
+    def test_a_discretizing_tokenizer_without_a_key_is_rejected(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            Tokenize(RecordingTokenizer(), None, None)
+        self.assertIn("state_key", str(caught.exception))
+
+    def test_a_dropping_tokenizer_without_a_key_is_fine(self) -> None:
+        # discrete_state=False means state is dropped on purpose; demanding a key
+        # for a value nothing reads would be noise.
+        tokenizer = RecordingTokenizer()
+        tokenizer.discrete_state = False
+        self.assertIsNone(Tokenize(tokenizer, None, None).state_key)
+
+    def test_a_policy_whose_chain_reads_state_is_rejected_without_a_key(self) -> None:
+        model = MockModel(num_views=2)
+        input_pipeline, output_pipeline = Pi05Policy.default_pipelines(
+            model,
+            tokenizer=RecordingTokenizer(),
+            unnormalizer=_identity_unnormalizer(),
+            state_key="state",
+        )
+        with self.assertRaises(ValueError) as caught:
+            Pi05Policy(
+                model,
+                input_pipeline=input_pipeline,
+                output_pipeline=output_pipeline,
+                state_key=None,
+            )
+        self.assertIn("state_key", str(caught.exception))
+
+    def test_from_pretrained_refuses_discrete_state_without_a_key(self) -> None:
+        # Checked before the checkpoint is touched, so the message can name the
+        # flags the caller actually passed rather than failing deep in a load.
+        with self.assertRaises(ValueError) as caught:
+            Pi05Policy.from_pretrained("/nonexistent", discrete_state=True)
+        message = str(caught.exception)
+        self.assertIn("state_key", message)
+        self.assertIn("discrete_state=False", message)
+
+    def test_the_published_contract_may_say_no_state_key(self) -> None:
+        # A policy that drops state has no state key to publish, and null is the
+        # honest answer — a client reading metadata sees that state is unused.
+        policy = build_g1_mock_policy()
+        self.assertEqual(policy.metadata["state_key"], G1_STATE_KEY)
+        tokenizer = RecordingTokenizer()
+        tokenizer.discrete_state = False
+        model = MockModel(num_views=2)
+        input_pipeline, output_pipeline = Pi05Policy.default_pipelines(
+            model, tokenizer=tokenizer, unnormalizer=_identity_unnormalizer()
+        )
+        stateless = Pi05Policy(
+            model, input_pipeline=input_pipeline, output_pipeline=output_pipeline
+        )
+        self.assertIsNone(stateless.metadata["state_key"])
+        self.assertFalse(stateless.metadata["discrete_state"])
 
 
 if __name__ == "__main__":
