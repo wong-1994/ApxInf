@@ -17,6 +17,7 @@ namespace {
 #include "../kernels/custom/embedding.cuh"
 #include "../kernels/custom/elementwise.cuh"
 #include "../kernels/custom/normalization.cuh"
+#include "../kernels/custom/quantization.cuh"
 #include "../kernels/custom/fused.cuh"
 #include "../kernels/custom/attention.cuh"
 

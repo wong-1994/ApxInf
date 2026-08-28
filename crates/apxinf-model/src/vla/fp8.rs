@@ -1,4 +1,4 @@
-//! Static FP8 E4M3 quantization used by the Thor execution profile.
+//! Model-neutral FP8 E4M3 quantization and calibration.
 //!
 //! Matrix weights use one scale per tensor. Activations obtain named scales
 //! from a calibration file so CUDA graph replay never performs a reduction or

@@ -18,15 +18,15 @@ use crate::vla::{
 
 use super::backend::{kernels, transfers, DeviceBuffer, RuntimeBackend};
 use super::bf16_executor::{
-    action_stack, language_prefix, solver_update, vision_tower, TransformerWeights,
-    VisionTowerWeights,
+    action_stack, language_prefix, language_prefix_mixed, solver_update, vision_tower,
+    TransformerFp8Parts, TransformerWeights, VisionTowerWeights,
 };
 use super::{
     multimodal_position_ids, sinusoidal_time_embedding, solver_times, DeviceVisionGeometry,
     VisionGeometry, WallossActivationScales, WallossConfig, WallossDynamicFp8Weights,
     WallossFp8Weights, WallossWeights,
 };
-use crate::pi05::StaticFp8Calibration;
+use crate::vla::StaticFp8Calibration;
 
 const DEFAULT_GRIDS: [[usize; 3]; 2] = [[1, 18, 18], [1, 18, 18]];
 const BF16_WORKSPACE_BYTES: usize = 12 * 1024 * 1024 * 1024;
@@ -86,7 +86,108 @@ struct WallossBf16CapturedGraph {
 enum WallossDeviceWeights {
     Bf16(WallossWeights),
     DynamicFp8(WallossDynamicFp8Weights),
+    MixedDynamicFp8 {
+        bf16: WallossWeights,
+        fp8: WallossDynamicFp8Weights,
+        sites: WallossFp8Sites,
+    },
     Fp8(WallossFp8Weights),
+}
+
+#[derive(Clone, Copy)]
+struct WallossFp8Sites {
+    vision: bool,
+    language: bool,
+    action: bool,
+    language_start: usize,
+    language_end: usize,
+    language_parts: TransformerFp8Parts,
+}
+
+impl WallossFp8Sites {
+    fn from_env() -> Result<Option<Self>> {
+        let Some(value) = std::env::var_os("APXINF_WALLOSS_FP8_SITES") else {
+            return Ok(None);
+        };
+        let value = value
+            .into_string()
+            .map_err(|_| Error::Other("APXINF_WALLOSS_FP8_SITES must be UTF-8".into()))?;
+        let mut sites = Self {
+            vision: false,
+            language: false,
+            action: false,
+            language_start: 0,
+            language_end: usize::MAX,
+            language_parts: TransformerFp8Parts {
+                qkv: true,
+                output: true,
+                mlp: true,
+            },
+        };
+        for site in value
+            .split(',')
+            .map(str::trim)
+            .filter(|site| !site.is_empty())
+        {
+            match site.to_ascii_lowercase().as_str() {
+                "v" | "vision" => sites.vision = true,
+                "l" | "language" => sites.language = true,
+                "a" | "action" => sites.action = true,
+                "none" => {}
+                _ => {
+                    return Err(Error::Other(format!(
+                    "unknown walloss FP8 site {site:?}; expected vision, language, action, or none"
+                )))
+                }
+            }
+        }
+        if let Some(range) = std::env::var_os("APXINF_WALLOSS_FP8_LANGUAGE_RANGE") {
+            let range = range.into_string().map_err(|_| {
+                Error::Other("APXINF_WALLOSS_FP8_LANGUAGE_RANGE must be UTF-8".into())
+            })?;
+            let (start, end) = range.split_once(':').ok_or_else(|| {
+                Error::Other("APXINF_WALLOSS_FP8_LANGUAGE_RANGE must use start:end syntax".into())
+            })?;
+            sites.language_start = start.parse().map_err(|_| {
+                Error::Other("walloss FP8 language range start must be an integer".into())
+            })?;
+            sites.language_end = end.parse().map_err(|_| {
+                Error::Other("walloss FP8 language range end must be an integer".into())
+            })?;
+        }
+        if let Some(parts) = std::env::var_os("APXINF_WALLOSS_FP8_LANGUAGE_PARTS") {
+            let parts = parts.into_string().map_err(|_| {
+                Error::Other("APXINF_WALLOSS_FP8_LANGUAGE_PARTS must be UTF-8".into())
+            })?;
+            sites.language_parts = TransformerFp8Parts {
+                qkv: false,
+                output: false,
+                mlp: false,
+            };
+            for part in parts
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+            {
+                match part.to_ascii_lowercase().as_str() {
+                    "qkv" => sites.language_parts.qkv = true,
+                    "output" => sites.language_parts.output = true,
+                    "mlp" => sites.language_parts.mlp = true,
+                    "residual" | "output-mlp" => {
+                        sites.language_parts.output = true;
+                        sites.language_parts.mlp = true;
+                    }
+                    "none" => {}
+                    _ => {
+                        return Err(Error::Other(format!(
+                            "unknown walloss FP8 language part {part:?}; expected qkv, output, mlp, residual, or none"
+                        )))
+                    }
+                }
+            }
+        }
+        Ok(Some(sites))
+    }
 }
 
 impl WallossPreparedInference {
@@ -101,6 +202,9 @@ impl WallossPreparedInference {
         let inputs = self.upload_inputs(&host)?;
         let eager_output =
             kernels::prepare_with_workspace(&self.workspace, || self.execute(&inputs))?;
+        if std::env::var_os("APXINF_WALLOSS_NO_GRAPH").is_some() {
+            return Ok(Action::new(eager_output));
+        }
         self.backend.synchronize()?;
         drop(eager_output);
 
@@ -298,16 +402,108 @@ impl WallossPreparedInference {
                 &weights.action,
                 &weights.action_norm,
             ),
+            WallossDeviceWeights::MixedDynamicFp8 { bf16, fp8, sites } => {
+                match (sites.vision, sites.language, sites.action) {
+                    (false, false, false) => self.execute_with(
+                        inputs,
+                        &bf16.vision,
+                        &bf16.language_layers,
+                        &bf16.action_layers,
+                        &bf16.token_embedding,
+                        &bf16.action,
+                        &bf16.action_norm,
+                    ),
+                    (false, false, true) => self.execute_with(
+                        inputs,
+                        &bf16.vision,
+                        &bf16.language_layers,
+                        &fp8.action_layers,
+                        &bf16.token_embedding,
+                        &bf16.action,
+                        &bf16.action_norm,
+                    ),
+                    (false, true, false) => self.execute_with_mixed_language(
+                        inputs,
+                        &bf16.vision,
+                        &bf16.language_layers,
+                        &fp8.language_layers,
+                        &bf16.action_layers,
+                        &bf16.token_embedding,
+                        &bf16.action,
+                        &bf16.action_norm,
+                        sites.language_start,
+                        sites.language_end.min(bf16.language_layers.len()),
+                        sites.language_parts,
+                    ),
+                    (false, true, true) => self.execute_with_mixed_language(
+                        inputs,
+                        &bf16.vision,
+                        &bf16.language_layers,
+                        &fp8.language_layers,
+                        &fp8.action_layers,
+                        &bf16.token_embedding,
+                        &bf16.action,
+                        &bf16.action_norm,
+                        sites.language_start,
+                        sites.language_end.min(bf16.language_layers.len()),
+                        sites.language_parts,
+                    ),
+                    (true, false, false) => self.execute_with(
+                        inputs,
+                        &fp8.vision,
+                        &bf16.language_layers,
+                        &bf16.action_layers,
+                        &bf16.token_embedding,
+                        &bf16.action,
+                        &bf16.action_norm,
+                    ),
+                    (true, false, true) => self.execute_with(
+                        inputs,
+                        &fp8.vision,
+                        &bf16.language_layers,
+                        &fp8.action_layers,
+                        &bf16.token_embedding,
+                        &bf16.action,
+                        &bf16.action_norm,
+                    ),
+                    (true, true, false) => self.execute_with_mixed_language(
+                        inputs,
+                        &fp8.vision,
+                        &bf16.language_layers,
+                        &fp8.language_layers,
+                        &bf16.action_layers,
+                        &bf16.token_embedding,
+                        &bf16.action,
+                        &bf16.action_norm,
+                        sites.language_start,
+                        sites.language_end.min(bf16.language_layers.len()),
+                        sites.language_parts,
+                    ),
+                    (true, true, true) => self.execute_with_mixed_language(
+                        inputs,
+                        &fp8.vision,
+                        &bf16.language_layers,
+                        &fp8.language_layers,
+                        &fp8.action_layers,
+                        &bf16.token_embedding,
+                        &bf16.action,
+                        &bf16.action_norm,
+                        sites.language_start,
+                        sites.language_end.min(bf16.language_layers.len()),
+                        sites.language_parts,
+                    ),
+                }
+            }
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn execute_with<V: VisionTowerWeights, T: TransformerWeights>(
+    fn execute_with<V: VisionTowerWeights, L: TransformerWeights, A: TransformerWeights>(
         &self,
         inputs: &WallossDeviceInputs,
         vision_weights: &V,
-        language_weights: &[T],
-        transformer_action_weights: &[T],
+        language_weights: &[L],
+        transformer_action_weights: &[A],
         token_embedding: &Tensor,
         action_weights: &super::WallossActionWeights,
         action_norm: &Tensor,
@@ -332,6 +528,77 @@ impl WallossPreparedInference {
             inputs.prefix_tokens,
             inputs.prefix_tokens + self.config.action.action_horizon,
         )?;
+        self.execute_action(
+            inputs,
+            transformer_action_weights,
+            action_weights,
+            action_norm,
+            &prefix,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_with_mixed_language<
+        V: VisionTowerWeights,
+        B: TransformerWeights,
+        F: TransformerWeights,
+        A: TransformerWeights,
+    >(
+        &self,
+        inputs: &WallossDeviceInputs,
+        vision_weights: &V,
+        bf16_language_weights: &[B],
+        fp8_language_weights: &[F],
+        transformer_action_weights: &[A],
+        token_embedding: &Tensor,
+        action_weights: &super::WallossActionWeights,
+        action_norm: &Tensor,
+        fp8_start: usize,
+        fp8_end: usize,
+        fp8_parts: TransformerFp8Parts,
+    ) -> Result<Tensor> {
+        let context = self.backend.context();
+        let vision = vision_tower(
+            context,
+            &self.config.vision,
+            vision_weights,
+            &self.geometry,
+            &inputs.patches,
+        )?;
+        let prefix = language_prefix_mixed(
+            context,
+            &self.config.text,
+            bf16_language_weights,
+            fp8_language_weights,
+            fp8_start,
+            fp8_end,
+            fp8_parts,
+            token_embedding,
+            &inputs.prefix_ids,
+            &vision,
+            &inputs.vision_row_map,
+            &inputs.prefix_position_ids,
+            inputs.prefix_tokens,
+            inputs.prefix_tokens + self.config.action.action_horizon,
+        )?;
+        self.execute_action(
+            inputs,
+            transformer_action_weights,
+            action_weights,
+            action_norm,
+            &prefix,
+        )
+    }
+
+    fn execute_action<A: TransformerWeights>(
+        &self,
+        inputs: &WallossDeviceInputs,
+        transformer_action_weights: &[A],
+        action_weights: &super::WallossActionWeights,
+        action_norm: &Tensor,
+        prefix: &super::bf16_executor::PrefixCache,
+    ) -> Result<Tensor> {
+        let context = self.backend.context();
         let times = solver_times(
             self.config.action.solver_steps,
             self.config.action.scheduler_s,
@@ -477,6 +744,12 @@ pub(super) fn load_registered(
                     &*backend,
                     &scales,
                 )?)
+            } else if let Some(sites) = WallossFp8Sites::from_env()? {
+                WallossDeviceWeights::MixedDynamicFp8 {
+                    bf16: host_weights.to_bf16_device(&*backend)?,
+                    fp8: WallossDynamicFp8Weights::from_host(&host_weights, &*backend)?,
+                    sites,
+                }
             } else {
                 WallossDeviceWeights::DynamicFp8(WallossDynamicFp8Weights::from_host(
                     &host_weights,

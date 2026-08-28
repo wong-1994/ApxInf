@@ -15,8 +15,6 @@ mod bf16_weights;
 #[cfg(feature = "cuda")]
 mod calibration;
 mod config;
-mod device_weights;
-mod fp8;
 #[cfg(feature = "cuda")]
 mod fp8_executor;
 #[cfg(feature = "cuda")]
@@ -36,6 +34,11 @@ mod static_weights;
 mod vla_runtime;
 mod weights;
 
+pub use crate::vla::{
+    decode_e4m3, dequantize_e4m3, encode_e4m3, fp16_to_device, quantize_e4m3, quantize_e4m3_absmax,
+    DynamicFp8LinearWeights, Fp8LinearWeights, Fp8Tensor, LinearWeights, StaticFp8Calibration,
+    E4M3_MAX,
+};
 #[cfg(feature = "cuda")]
 pub use bf16_executor::{
     action_layer_bf16, language_layer_bf16, vision_layer_bf16, vision_patch_embed_bf16,
@@ -49,12 +52,6 @@ pub use bf16_weights::{bf16_to_device, Bf16LinearWeights};
 #[cfg(feature = "cuda")]
 pub use calibration::Pi05CalibrationObserver;
 pub use config::{GemmaVariantConfig, Pi05Config, Pi05PerformanceProfile};
-pub use device_weights::{fp16_to_device, DynamicFp8LinearWeights, Fp8LinearWeights};
-pub use fp8::{
-    checkpoint_identity, decode_e4m3, dequantize_e4m3, encode_e4m3, quantize_e4m3,
-    quantize_e4m3_absmax, Fp8Tensor, LayerCalibrationSites, Pi05CalibrationPlan,
-    StaticFp8Calibration, E4M3_MAX,
-};
 #[cfg(feature = "cuda")]
 pub use fp8_executor::{
     action_layer, language_layer, vision_layer, vision_patch_embed, vision_patch_embed_fp8,
@@ -95,8 +92,7 @@ pub use static_weights::{
 pub use vla_runtime::{Pi05PreparedInference, Pi05VlaRuntime};
 pub use weights::{
     ActionLayerWeights, AdaRmsNormWeights, GemmaAttentionWeights, GemmaMlpWeights,
-    LanguageLayerWeights, LayerNormWeights, LinearWeights, Pi05Weights, VisionBlockWeights,
-    VisionWeights,
+    LanguageLayerWeights, LayerNormWeights, Pi05Weights, VisionBlockWeights, VisionWeights,
 };
 
 #[cfg(feature = "cuda")]

@@ -26,7 +26,12 @@ fn add_shape(
     if dims.len() != 2 {
         return Err(format!("matrix has non-rank-two shape {dims:?}").into());
     }
-    let usage = shapes.entry((m, dims[1], dims[0])).or_default();
+    // Dynamic FP8 matrices are resident with both physical dimensions padded
+    // to 16. Tuning keys must describe that launched shape, not the logical
+    // checkpoint tensor, or non-aligned vision projections miss the database.
+    let n = dims[1].div_ceil(16) * 16;
+    let k = dims[0].div_ceil(16) * 16;
+    let usage = shapes.entry((m, n, k)).or_default();
     usage.names.push(name.into());
     usage.repetitions += repetitions;
     Ok(())

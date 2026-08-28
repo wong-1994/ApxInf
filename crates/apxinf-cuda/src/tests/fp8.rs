@@ -533,6 +533,131 @@ fn action_flash_decode_matches_regular_causal_gqa() {
     );
 }
 
+#[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
+#[test]
+fn fa2_causal_gqa_hdim128_matches_fp32_reference() {
+    let _gpu = crate::tests::gpu_smem_guard();
+    const TOKENS: usize = 37;
+    const QUERY_HEADS: usize = 16;
+    const KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 128;
+    const CAUSAL: bool = true;
+
+    let backend = CudaBackend::new(0).unwrap();
+    let q_values = (0..TOKENS * QUERY_HEADS * HEAD_DIM)
+        .map(|index| bf16::from_f32(((index * 17 % 251) as f32 - 125.0) / 128.0))
+        .collect::<Vec<_>>();
+    let k_values = (0..TOKENS * KV_HEADS * HEAD_DIM)
+        .map(|index| bf16::from_f32(((index * 29 % 241) as f32 - 120.0) / 128.0))
+        .collect::<Vec<_>>();
+    let v_values = (0..TOKENS * KV_HEADS * HEAD_DIM)
+        .map(|index| bf16::from_f32(((index * 31 % 239) as f32 - 119.0) / 128.0))
+        .collect::<Vec<_>>();
+    let q = backend
+        .to_device(&Tensor::from_bf16(vec![TOKENS, QUERY_HEADS, HEAD_DIM], &q_values).unwrap())
+        .unwrap();
+    let k = backend
+        .to_device(&Tensor::from_bf16(vec![TOKENS, KV_HEADS, HEAD_DIM], &k_values).unwrap())
+        .unwrap();
+    let v = backend
+        .to_device(&Tensor::from_bf16(vec![TOKENS, KV_HEADS, HEAD_DIM], &v_values).unwrap())
+        .unwrap();
+
+    let workspace = GraphWorkspace::new(16 << 20, backend.device_id()).unwrap();
+    let actual = prepare_with_workspace(&workspace, || {
+        if CAUSAL {
+            crate::kernels::attention::fa2_attention_causal(
+                backend.context(),
+                &q,
+                &k,
+                &v,
+                TOKENS,
+                TOKENS,
+                QUERY_HEADS,
+                KV_HEADS,
+                HEAD_DIM,
+            )
+        } else {
+            crate::kernels::attention::gqa_bf16(backend.context(), &q, &k, &v, TOKENS)
+        }
+    })
+    .unwrap();
+    backend.synchronize().unwrap();
+    let actual = backend.to_cpu(&actual).unwrap().to_f32_vec().unwrap();
+
+    let q_values = q_values
+        .iter()
+        .map(|value| value.to_f32())
+        .collect::<Vec<_>>();
+    let k_values = k_values
+        .iter()
+        .map(|value| value.to_f32())
+        .collect::<Vec<_>>();
+    let v_values = v_values
+        .iter()
+        .map(|value| value.to_f32())
+        .collect::<Vec<_>>();
+    let mut reference = vec![0.0f32; actual.len()];
+    let scale = (HEAD_DIM as f32).sqrt().recip();
+    let heads_per_kv = QUERY_HEADS / KV_HEADS;
+    let mut scores = vec![0.0f32; TOKENS];
+    for query_token in 0..TOKENS {
+        for query_head in 0..QUERY_HEADS {
+            let kv_head = query_head / heads_per_kv;
+            let q_base = (query_token * QUERY_HEADS + query_head) * HEAD_DIM;
+            let visible_tokens = if CAUSAL { query_token + 1 } else { TOKENS };
+            let mut maximum = f32::NEG_INFINITY;
+            for key_token in 0..visible_tokens {
+                let k_base = (key_token * KV_HEADS + kv_head) * HEAD_DIM;
+                let mut score = 0.0f32;
+                for dim in 0..HEAD_DIM {
+                    score += q_values[q_base + dim] * k_values[k_base + dim];
+                }
+                scores[key_token] = score * scale;
+                maximum = maximum.max(scores[key_token]);
+            }
+            let mut denominator = 0.0f32;
+            for score in &mut scores[..visible_tokens] {
+                *score = (*score - maximum).exp();
+                denominator += *score;
+            }
+            let out_base = (query_token * QUERY_HEADS + query_head) * HEAD_DIM;
+            for key_token in 0..visible_tokens {
+                let probability = scores[key_token] / denominator;
+                let v_base = (key_token * KV_HEADS + kv_head) * HEAD_DIM;
+                for dim in 0..HEAD_DIM {
+                    reference[out_base + dim] += probability * v_values[v_base + dim];
+                }
+            }
+        }
+    }
+
+    let mut dot = 0.0f64;
+    let mut reference_norm = 0.0f64;
+    let mut actual_norm = 0.0f64;
+    let mut error_norm = 0.0f64;
+    let mut max_abs = 0.0f64;
+    for (&actual, &reference) in actual.iter().zip(&reference) {
+        let actual = f64::from(actual);
+        let reference = f64::from(reference);
+        let error = actual - reference;
+        dot += actual * reference;
+        actual_norm += actual * actual;
+        reference_norm += reference * reference;
+        error_norm += error * error;
+        max_abs = max_abs.max(error.abs());
+    }
+    let cosine = dot / (actual_norm * reference_norm).sqrt();
+    let relative_l2 = (error_norm / reference_norm).sqrt();
+    eprintln!(
+        "FA2 causal GQA hdim128: cosine={cosine:.9}, relative_l2={relative_l2:.9}, max_abs={max_abs:.6}"
+    );
+    assert!(
+        cosine >= 0.999 && relative_l2 <= 0.02 && max_abs <= 0.05,
+        "FA2 causal GQA hdim128 mismatch: cosine={cosine}, relative_l2={relative_l2}, max_abs={max_abs}"
+    );
+}
+
 #[cfg(apxinf_fa2_direct_e4m3_sm100)]
 #[test]
 fn fa2_language_direct_e4m3_matches_packed4_bytes() {

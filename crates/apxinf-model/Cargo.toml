@@ -35,6 +35,10 @@ name = "walloss_cutlass_tune"
 required-features = ["cuda"]
 
 [[example]]
+name = "walloss_bf16_smoke"
+required-features = ["cuda"]
+
+[[example]]
 name = "multimodal_check"
 required-features = ["cuda"]
 

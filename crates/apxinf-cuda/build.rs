@@ -388,6 +388,7 @@ fn main() {
             let fa2_f16_sm100 = nvcc_arch.as_deref().is_some_and(is_cutlass_sm100_family);
             if fa2_sm80 || fa2_f16_sm100 {
                 let fa2_hdim96 = fa2_root.join("flash_attn/flash_fwd_hdim96_bf16_sm80.cu");
+                let fa2_hdim128 = fa2_root.join("flash_attn/flash_fwd_hdim128_bf16_sm80.cu");
                 let fa2_hdim256 = fa2_root.join("flash_attn/flash_fwd_hdim256_bf16_sm80.cu");
                 let fa2_f16_hdim96 = fa2_root.join("flash_attn/flash_fwd_hdim96_fp16.cu");
                 let fa2_f16_hdim256 = fa2_root.join("flash_attn/flash_fwd_hdim256_fp16.cu");
@@ -396,6 +397,7 @@ fn main() {
                     fa2_operator.is_file()
                         && fa2_wrapper.is_file()
                         && fa2_hdim96.is_file()
+                        && fa2_hdim128.is_file()
                         && fa2_hdim256.is_file()
                         && fa2_f16_hdim96.is_file()
                         && fa2_f16_hdim256.is_file()
@@ -406,6 +408,7 @@ fn main() {
                 fa2_sources.extend([
                     fa2_wrapper.clone(),
                     fa2_hdim96,
+                    fa2_hdim128,
                     fa2_hdim256,
                     fa2_f16_hdim96,
                     fa2_f16_hdim256,

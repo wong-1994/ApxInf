@@ -2,7 +2,9 @@
 
 use apxinf_core::{Backend, DType, Error, Result, Tensor};
 
-use super::{device_weights::concat_host_2d, LinearWeights};
+use crate::vla::device_weights::concat_host_2d;
+
+use super::LinearWeights;
 
 #[derive(Debug)]
 pub struct Bf16LinearWeights {

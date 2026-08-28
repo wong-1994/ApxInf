@@ -14,8 +14,8 @@ use super::{
 #[derive(Clone, Copy)]
 pub(super) enum MatrixRef<'a> {
     Bf16(&'a Tensor),
-    Fp8(&'a crate::pi05::Fp8LinearWeights, f32),
-    DynamicFp8(&'a crate::pi05::DynamicFp8LinearWeights),
+    Fp8(&'a crate::vla::Fp8LinearWeights, f32),
+    DynamicFp8(&'a crate::vla::DynamicFp8LinearWeights),
 }
 
 pub(super) trait TransformerWeights {
@@ -26,6 +26,67 @@ pub(super) trait TransformerWeights {
     fn output(&self) -> MatrixRef<'_>;
     fn gate_up(&self) -> MatrixRef<'_>;
     fn down(&self) -> MatrixRef<'_>;
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct TransformerFp8Parts {
+    pub qkv: bool,
+    pub output: bool,
+    pub mlp: bool,
+}
+
+struct MixedTransformerWeights<'a, B, F> {
+    bf16: &'a B,
+    fp8: &'a F,
+    parts: TransformerFp8Parts,
+}
+
+impl<B: TransformerWeights, F: TransformerWeights> TransformerWeights
+    for MixedTransformerWeights<'_, B, F>
+{
+    fn input_norm(&self) -> &Tensor {
+        self.bf16.input_norm()
+    }
+
+    fn post_attention_norm(&self) -> &Tensor {
+        self.bf16.post_attention_norm()
+    }
+
+    fn qkv(&self) -> MatrixRef<'_> {
+        if self.parts.qkv {
+            self.fp8.qkv()
+        } else {
+            self.bf16.qkv()
+        }
+    }
+
+    fn qkv_bias(&self) -> &Tensor {
+        self.bf16.qkv_bias()
+    }
+
+    fn output(&self) -> MatrixRef<'_> {
+        if self.parts.output {
+            self.fp8.output()
+        } else {
+            self.bf16.output()
+        }
+    }
+
+    fn gate_up(&self) -> MatrixRef<'_> {
+        if self.parts.mlp {
+            self.fp8.gate_up()
+        } else {
+            self.bf16.gate_up()
+        }
+    }
+
+    fn down(&self) -> MatrixRef<'_> {
+        if self.parts.mlp {
+            self.fp8.down()
+        } else {
+            self.bf16.down()
+        }
+    }
 }
 
 pub(super) trait VisionBlockWeights {
@@ -65,7 +126,7 @@ fn linear(context: &Context, input: &Tensor, weights: MatrixRef<'_>) -> Result<T
 fn dynamic_linear(
     context: &Context,
     input: &Tensor,
-    weight: &crate::pi05::DynamicFp8LinearWeights,
+    weight: &crate::vla::DynamicFp8LinearWeights,
 ) -> Result<Tensor> {
     let input_shape = input.shape().dims();
     if input_shape.len() != 2 || input_shape[1] != weight.input_features {
@@ -86,7 +147,7 @@ fn dynamic_linear(
 fn dynamic_linear_prequantized(
     context: &Context,
     activation: &kernels::quantization::DynamicFp8Tensor,
-    weight: &crate::pi05::DynamicFp8LinearWeights,
+    weight: &crate::vla::DynamicFp8LinearWeights,
     keep_padded_output: bool,
 ) -> Result<Tensor> {
     let activation_shape = activation.values.shape().dims();
@@ -142,6 +203,44 @@ fn qkv_after_rms(
             dynamic_linear_prequantized(context, &normalized, weight, false)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dynamic_residual_norm(
+    context: &Context,
+    projected: &Tensor,
+    output_bias: Option<&Tensor>,
+    input: &Tensor,
+    post_attention_norm: &Tensor,
+    eps: f32,
+    output_cols: usize,
+) -> Result<(Tensor, kernels::quantization::DynamicFp8Tensor)> {
+    let fused = kernels::fused::bias_residual_rms_quantize_rows_bf16_e4m3(
+        context,
+        projected,
+        output_bias,
+        input,
+        post_attention_norm,
+        eps,
+        output_cols,
+    )?;
+    Ok((fused.hidden, fused.normalized))
+}
+
+fn dynamic_swiglu(
+    context: &Context,
+    gate_up: &Tensor,
+    gate_up_bias: Option<&Tensor>,
+    logical_inner: usize,
+    output_cols: usize,
+) -> Result<kernels::quantization::DynamicFp8Tensor> {
+    kernels::activation::swiglu_quantize_rows_bf16_e4m3(
+        context,
+        gate_up,
+        gate_up_bias,
+        logical_inner,
+        output_cols,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -222,7 +321,7 @@ fn residual_mlp(
             MatrixRef::DynamicFp8(down),
         ) => {
             let projected = dynamic_linear(context, attention, output)?;
-            let fused = kernels::fused::bias_residual_rms_quantize_rows_bf16_e4m3(
+            let (hidden, normalized) = dynamic_residual_norm(
                 context,
                 &projected,
                 output_bias,
@@ -231,8 +330,7 @@ fn residual_mlp(
                 eps,
                 gate_up.weight.shape().dims()[1],
             )?;
-            let gate_up_output =
-                dynamic_linear_prequantized(context, &fused.normalized, gate_up, true)?;
+            let gate_up_output = dynamic_linear_prequantized(context, &normalized, gate_up, true)?;
             if gate_up.output_features % 2 != 0
                 || down.input_features != gate_up.output_features / 2
             {
@@ -241,7 +339,7 @@ fn residual_mlp(
                     gate_up.output_features, down.input_features
                 )));
             }
-            let activated = kernels::activation::swiglu_quantize_rows_bf16_e4m3(
+            let activated = dynamic_swiglu(
                 context,
                 &gate_up_output,
                 gate_up_bias,
@@ -249,7 +347,56 @@ fn residual_mlp(
                 down.weight.shape().dims()[1],
             )?;
             let down = dynamic_linear_prequantized(context, &activated, down, false)?;
+            kernels::fused::bias_residual_bf16(context, &down, down_bias, &hidden)
+        }
+        (MatrixRef::DynamicFp8(output), MatrixRef::Bf16(gate_up), MatrixRef::Bf16(down)) => {
+            let projected = dynamic_linear(context, attention, output)?;
+            let fused = kernels::fused::bias_residual_rms_bf16(
+                context,
+                &projected,
+                output_bias,
+                input,
+                post_attention_norm,
+                eps,
+            )?;
+            let gate_up = kernels::gemm::bf16(context, &fused.normalized, gate_up)?;
+            let gate_up = match gate_up_bias {
+                Some(bias) => kernels::elementwise::bias_bf16(context, &gate_up, Some(bias))?,
+                None => gate_up,
+            };
+            let activated = kernels::activation::swiglu_bf16(context, &gate_up)?;
+            let down = kernels::gemm::bf16(context, &activated, down)?;
             kernels::fused::bias_residual_bf16(context, &down, down_bias, &fused.hidden)
+        }
+        (MatrixRef::Bf16(output), MatrixRef::DynamicFp8(gate_up), MatrixRef::DynamicFp8(down)) => {
+            let projected = kernels::gemm::bf16(context, attention, output)?;
+            let (hidden, normalized) = dynamic_residual_norm(
+                context,
+                &projected,
+                output_bias,
+                input,
+                post_attention_norm,
+                eps,
+                gate_up.weight.shape().dims()[1],
+            )?;
+            let gate_up_output = dynamic_linear_prequantized(context, &normalized, gate_up, true)?;
+            if gate_up.output_features % 2 != 0
+                || down.input_features != gate_up.output_features / 2
+            {
+                return Err(Error::Other(format!(
+                    "dynamic SwiGLU dimensions disagree: gate/up={}, down input={}",
+                    gate_up.output_features, down.input_features
+                )));
+            }
+            let activated = dynamic_swiglu(
+                context,
+                &gate_up_output,
+                gate_up_bias,
+                gate_up.output_features / 2,
+                down.weight.shape().dims()[1],
+            )?;
+            let down = dynamic_linear_prequantized(context, &activated, down, false)?;
+            kernels::fused::bias_residual_bf16(context, &down, down_bias, &hidden)
         }
         _ => Err(Error::Other(
             "walloss transformer matrix precisions must be uniform within one layer".into(),
@@ -532,13 +679,82 @@ pub(super) fn language_prefix<W: TransformerWeights>(
     tokens: usize,
     cache_tokens: usize,
 ) -> Result<PrefixCache> {
-    let embedded = kernels::embedding::lookup_bf16(context, token_embedding, token_ids, tokens)?;
+    let embedded = kernels::embedding::lookup(context, token_embedding, token_ids, tokens)?;
     let mut hidden =
         kernels::elementwise::replace_rows_bf16(context, &embedded, vision_tokens, vision_row_map)?;
     let mut keys = Vec::with_capacity(weights.len());
     let mut values = Vec::with_capacity(weights.len());
     for layer in weights {
         let output = language_layer(context, config, layer, &hidden, position_ids, cache_tokens)?;
+        hidden = output.hidden;
+        keys.push(output.key);
+        values.push(output.value);
+    }
+    Ok(PrefixCache {
+        keys,
+        values,
+        prefix_tokens: tokens,
+        cache_tokens,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn language_prefix_mixed<B: TransformerWeights, F: TransformerWeights>(
+    context: &Context,
+    config: &WallossTextConfig,
+    bf16_weights: &[B],
+    fp8_weights: &[F],
+    fp8_start: usize,
+    fp8_end: usize,
+    fp8_parts: TransformerFp8Parts,
+    token_embedding: &Tensor,
+    token_ids: &DeviceBuffer,
+    vision_tokens: &Tensor,
+    vision_row_map: &DeviceBuffer,
+    position_ids: &DeviceBuffer,
+    tokens: usize,
+    cache_tokens: usize,
+) -> Result<PrefixCache> {
+    if bf16_weights.len() != fp8_weights.len()
+        || fp8_start > fp8_end
+        || fp8_end > bf16_weights.len()
+    {
+        return Err(Error::Other(format!(
+            "walloss mixed language range [{fp8_start}, {fp8_end}) is invalid for depths {} and {}",
+            bf16_weights.len(),
+            fp8_weights.len()
+        )));
+    }
+    let embedded = kernels::embedding::lookup(context, token_embedding, token_ids, tokens)?;
+    let mut hidden =
+        kernels::elementwise::replace_rows_bf16(context, &embedded, vision_tokens, vision_row_map)?;
+    let mut keys = Vec::with_capacity(bf16_weights.len());
+    let mut values = Vec::with_capacity(bf16_weights.len());
+    for index in 0..bf16_weights.len() {
+        let output = if (fp8_start..fp8_end).contains(&index) {
+            let weights = MixedTransformerWeights {
+                bf16: &bf16_weights[index],
+                fp8: &fp8_weights[index],
+                parts: fp8_parts,
+            };
+            language_layer(
+                context,
+                config,
+                &weights,
+                &hidden,
+                position_ids,
+                cache_tokens,
+            )?
+        } else {
+            language_layer(
+                context,
+                config,
+                &bf16_weights[index],
+                &hidden,
+                position_ids,
+                cache_tokens,
+            )?
+        };
         hidden = output.hidden;
         keys.push(output.key);
         values.push(output.value);

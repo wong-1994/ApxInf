@@ -163,6 +163,8 @@ int fa2(
   params.is_causal = false;
   if (head_dim <= 96) {
     FLASH_NAMESPACE::run_mha_fwd_<Element, 96, false>(params, stream);
+  } else if (head_dim <= 128) {
+    FLASH_NAMESPACE::run_mha_fwd_<Element, 128, false>(params, stream);
   } else {
     FLASH_NAMESPACE::run_mha_fwd_<Element, 256, false>(params, stream);
   }
@@ -186,8 +188,11 @@ int fa2_causal(
               q, k, v, output, softmax_lse, batch, query_tokens,
               key_tokens, query_heads, kv_heads, head_dim, softmax_scale);
   params.is_causal = true;
+  params.window_size_right = 0;
   if (head_dim <= 96) {
     FLASH_NAMESPACE::run_mha_fwd_<Element, 96, true>(params, stream);
+  } else if (head_dim <= 128) {
+    FLASH_NAMESPACE::run_mha_fwd_<Element, 128, true>(params, stream);
   } else {
     FLASH_NAMESPACE::run_mha_fwd_<Element, 256, true>(params, stream);
   }
@@ -214,6 +219,9 @@ int fa2_splitkv(
               q, k, v, output, softmax_lse, batch, query_tokens,
               key_tokens, query_heads, kv_heads, head_dim, softmax_scale);
   params.is_causal = IsCausal;
+  if constexpr (IsCausal) {
+    params.window_size_right = 0;
+  }
   const int num_splits =
       setup_splitkv(params, softmax_lse_accum, o_accum, num_sms, query_tokens,
                     key_tokens, head_dim, batch, query_heads);
