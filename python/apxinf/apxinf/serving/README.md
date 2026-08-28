@@ -39,11 +39,21 @@ python -c "import apxinf_py; print(apxinf_py.Model.load('pi05','<ckpt>/model.saf
 ```bash
 python scripts/pi05_openpi_websocket_server.py \
     --model-dir <ckpt> \
-    --robot franka_libero \  # embodiment preset: wire keys + pre/post steps + action width
+    --robot franka_libero \
     --precision bf16 \
     --device cuda:0 \
     --host 0.0.0.0 --port 8000
 ```
+
+This is currently a repository launcher, not an installed console command:
+`python/apxinf/pyproject.toml` does not publish a `[project.scripts]` entry, so
+commands such as `apxinf-serve` are not available today. Keeping this thin
+launcher in `scripts/` is appropriate for repository development and deployment
+experiments. If serving becomes a supported installed product interface, move
+the argument parsing and policy construction under the `apxinf` package, expose
+an `apxinf serve` (or `apxinf-serve`) entry point, and retain this file only as a
+compatibility wrapper. The reusable server implementation already lives in
+`apxinf.serving`; it should not move back into a script.
 
 - `--robot` is the one flag that decides **which keys the client must send**. It
   is openpi's `serve_policy.py --policy.config <TrainConfig>` equivalent: the
@@ -116,23 +126,27 @@ Reference client: [python/apxinf/examples/openpi_client.py](../../examples/openp
 
 ## 4. LIBERO-10 accuracy eval
 
-The simulation side (client) can run two ways; the server always hosts the
-engine. LIBERO needs a pinned sim stack (`robosuite==1.4.0` / `mujoco==2.3.2` /
-`bddl==1.0.1`) and `MUJOCO_GL=egl` on headless boxes, plus a LIBERO checkout on
-`PYTHONPATH`.
+The server always hosts the engine; `scripts/eval_libero_client.py` is only the
+simulation/client half and never loads a checkpoint or CUDA binding. LIBERO
+needs a pinned sim stack (`robosuite==1.4.0` / `mujoco==2.3.2` / `bddl==1.0.1`)
+and `MUJOCO_GL=egl` on headless boxes, plus a LIBERO checkout on `PYTHONPATH`.
+The server host does **not** need LIBERO installed. It needs only the
+`franka_libero` embodiment preset so that its wire keys, policy processors, and
+7-dimensional action output agree with the client.
 
 ### Form A — same machine
 
 ```bash
 # terminal 1: server (see §2)
-python scripts/pi05_openpi_websocket_server.py --model-dir <ckpt> --precision bf16 --port 8000 &
+python scripts/pi05_openpi_websocket_server.py \
+    --model-dir <ckpt> --robot franka_libero --precision bf16 --port 8000 &
 
 # terminal 2: eval against the local server
 export MUJOCO_GL=egl
 export PYTHONPATH=<path/to/LIBERO>
-python scripts/eval_pi05_libero_openpi.py \
+python scripts/eval_libero_client.py \
     --host 127.0.0.1 --port 8000 --precision bf16 \
-    --task-ids 0,1,2,3,4,5,6,7,8,9 --trials-per-task 10 \
+    --suite libero_10 --tasks all --trials-per-task 10 \
     --results-jsonl out/libero_bf16.jsonl \
     --summary-json  out/libero_bf16.summary.json
 ```
@@ -146,9 +160,9 @@ pattern (robot/sim on one end, engine on the other).
 ```bash
 # server host: start with --host 0.0.0.0 (see §2)
 # x86 client (its own LIBERO env):
-python scripts/eval_pi05_libero_openpi.py \
+python scripts/eval_libero_client.py \
     --host <server-host> --port 8000 --precision bf16 \
-    --task-ids 0,1,2,3,4,5,6,7,8,9 --trials-per-task 10 \
+    --suite libero_10 --tasks all --trials-per-task 10 \
     --results-jsonl out/libero_bf16.jsonl \
     --summary-json  out/libero_bf16.summary.json
 ```
