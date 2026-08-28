@@ -181,12 +181,16 @@ the provenance rerun.
 
 ## Remaining limitations
 
-- Accuracy is an offline action comparison over 16 observations, not a complete
-  LIBERO rollout-success campaign.
+- This report's H=50 accuracy result is an offline action comparison over 16
+  observations. The separate deployment-matched H=10 sample sweep and complete
+  500-episode LIBERO-10 campaign are documented in
+  [`pi05-fp8-calibration-libero10.md`](pi05-fp8-calibration-libero10.md).
 - The tested relative-L2 threshold is an explicit gate for this fixture, not a
   framework-wide precision contract.
-- The sample-count experiment shows that 8 is insufficient but does not prove
-  convergence at 16.
+- This report's H=50 sample-count experiment shows that 8 is insufficient but
+  does not prove convergence at 16. The H=10 study finds that 10 balanced
+  Observations reproduce baseline LIBERO-10 task accuracy even though per-site
+  absmax values remain unconverged at 640 samples.
 - Formal steady-state and instrumentation-regression conclusions require a
   verified-idle Thor window; shared compilation made repeated timing unstable.
 - Calibration profiles and tactic databases remain separate. This evidence does
