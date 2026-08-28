@@ -126,7 +126,7 @@ Reference client: [python/apxinf/examples/openpi_client.py](../../examples/openp
 
 ## 4. LIBERO-10 accuracy eval
 
-The server always hosts the engine; `scripts/eval_libero_client.py` is only the
+The server always hosts the engine; `evaluation.libero.client` is only the
 simulation/client half and never loads a checkpoint or CUDA binding. LIBERO
 needs a pinned sim stack (`robosuite==1.4.0` / `mujoco==2.3.2` / `bddl==1.0.1`)
 and `MUJOCO_GL=egl` on headless boxes, plus a LIBERO checkout on `PYTHONPATH`.
@@ -144,7 +144,7 @@ python scripts/pi05_openpi_websocket_server.py \
 # terminal 2: eval against the local server
 export MUJOCO_GL=egl
 export PYTHONPATH=<path/to/LIBERO>
-python scripts/eval_libero_client.py \
+python -m evaluation.libero.client \
     --host 127.0.0.1 --port 8000 --precision bf16 \
     --suite libero_10 --tasks all --trials-per-task 10 \
     --results-jsonl out/libero_bf16.jsonl \
@@ -160,7 +160,7 @@ pattern (robot/sim on one end, engine on the other).
 ```bash
 # server host: start with --host 0.0.0.0 (see §2)
 # x86 client (its own LIBERO env):
-python scripts/eval_libero_client.py \
+python -m evaluation.libero.client \
     --host <server-host> --port 8000 --precision bf16 \
     --suite libero_10 --tasks all --trials-per-task 10 \
     --results-jsonl out/libero_bf16.jsonl \

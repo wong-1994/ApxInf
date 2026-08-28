@@ -1,9 +1,9 @@
 # apxinf examples
 
-Minimal, dependency-light samples that **teach the interface**. Heavy evaluation
-harnesses (LIBERO sim rollouts, resumable ledgers, benchmarks) stay in the
-repo-level [`scripts/`](../../../scripts) — those are ops/eval tooling, not API
-demos.
+Minimal, dependency-light samples that **teach the interface**. Reproducible
+accuracy and performance harnesses live in the repo-level
+[`evaluation/`](../../../evaluation); one-off operational helpers live in
+[`scripts/`](../../../scripts). Neither belongs in these interface demos.
 
 Each example is self-contained and runs straight from a source checkout: they
 share a tiny `sys.path` shim + synthetic-observation builder in `_common.py`, so
