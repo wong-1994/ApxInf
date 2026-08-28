@@ -325,29 +325,46 @@ wrong is silent. Add one entry to
 contract becomes `--robot <name>`:
 
 ```python
+MY_ROBOT_BODY = Embodiment(                       # the hardware: survives a re-record
+    name="my_robot",
+    num_cameras=2,
+    action_dim=None,                              # None: the encode step trims
+    builder=build_my_robot_policy,
+    builder_kwargs={"use_delta_joint_actions": True, "adapt_to_pi": True},
+)
+
+MY_ROBOT_KEYS = Convention(                       # the dataset dialect: survives a re-body
+    name="my_dataset",
+    image_keys=("images/cam_high", "images/cam_left_wrist"),  # in model view-slot order
+    state_key="state",
+    discrete_state=True,                          # False *drops* state entirely
+)
+
 MY_ROBOT = RobotPreset(
     name="my_robot",                              # <arm>_<key convention> if the arm is shared
-    slots=(                                       # (model view slot, wire key), in slot order
-        ("base_0_rgb",        "images/cam_high"),
-        ("left_wrist_0_rgb",  "images/cam_left_wrist"),
-    ),
-    state_key="state",
-    action_dim=None,                              # None: the encode step trims
-    discrete_state=True,                          # False *drops* state entirely
-    builder=build_my_robot_policy,
+    embodiment=MY_ROBOT_BODY,
+    convention=MY_ROBOT_KEYS,
     summary="My robot: 2 cameras, 14-DoF state, delta joint actions",
-    builder_kwargs={"use_delta_joint_actions": True, "adapt_to_pi": True},
 )
 
 ROBOT_PRESETS = {p.name: p for p in (FRANKA_LIBERO, UNITREE_G1, MY_ROBOT)}
 ```
 
-Naming each wire key with the **model view slot** it fills is the point: the
-tuple is order-significant (entry *i* becomes model view slot *i*), and a wrong
-order still stacks, still has the right shape, and silently feeds the wrong
-camera to each slot. The pairing is validated — slots must be a prefix of
-`base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb` in order, with no duplicate
-wire keys.
+The two halves are separate because they vary independently: the same arm
+recorded under a second key convention is a new `Convention`, not a new body, and
+re-recording changes no `Embodiment` field. Only the *pairing* is deployable, and
+`--robot` stays one flag over the pairings — separate `--robot`/`--convention`
+flags would let an operator spell a combination nobody ever recorded, which is
+the silent mismatch the flag exists to prevent.
+
+`image_keys` is order-significant: entry *i* becomes model view slot *i*
+(`base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb`), and a wrong order still
+stacks, still has the right shape, and silently feeds the wrong camera to each
+slot. `preset.slots` renders the pairing for logs and review; because the slot
+names are *derived* from the list rather than written by hand, a wrong slot order
+is not expressible at all. What is still checked: no duplicate wire keys, no more
+keys than there are view slots, and — on the pairing — the convention's camera
+count against the body's.
 
 Wire keys may be written **flat** (`"observation/image"` — the slash is part of
 the name, as LIBERO and DROID send it) or as a **nested path**
