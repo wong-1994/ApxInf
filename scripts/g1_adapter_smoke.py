@@ -29,8 +29,8 @@ if _APXINF_PKG.is_dir() and str(_APXINF_PKG) not in sys.path:
     sys.path.insert(0, str(_APXINF_PKG))
 
 from apxinf import build_unitree_g1_policy  # noqa: E402
+from apxinf.conventions import UNITREE_G1 as G1_KEYS  # noqa: E402
 from apxinf.processors import Unnormalizer  # noqa: E402
-from apxinf.robots.unitree_g1 import G1_CAMERAS, G1_STATE_KEY  # noqa: E402
 
 
 def parse_args():
@@ -64,7 +64,8 @@ def main():
         model=model,  # reuse the already-loaded handle
         use_delta_joint_actions=True,
         adapt_to_pi=True,
-        state_key=G1_STATE_KEY,
+        state_key=G1_KEYS.state_key,
+        image_keys=G1_KEYS.image_keys,
         unnormalizer=identity,  # injected into the model's own unnormalize step
         precision=args.precision,
         device=args.device,
@@ -86,13 +87,13 @@ def main():
     # level under "images", state flat. The policy's image_keys are the paths
     # ("images/cam_high"), which lookup_key walks into this dict.
     groups: dict = {}
-    for key in G1_CAMERAS:
+    for key in G1_KEYS.image_keys:
         group, _, camera = key.partition("/")
         assert camera, f"expected a nested camera path, got {key!r}"
         groups.setdefault(group, {})[camera] = cam()
     observation = dict(groups)
-    observation[G1_STATE_KEY] = rng.standard_normal(16).astype(np.float32)
-    observation["prompt"] = args.prompt
+    observation[G1_KEYS.state_key] = rng.standard_normal(16).astype(np.float32)
+    observation[G1_KEYS.prompt_key] = args.prompt
 
     out = policy.infer(observation)
     actions = np.asarray(out["actions"])

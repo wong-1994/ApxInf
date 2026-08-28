@@ -8,6 +8,10 @@ no model class, no step inside the model's chain, and no checkpoint layout:
 holds, and :meth:`~apxinf.policies.base.ComposablePolicy.with_adapter` wraps the
 G1 steps around that policy's own pre/post chain.
 
+It knows nothing about the *dataset* either: the wire keys arrive as required
+arguments from a :class:`~apxinf.conventions.Convention`, so the same body serves
+a re-recorded G1 without an edit here.
+
 The nesting is the entire coupling, and it is an ordering rule, not a naming one:
 
     decode G1 state  ->  [ whatever the model does ]  ->  delta->absolute -> 32->16
@@ -38,9 +42,7 @@ from ..policies.auto import AutoPolicy
 from ..policies.base import ComposablePolicy, Policy
 from ..processors.base import StepSpec
 from ..processors.robots.unitree_g1 import (
-    G1_CAMERAS,
     G1_ROBOT_DIM,
-    G1_STATE_KEY,
     UnitreeG1AbsoluteActions,
     UnitreeG1DecodeState,
     UnitreeG1EncodeActions,
@@ -52,11 +54,10 @@ __all__ = ["build_unitree_g1_policy"]
 def build_unitree_g1_policy(
     model_dir,
     *,
+    state_key: str,
+    image_keys: Sequence[str],
     use_delta_joint_actions: bool = True,
     adapt_to_pi: bool = True,
-    state_key: str = G1_STATE_KEY,
-    prompt_key: str = "prompt",
-    image_keys: Sequence[str] = G1_CAMERAS,
     discrete_state: bool = True,
     action_dim: Optional[int] = None,
     metadata: Optional[dict] = None,
@@ -90,11 +91,22 @@ def build_unitree_g1_policy(
     (``device`` / ``precision`` / ``checkpoint`` / ``model_type`` / a pre-built
     ``model=`` handle / an injected ``unnormalizer=``, ...).
 
-    Defaults match what an unmodified openpi G1 client sends: the nested
-    ``obs["images"][...]`` cameras, a flat ``"state"``, and state discretized into
-    the prompt. Serving with ``discrete_state=False`` silently drops state, which
-    also makes ``use_delta_joint_actions`` a no-op (a delta cannot be resolved
-    without the current joint positions).
+    ``state_key`` and ``image_keys`` are **required and have no defaults**. They
+    are a recording convention, not a fact about this body: the G1 client's
+    dialect lives in :data:`apxinf.conventions.UNITREE_G1`, and defaulting to it
+    here would rebuild the robot↔dataset coupling one layer up. Pass
+    ``**vars(...)`` of a convention, or let
+    :func:`~apxinf.robots.presets.build_robot_policy` do it from the preset
+    table::
+
+        from apxinf.conventions import UNITREE_G1 as G1_KEYS
+        policy = build_unitree_g1_policy(
+            ckpt, state_key=G1_KEYS.state_key, image_keys=G1_KEYS.image_keys
+        )
+
+    Serving with ``discrete_state=False`` silently drops state, which also makes
+    ``use_delta_joint_actions`` a no-op (a delta cannot be resolved without the
+    current joint positions).
     """
     base = AutoPolicy.from_pretrained(
         model_dir,

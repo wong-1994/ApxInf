@@ -103,8 +103,10 @@ result["policy_timing"]   # {'infer_ms': bare model, 'policy_ms': full policy}
 The metadata **is** the wire contract — assert against `meta["image_keys"]` /
 `meta["state_key"]` instead of hardcoding keys, so a server/client mismatch shows
 up as a failed assertion at startup rather than as degraded accuracy in the
-field. Sending a key the server does not serve raises a `KeyError` naming both
-sides; sending an *extra* key is silently ignored (matching openpi).
+field. A `state_key` of `null` is not a gap: it says the served policy drops
+state, so there is no key to send one under. Sending a key the server does not
+serve raises a `KeyError` naming both sides; sending an *extra* key is silently
+ignored (matching openpi).
 
 **Images are RGB.** Neither this server nor openpi converts colour: an `H×W×3`
 uint8 array is taken as RGB as-is. A client reading frames with OpenCV must
@@ -194,6 +196,7 @@ A working G1 example ships in-tree — copy and adapt it:
 ```
 python/apxinf/apxinf/processors/robots/unitree_g1.py   # robot-specific ProcessorSteps
 python/apxinf/apxinf/robots/unitree_g1.py              # build_unitree_g1_policy factory
+python/apxinf/apxinf/conventions.py                    # the G1 client's wire keys
 ```
 
 ### 5.1 Two landing spots
@@ -202,6 +205,7 @@ python/apxinf/apxinf/robots/unitree_g1.py              # build_unitree_g1_policy
 |---|---|---|
 | **robot-specific step** (pure numpy, per-embodiment, model-agnostic) | `python/apxinf/apxinf/processors/robots/<robot>.py` | `ProcessorStep` subclasses: decode-state / delta→absolute / encode-actions |
 | **assembly factory** (wires the steps onto `Pi05Policy`) | `python/apxinf/apxinf/robots/<robot>.py` | a `build_<robot>_policy(...)` that rewrites the pre/post pipelines after `from_pretrained` |
+| **recording convention** (the wire keys your client sends) | `python/apxinf/apxinf/conventions.py` | a `Convention`; it belongs to the *dataset*, so no step and no factory may hardcode it |
 
 ### 5.2 OpenPI transform → apxinf equivalent (G1 as the sample)
 
@@ -266,12 +270,16 @@ through the same file unchanged:
 from ..policies.auto import AutoPolicy
 from ..policies.base import ComposablePolicy
 from ..processors.robots.my_robot import (
-    MyRobotDecodeState, MyRobotAbsoluteActions, MyRobotEncodeActions,
-    ROBOT_CAMERAS, ROBOT_DIM,
+    MyRobotDecodeState, MyRobotAbsoluteActions, MyRobotEncodeActions, ROBOT_DIM,
 )
 
-def build_my_robot_policy(model_dir, *, use_delta_joint_actions=True, adapt_to_pi=True,
-                          state_key="observation/state", image_keys=ROBOT_CAMERAS, **kw):
+# state_key / image_keys are **required and have no defaults**: they are a
+# recording convention, not a fact about this body. Defaulting them here would
+# rebuild the robot<->dataset coupling one layer up — the same arm re-recorded
+# under new keys would silently keep serving the old ones. They come from a
+# `Convention` (§5.6), which `build_robot_policy` reads off the preset for you.
+def build_my_robot_policy(model_dir, *, state_key, image_keys,
+                          use_delta_joint_actions=True, adapt_to_pi=True, **kw):
     base = AutoPolicy.from_pretrained(
         model_dir,
         image_keys=tuple(image_keys),
@@ -333,7 +341,8 @@ MY_ROBOT_BODY = Embodiment(                       # the hardware: survives a re-
     builder_kwargs={"use_delta_joint_actions": True, "adapt_to_pi": True},
 )
 
-MY_ROBOT_KEYS = Convention(                       # the dataset dialect: survives a re-body
+# In apxinf/conventions.py — the dataset dialect: survives a re-body.
+MY_ROBOT_KEYS = Convention(
     name="my_dataset",
     image_keys=("images/cam_high", "images/cam_left_wrist"),  # in model view-slot order
     state_key="state",
@@ -352,10 +361,32 @@ ROBOT_PRESETS = {p.name: p for p in (FRANKA_LIBERO, UNITREE_G1, MY_ROBOT)}
 
 The two halves are separate because they vary independently: the same arm
 recorded under a second key convention is a new `Convention`, not a new body, and
-re-recording changes no `Embodiment` field. Only the *pairing* is deployable, and
-`--robot` stays one flag over the pairings — separate `--robot`/`--convention`
-flags would let an operator spell a combination nobody ever recorded, which is
-the silent mismatch the flag exists to prevent.
+re-recording changes no `Embodiment` field. That is also why they live in
+different modules — a `Convention` goes in
+[`apxinf/conventions.py`](../conventions.py), which imports no body and no policy
+implementation, so a dialect is never anyone's property. Only the *pairing* is
+deployable, and `--robot` stays one flag over the pairings — separate
+`--robot`/`--convention` flags would let an operator spell a combination nobody
+ever recorded, which is the silent mismatch the flag exists to prevent.
+
+**From outside this repository.** A robot that lives in your own package does not
+have to patch either file. Importing your module is enough:
+
+```python
+from apxinf import Convention, Embodiment, RobotPreset
+from apxinf import register_convention, register_robot_preset
+
+MY_KEYS = register_convention(Convention(name="my_dataset", ...))
+MY_ROBOT = register_robot_preset(
+    RobotPreset(name="myarm_my_dataset", embodiment=MY_ARM, convention=MY_KEYS),
+    aliases=("myarm",),
+)
+```
+
+Re-registering a name needs an explicit `replace=True`, and an alias may never
+shadow a canonical preset name: a silent overwrite would change what a launch
+command already in production resolves to. Registration is process-local, so
+`--robot` only sees presets whose module the server imported.
 
 `image_keys` is order-significant: entry *i* becomes model view slot *i*
 (`base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb`), and a wrong order still
@@ -379,8 +410,23 @@ startup, so a client can assert it.
 
 ```python
 from apxinf import build_unitree_g1_policy          # shipped G1 example
-policy = build_unitree_g1_policy("<g1-ckpt>", use_delta_joint_actions=True, adapt_to_pi=True)
+from apxinf.conventions import UNITREE_G1 as G1_KEYS
+
+policy = build_unitree_g1_policy(
+    "<g1-ckpt>",
+    state_key=G1_KEYS.state_key,                    # required: a dataset fact, not a body's
+    image_keys=G1_KEYS.image_keys,
+    use_delta_joint_actions=True,
+    adapt_to_pi=True,
+)
 actions = policy.infer(obs)["actions"]               # [H, 16]
+```
+
+Or let the preset table supply both, which is what the server does:
+
+```python
+from apxinf import build_robot_policy
+policy = build_robot_policy("unitree_g1", "<g1-ckpt>")
 ```
 
 Served the same way, once §5.6 is done:

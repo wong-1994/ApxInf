@@ -41,11 +41,14 @@ is named for the arm *and* the dataset convention whose keys it implements:
 
 **Two halves, one flag.** That naming rule is an admission, so the dataclasses
 follow it: an :class:`Embodiment` is the body (camera count, action width, which
-pre/post steps its actions need) and a :class:`Convention` is a dataset's
-recording dialect (the wire keys, and whether state was recorded into the
-prompt). Neither knows the other; they vary independently, which is the point —
-the same Franka under DROID's keys is a second :class:`Convention`, not a second
-body, and re-recording the G1 changes no :class:`Embodiment` field.
+pre/post steps its actions need) and a
+:class:`~apxinf.conventions.Convention` is a dataset's recording dialect (the
+wire keys, and whether state was recorded into the prompt). Neither knows the
+other; they vary independently, which is the point — the same Franka under
+DROID's keys is a second convention, not a second body, and re-recording the G1
+changes no :class:`Embodiment` field. Conventions live in
+:mod:`apxinf.conventions` rather than here, because a dialect is not a robot's
+property: this module imports them, never the reverse.
 
 A :class:`RobotPreset` names one *pairing*, and only the pairing is deployable.
 ``--robot`` stays a single flag over that registry rather than becoming
@@ -54,16 +57,21 @@ combination nobody ever recorded, and a body served under a convention it was no
 recorded on is exactly the silent mismatch this whole mechanism exists to
 prevent. The pairing is validated when the module loads — a convention naming
 three cameras cannot be attached to a two-camera body.
+
+**Registering from outside.** :func:`register_robot_preset` adds an entry from
+another package, so a third-party robot does not have to patch this file to
+become ``--robot <name>``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
+from .. import conventions
+from ..conventions import Convention
 from ..policies.auto import AutoPolicy
 from ..policies.base import VIEW_SLOTS, Policy
-from ..processors.robots.unitree_g1 import G1_CAMERAS, G1_STATE_KEY
 from .unitree_g1 import build_unitree_g1_policy
 
 __all__ = [
@@ -75,6 +83,7 @@ __all__ = [
     "ROBOT_ALIASES",
     "available_robots",
     "get_robot_preset",
+    "register_robot_preset",
     "build_robot_policy",
 ]
 
@@ -122,53 +131,6 @@ class Embodiment:
         rather than publishing the preset name unqualified.
         """
         return self.builder is not _build_generic
-
-
-@dataclass(frozen=True)
-class Convention:
-    """A dataset's recording convention: what the client calls things.
-
-    Everything here is a string on the network, plus the one routing decision
-    that follows from how the data was recorded. It survives a change of robot:
-    LIBERO's keys describe a Franka today and would describe any arm recorded the
-    same way. Nothing here knows an action width or a camera count.
-    """
-
-    #: Convention name (a dataset or an integrator's dialect).
-    name: str
-    #: Camera wire keys, in model view-slot order. Entry *i* fills slot *i*.
-    image_keys: Tuple[str, ...]
-    #: Wire key of the proprioceptive state vector.
-    state_key: str
-    #: Wire key of the task instruction.
-    prompt_key: str = "prompt"
-    #: Optional policy override for state string encoding. ``None`` leaves the
-    #: choice to the checkpoint's concrete policy; state representation is a
-    #: model semantic, not solely a recording-convention property.
-    discrete_state: Optional[bool] = None
-
-    def __post_init__(self) -> None:
-        if not self.image_keys:
-            raise ValueError(f"Convention {self.name!r}: at least one camera key is required")
-        if len(self.image_keys) > len(VIEW_SLOTS):
-            raise ValueError(
-                f"Convention {self.name!r}: {len(self.image_keys)} camera keys exceeds "
-                f"pi05's {len(VIEW_SLOTS)} view slots {VIEW_SLOTS}"
-            )
-        if len(set(self.image_keys)) != len(self.image_keys):
-            raise ValueError(
-                f"Convention {self.name!r}: duplicate camera wire keys {list(self.image_keys)}"
-            )
-
-    @property
-    def num_cameras(self) -> int:
-        """Cameras this convention names — cross-checked against the body's."""
-        return len(self.image_keys)
-
-    @property
-    def slots(self) -> Tuple[Tuple[str, str], ...]:
-        """``(view slot, wire key)`` pairs — the pairing, for logs and review."""
-        return tuple(zip(VIEW_SLOTS, self.image_keys))
 
 
 @dataclass(frozen=True)
@@ -313,35 +275,13 @@ UNITREE_G1_BODY = Embodiment(
     builder_kwargs={"use_delta_joint_actions": True, "adapt_to_pi": True},
 )
 
-#: --- key conventions ---------------------------------------------------------
-
-#: LIBERO's recording convention (the 7-DoF sim benchmark). Mirrors openpi
-#: ``LiberoInputs``: flat ``observation/...`` keys. State encoding is
-#: checkpoint-specific: PI0.5 drops it by default, while WallOSS discretizes it.
-LIBERO_KEYS = Convention(
-    name="libero",
-    image_keys=("observation/image", "observation/wrist_image"),
-    state_key="observation/state",
-    discrete_state=None,
-)
-
-#: The ``pi05_UnitreeG1`` fine-tune's convention, from its
-#: ``unitreeG1Inputs``/``Outputs``: cameras nested one level under ``images``,
-#: a flat ``state``, discretized into the prompt.
-UNITREE_G1_KEYS = Convention(
-    name="unitree_g1",
-    image_keys=tuple(G1_CAMERAS),
-    state_key=G1_STATE_KEY,
-    discrete_state=True,
-)
-
 #: --- deployable pairings -----------------------------------------------------
 
 #: Franka Panda under LIBERO's keys: 2 cameras, 7-dim action.
 FRANKA_LIBERO = RobotPreset(
     name="franka_libero",
     embodiment=FRANKA,
-    convention=LIBERO_KEYS,
+    convention=conventions.LIBERO,
     summary="Franka Panda, LIBERO keys: 2 cameras, 7-dim action (6 EEF deltas + gripper)",
 )
 
@@ -350,12 +290,14 @@ FRANKA_LIBERO = RobotPreset(
 UNITREE_G1 = RobotPreset(
     name="unitree_g1",
     embodiment=UNITREE_G1_BODY,
-    convention=UNITREE_G1_KEYS,
+    convention=conventions.UNITREE_G1,
     summary="Unitree G1: 3 cameras, 16-DoF state, delta joint actions, 32->16 encode",
 )
 
 #: Name -> preset. Add an embodiment here once its steps and factory exist; that
 #: is the whole registration step (openpi's ``training/config.py`` equivalent).
+#: A preset defined outside this package joins the same dict through
+#: :func:`register_robot_preset`.
 ROBOT_PRESETS: Dict[str, RobotPreset] = {p.name: p for p in (FRANKA_LIBERO, UNITREE_G1)}
 
 #: Accepted spellings that are not canonical names. ``libero`` names a benchmark
@@ -380,6 +322,56 @@ def get_robot_preset(name: str) -> RobotPreset:
             f"unknown robot preset {name!r}; known: {list(available_robots())}"
             f" (aliases: {list(ROBOT_ALIASES)})"
         ) from None
+
+
+def register_robot_preset(
+    preset: RobotPreset,
+    *,
+    aliases: Iterable[str] = (),
+    replace: bool = False,
+) -> RobotPreset:
+    """Add ``preset`` to the registry and return it, for use at module scope.
+
+    The registry above is this repository's table; a robot that lives in someone
+    else's package should not have to patch it to become ``--robot <name>``.
+    Importing that package is enough::
+
+        MY_ROBOT = register_robot_preset(
+            RobotPreset(name="myarm_mydataset", embodiment=MY_ARM, convention=MY_KEYS),
+            aliases=("myarm",),
+        )
+
+    Re-registering a name is an error unless ``replace=True``: a silent overwrite
+    would change what a launch command already in production resolves to, which
+    is the same class of invisible failure ``--robot`` exists to prevent. An alias
+    may never shadow a canonical name, for the same reason.
+
+    Registration is process-local and not persisted — ``--robot`` on the shipped
+    server only sees presets whose module was imported.
+    """
+    if not isinstance(preset, RobotPreset):
+        raise TypeError(f"expected a RobotPreset, got {type(preset).__name__}")
+    existing = ROBOT_PRESETS.get(preset.name)
+    if existing is not None and not replace:
+        raise ValueError(
+            f"robot preset {preset.name!r} is already registered ({existing.describe()}); "
+            "pass replace=True to override it"
+        )
+    for alias in aliases:
+        if alias in ROBOT_PRESETS:
+            raise ValueError(
+                f"alias {alias!r} for {preset.name!r} is already a canonical preset name; "
+                "an alias that shadows a real preset would silently redirect --robot"
+            )
+        target = ROBOT_ALIASES.get(alias)
+        if target is not None and target != preset.name and not replace:
+            raise ValueError(
+                f"alias {alias!r} already resolves to {target!r}; pass replace=True to move it"
+            )
+    ROBOT_PRESETS[preset.name] = preset
+    for alias in aliases:
+        ROBOT_ALIASES[alias] = preset.name
+    return preset
 
 
 def build_robot_policy(

@@ -20,7 +20,13 @@ camera rename + CHW->HWC       ``image_keys`` config + ``ParseImage`` (already
 ===========================  ==============================================
 
 These steps are model-agnostic — they reference no policy symbols and vary only
-with the G1 body. The :func:`~apxinf.robots.unitree_g1.build_unitree_g1_policy`
+with the G1 body. They are also **dataset-agnostic**: the G1 client's wire keys
+(``images/cam_high``, a flat ``state``) are a recording convention, so they live
+in :mod:`apxinf.conventions` and reach these steps as arguments. What is left
+here is arithmetic that changes only if the hardware does — the 16-DoF layout,
+the delta mask, the gripper and joint-sign conventions.
+
+The :func:`~apxinf.robots.unitree_g1.build_unitree_g1_policy`
 adapter wraps them around whichever policy the checkpoint turns out to be, using
 :meth:`~apxinf.policies.base.ComposablePolicy.with_adapter`; it names no model
 class either.
@@ -46,22 +52,9 @@ __all__ = [
     "UnitreeG1DecodeState",
     "UnitreeG1AbsoluteActions",
     "UnitreeG1EncodeActions",
-    "G1_CAMERAS",
-    "G1_STATE_KEY",
     "G1_ROBOT_DIM",
     "G1_DELTA_MASK",
 ]
-
-#: G1 camera **wire keys**, ordered base / left-wrist / right-wrist to match the
-#: model's view slots (openpi ``base_0_rgb`` / ``left_wrist_0_rgb`` /
-#: ``right_wrist_0_rgb``). These are the keys an unmodified openpi G1 client
-#: sends, i.e. the nested ``obs["images"]["cam_high"]`` layout, spelled as a path
-#: for :func:`~apxinf.processors.transforms.lookup_key`.
-G1_CAMERAS = ("images/cam_high", "images/cam_left_wrist", "images/cam_right_wrist")
-
-#: G1 state wire key. openpi's G1 client sends a flat top-level ``"state"``, not
-#: LIBERO's ``"observation/state"``.
-G1_STATE_KEY = "state"
 
 #: G1 state/action layout: [L-arm 7, L-gripper 1, R-arm 7, R-gripper 1].
 G1_ROBOT_DIM = 16
@@ -111,9 +104,14 @@ class UnitreeG1DecodeState(ProcessorStep):
     and the delta->absolute output step both see the decoded state. Operates on a
     shallow copy of the observation so the caller's dict is left untouched. A
     no-op when no state is present (state-off serving).
+
+    ``state_key`` is required and has no default: which key carries state is a
+    property of the *convention* the data was recorded under
+    (:mod:`apxinf.conventions`), not of this body, and a default here would be
+    one dataset's dialect built into a robot's arithmetic.
     """
 
-    def __init__(self, state_key: str = G1_STATE_KEY, *, observation_key: str = OBSERVATION):
+    def __init__(self, state_key: str, *, observation_key: str = OBSERVATION):
         self.state_key = state_key
         self.observation_key = observation_key
 
@@ -138,9 +136,11 @@ class UnitreeG1AbsoluteActions(ProcessorStep):
     decoded state; gripper dims are already absolute and pass through. Reads the
     unnormalized ``actions`` and the decoded ``observation`` state threaded in by
     ``Pi05Policy.infer``. A no-op when state is absent (delta cannot be resolved).
+    ``state_key`` is required for the same reason as in
+    :class:`UnitreeG1DecodeState`.
     """
 
-    def __init__(self, state_key: str = G1_STATE_KEY, *, observation_key: str = OBSERVATION):
+    def __init__(self, state_key: str, *, observation_key: str = OBSERVATION):
         self.state_key = state_key
         self.observation_key = observation_key
 

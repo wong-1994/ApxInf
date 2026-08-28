@@ -44,7 +44,8 @@ from apxinf import AutoPolicy
 
 # image_keys / state_key are the wire contract — the policy holds no dataset's
 # convention as a default, so state the ones your client actually sends. These
-# are LIBERO's; `--robot <preset>` on the server does this for you from a table.
+# are LIBERO's (`apxinf.conventions.LIBERO`); `--robot <preset>` on the server,
+# or `build_robot_policy(...)` in code, does this for you from a table.
 policy = AutoPolicy.from_pretrained(
     "<path-to-model>",
     precision="bf16",

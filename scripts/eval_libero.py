@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import functools
 import json
 import os
 import pathlib
@@ -57,12 +58,10 @@ else:
 # --- rollout protocol constants (OpenPI's public PI0.5 LIBERO configuration) ---
 LIBERO_ACTION_DIM = 7
 
-#: LIBERO's camera wire keys, in model view-slot order. Stated here because the
-#: policy layer no longer defaults to them: these are a *dataset* convention, and
-#: a default in the model layer silently applied them to every checkpoint. The
-#: same pair is what the ``franka_libero`` preset serves.
-LIBERO_IMAGE_KEYS = ("observation/image", "observation/wrist_image")
-LIBERO_STATE_KEY = "observation/state"
+#: The preset whose wire contract this evaluator drives. The keys themselves are
+#: *not* restated here: they are read from the table below, so the evaluator and
+#: the server cannot drift into two different dialects of "LIBERO".
+LIBERO_PRESET = "franka_libero"
 MAX_STEPS = 520
 WAIT_STEPS = 10
 REPLAN_STEPS = 5
@@ -77,6 +76,28 @@ ALL_SUITES = (
 )
 
 LedgerKey = Tuple[str, int, int]  # (suite, task_id, trial_id)
+
+
+def _add_apxinf_to_path() -> None:
+    """Make ``import apxinf`` work from a source checkout, idempotently."""
+    package_dir = pathlib.Path(__file__).resolve().parents[1] / "python" / "apxinf"
+    if package_dir.is_dir() and str(package_dir) not in sys.path:
+        sys.path.insert(0, str(package_dir))
+
+
+@functools.lru_cache(maxsize=1)
+def libero_convention():
+    """LIBERO's wire dialect, read from the preset table rather than restated.
+
+    Both backends send the same observation, so both resolve it here: the keys
+    the evaluator writes are by construction the keys ``--robot franka_libero``
+    serves. Importing ``apxinf`` costs no CUDA (the binding is loaded lazily by
+    ``from_pretrained``), so the websocket backend pays nothing for this.
+    """
+    _add_apxinf_to_path()
+    from apxinf import get_robot_preset
+
+    return get_robot_preset(LIBERO_PRESET).convention
 
 
 # --- LIBERO harness (inlined; was scripts/libero_harness.py) ------------------
@@ -254,12 +275,13 @@ class Backend(Protocol):
 
 def _observation(base, wrist, state, prompt) -> dict:
     """The OpenPI LIBERO observation both backends consume, identical on the wire
-    and in-process."""
+    and in-process. Keys come from the preset table, not from constants here."""
+    convention = libero_convention()
     return {
-        LIBERO_IMAGE_KEYS[0]: base,
-        LIBERO_IMAGE_KEYS[1]: wrist,
-        LIBERO_STATE_KEY: state,
-        "prompt": prompt,
+        convention.image_keys[0]: base,
+        convention.image_keys[1]: wrist,
+        convention.state_key: state,
+        convention.prompt_key: prompt,
     }
 
 
@@ -326,12 +348,9 @@ class InProcessBackend:
     """
 
     def __init__(self, args: argparse.Namespace) -> None:
-        # Lazy: importing apxinf pulls in the CUDA binding; websocket-only users
+        # Lazy: importing apxinf pulls in the policy stack; websocket-only users
         # never pay for it. Make ``import apxinf`` work from a source checkout.
-        repo_root = pathlib.Path(__file__).resolve().parents[1]
-        package_dir = repo_root / "python" / "apxinf"
-        if package_dir.is_dir() and str(package_dir) not in sys.path:
-            sys.path.insert(0, str(package_dir))
+        _add_apxinf_to_path()
         from apxinf import AutoPolicy
 
         options = {
@@ -347,16 +366,20 @@ class InProcessBackend:
             "discrete_state": args.discrete_state,
             "seed": args.model_seed if args.model_seed is not None else args.seed,
         }
+        convention = libero_convention()
         self._policy = AutoPolicy.from_pretrained(
             args.model_dir,
             model_type=args.model_type,
             device=args.device,
             precision=args.precision,
             action_dim=(args.action_dim or None),
-            # LIBERO's wire keys, stated rather than inherited: the policy layer
-            # holds no dataset's convention as a default.
-            image_keys=LIBERO_IMAGE_KEYS,
-            state_key=LIBERO_STATE_KEY,
+            # LIBERO's wire keys, read from the ``franka_libero`` preset rather
+            # than restated: the policy layer holds no dataset's convention as a
+            # default, and this evaluator should not become a second source of
+            # truth for what "LIBERO keys" means.
+            image_keys=convention.image_keys,
+            state_key=convention.state_key,
+            prompt_key=convention.prompt_key,
             metadata={"precision": args.precision, "policy": "libero"},
             **{name: value for name, value in options.items() if value is not None},
         )

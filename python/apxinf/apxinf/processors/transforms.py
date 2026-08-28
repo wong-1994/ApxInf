@@ -26,7 +26,7 @@ steps' keys.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, MutableMapping, Sequence
+from typing import Any, Mapping, MutableMapping, Optional, Sequence
 
 import numpy as np
 
@@ -178,17 +178,30 @@ class Tokenize(ProcessorStep):
     Mirrors the policy's old state routing: when the tokenizer runs in
     ``discrete_state`` mode and a ``state_normalizer`` is set, the raw state is
     first mapped to ``[-1, 1]`` before discretization; otherwise state is dropped.
+
+    ``state_key`` has no default. It names a *dataset's* wire key, and this layer
+    has no business guessing one: ``"observation/state"`` used to be the default,
+    which is LIBERO's dialect quietly applied to every robot. ``None`` is allowed
+    only when the tokenizer does not read state at all, and is rejected when it
+    does — dropping proprioception silently is the failure this guards.
     """
 
     def __init__(
         self,
         tokenizer,
         state_normalizer=None,
-        state_key: str = "observation/state",
+        state_key: Optional[str] = None,
         *,
         observation_key: str = OBSERVATION,
         prompt_key: str = PROMPT,
     ):
+        if state_key is None and getattr(tokenizer, "discrete_state", False):
+            raise ValueError(
+                "Tokenize: the tokenizer discretizes state into the prompt but no "
+                "state_key was given, so there is no key to read it from. Name the "
+                "wire key your client sends (see apxinf.conventions), or use a "
+                "tokenizer with discrete_state=False to drop state deliberately."
+            )
         self.tokenizer = tokenizer
         self.state_normalizer = state_normalizer
         self.state_key = state_key
