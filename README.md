@@ -23,13 +23,13 @@ Make sure you have ApxInf built and installed, see [Build ApxInf](#build-apxinf)
 Benchmarking PI-0.5 with randomly generated weights.
 
 ```bash
-python scripts/bench_pi05.py --random-weights --precision bf16 --layer l1 \
+python -m evaluation.benchmarks.pi05 --random-weights --precision bf16 --layer l1 \
   --views 2 --token-count 10 --action-horizon 10 --num-flow-steps 10 \
   --warmup 10 --samples 100
 ```
 
 ```bash
-python scripts/bench_pi05.py --random-weights --precision fp8 --layer l1 \
+python -m evaluation.benchmarks.pi05 --random-weights --precision fp8 --layer l1 \
   --views 2 --token-count 10 --action-horizon 10 --num-flow-steps 10
 ```
 
@@ -160,7 +160,8 @@ Confirm the binding imports and reaches the GPU:
 
 ```bash
 python -c 'import apxinf_py; print(apxinf_py.__version__)'
-python scripts/bench_pi05.py --random-weights --precision bf16 --layer l1 --samples 5
+python -m evaluation.benchmarks.pi05 \
+  --random-weights --precision bf16 --layer l1 --samples 5
 ```
 
 Needs a Linux host with an NVIDIA driver and a CUDA toolkit plus a stable Rust
@@ -321,6 +322,9 @@ policy = AutoPolicy.from_pretrained("<path-to-model>", precision="int8")
 
 ## LIBERO evaluation
 
+The repository evaluation entry points are documented in
+[`evaluation/README.md`](evaluation/README.md).
+
 ### Get the checkpoint
 
 The published accuracy is `pi05_libero_base`, π0.5 fine-tuned on LIBERO — an
@@ -351,7 +355,7 @@ export MUJOCO_GL=egl                               # headless; osmesa if the mac
 That numpy pin is the one thing to watch: it predates Python 3.11, so on a newer
 interpreter it has no wheel and builds from source. `--no-deps` skips it.
 
-`--backend websocket` additionally needs `openpi-client`, from an openpi
+Client/server evaluation additionally needs `openpi-client`, from an openpi
 checkout:
 
 ```bash
@@ -359,10 +363,29 @@ git clone https://github.com/Physical-Intelligence/openpi.git <path-to-openpi>
 pip install -e <path-to-openpi>/packages/openpi-client
 ```
 
-`scripts/eval_libero.py` builds the policy in-process — no server involved:
+The recommended setup keeps the inference host free of LIBERO dependencies.
+Start the policy server in its inference environment:
 
 ```bash
-python scripts/eval_libero.py --backend in-process --model-dir <path-to-model> \
+python scripts/pi05_openpi_websocket_server.py \
+  --model-dir <path-to-model> --robot franka_libero --precision bf16 --port 8000
+```
+
+Then run the simulator and accuracy client from a LIBERO environment:
+
+```bash
+python -m evaluation.libero.client \
+  --host <server-host> --port 8000 --precision bf16 \
+  --suite libero_10 --tasks all --trials-per-task 50 \
+  --results-jsonl <out-dir>/results.jsonl --summary-json <out-dir>/summary.json
+```
+
+For a single-process development run, the dual-backend evaluator can build the
+policy locally:
+
+```bash
+python -m evaluation.libero.eval \
+  --backend in-process --model-dir <path-to-model> \
   --precision bf16 --action-horizon 10 \
   --suite libero_10 --tasks all --trials-per-task 50 \
   --results-jsonl <out-dir>/results.jsonl --summary-json <out-dir>/summary.json
@@ -376,29 +399,31 @@ That is the published protocol: all 10 LIBERO-10 tasks x 50 episodes at seed 7
 - `--suite` picks the task suite, `--tasks` a comma list within it, and
   `--trials-per-task` the episode count; a smoke run is
   `--tasks 0 --trials-per-task 1`.
-- The model flags — `--model-type`, `--action-horizon`, `--action-dim`,
-  `--discrete-state`, FP8 `--calibration` — belong to `--backend in-process`
-  alone.
-- `--backend websocket --host <h> --port <p>` evaluates a running
-  [server](#openpi-compatible-serving) instead, on this machine or another. The
-  model flags belong to the server there, and `--precision` only asserts what
-  the server reports, so a mismatch fails at connect instead of skewing a run.
+- `evaluation.libero.client` accepts only remote server selection; it cannot
+  load a checkpoint or initialize CUDA.
+- The local model flags — `--model-type`, `--action-horizon`, `--action-dim`,
+  `--discrete-state`, FP8 `--calibration` — exist only on
+  `evaluation.libero.eval --backend in-process`.
+- With a remote server, model flags belong to the server and client
+  `--precision` only asserts reported metadata, so a mismatch fails before a
+  rollout instead of skewing a run.
 - Runs are resumable: completed task/trial rows in the JSONL ledger are skipped,
   and the summary reports success rate alongside per-segment latency.
 
 
 ## Benchmark
 
-`scripts/bench_pi05.py` times the concentric serving shells so a regression can
-be attributed to the engine, the processors, or the transport.
+`evaluation.benchmarks.pi05` times the concentric serving shells so a regression
+can be attributed to the engine, the processors, or the transport.
 
 ```bash
-python scripts/bench_pi05.py --model-dir <path-to-model> --precision bf16 --layer l1,l2
+python -m evaluation.benchmarks.pi05 \
+  --model-dir <path-to-model> --precision bf16 --layer l1,l2
 ```
 
-- `--layer` selects any subset of `l1` (bare model), `l2` (full policy), `l3`
-  (websocket round trip). L3 attaches to a running server and needs no local
-  weights.
+- `--layer` selects any subset of `l0` (engine floor), `l1` (RGB/PyO3 path),
+  `l2` (full policy), and `l3` (websocket round trip). L3 attaches to a running
+  server and needs no local weights.
 - `--model-dir` runs a real checkpoint at its native horizon; `--random-weights`
   runs the engine with no checkpoint on disk, and the shape knobs (`--views`,
   `--image-size`, `--action-horizon`, `--num-flow-steps`, `--token-count`)

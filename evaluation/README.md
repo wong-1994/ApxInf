@@ -38,10 +38,16 @@ python -m evaluation.libero.client \
   --summary-json out/libero.summary.json
 ```
 
-The existing script command remains available as a compatibility entry point:
+For a single-process development run, use the dual-backend evaluator:
 
 ```bash
-python scripts/eval_libero_client.py <same arguments>
+python -m evaluation.libero.eval \
+  --backend in-process \
+  --model-dir /path/to/checkpoint \
+  --precision bf16 \
+  --suite libero_10 \
+  --results-jsonl out/libero.jsonl \
+  --summary-json out/libero.summary.json
 ```
 
 ## Performance benchmarks
@@ -49,3 +55,12 @@ python scripts/eval_libero_client.py <same arguments>
 Stable benchmarks that produce comparable latency, throughput, memory, or
 kernel metrics belong under `evaluation/benchmarks/`. Ad-hoc profiler launchers
 and result-inspection helpers remain under `scripts/`.
+
+Run the layered PI0.5 benchmark with:
+
+```bash
+python -m evaluation.benchmarks.pi05 \
+  --model-dir /path/to/checkpoint \
+  --precision bf16 \
+  --layer l1,l2
+```

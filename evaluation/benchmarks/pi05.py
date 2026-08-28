@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified layered latency benchmark for the pi05 serving stack — L0 / L1 / L2 / L3.
+r"""Unified layered latency benchmark for the pi05 serving stack — L0 / L1 / L2 / L3.
 
 One entry point, driven by ``--layer × --precision × weights-source × input``,
 that folds the former ``bench_pi05_layers.py`` (L0/L1/L2 in-process) and
@@ -31,18 +31,18 @@ server (``--host/--port``) and needs no local weights — serve with
 ``--random-weights`` for a fully checkpoint-free L3.
 
     # checkpoint-free engine floor — the zero-config default (no download)
-    python scripts/bench_pi05.py --precision bf16 --views 2 --token-count 10
+    python -m evaluation.benchmarks.pi05 --precision bf16 --views 2 --token-count 10
 
     # full in-process breakdown against a checkpoint
-    python scripts/bench_pi05.py --model-dir /path/to/pi05 --layer l0,l1,l2 \
+    python -m evaluation.benchmarks.pi05 --model-dir /path/to/pi05 --layer l0,l1,l2 \
         --precision bf16 --prompt "put both moka pots on the stove"
 
     # same checkpoint, forced to a 10-step chunk instead of its native H=50
-    python scripts/bench_pi05.py --model-dir /path/to/pi05 --layer l0,l1,l2 \
+    python -m evaluation.benchmarks.pi05 --model-dir /path/to/pi05 --layer l0,l1,l2 \
         --precision bf16 --action-horizon 10
 
     # L3 against a running websocket server
-    python scripts/bench_pi05.py --layer l3 --precision bf16 \
+    python -m evaluation.benchmarks.pi05 --layer l3 --precision bf16 \
         --host 127.0.0.1 --port 8000 --prompt "put both moka pots on the stove"
 """
 
@@ -59,7 +59,7 @@ import time
 
 import numpy as np
 
-_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _APXINF_PKG = _REPO_ROOT / "python" / "apxinf"
 if _APXINF_PKG.is_dir() and str(_APXINF_PKG) not in sys.path:
     sys.path.insert(0, str(_APXINF_PKG))
@@ -262,7 +262,7 @@ def main() -> None:
     #   --model-dir      -> checkpoint; default layers = all (native config, e.g. H50)
     #   --random-weights -> synthetic;  default layers = l0,l1
     #   neither          -> synthetic;  default layers = l0,l1
-    # so bare `python bench_pi05.py` is a checkpoint-free L0/L1 run, while every
+    # so the bare module command is a checkpoint-free L0/L1 run, while every
     # existing `--model-dir ...` invocation keeps its full L0/L1/L2(/L3) behavior.
     checkpoint = args.model_dir is not None
     random = not checkpoint
