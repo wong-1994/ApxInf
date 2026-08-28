@@ -49,7 +49,7 @@ def main() -> None:
     try:
         print("metadata:", policy.metadata)
 
-        observation = synthetic_observation(image_keys=policy.image_keys)
+        observation = synthetic_observation(image_keys=policy.image_keys, state_key=policy.state_key)
         result = policy.infer(observation)
 
         actions = result["actions"]

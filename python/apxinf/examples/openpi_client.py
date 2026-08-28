@@ -50,7 +50,13 @@ def main() -> None:
     metadata = client.get_server_metadata()
     print("server metadata:", metadata)
 
-    observation = synthetic_observation(prompt=args.prompt)
+    observation = synthetic_observation(
+        # The wire contract comes from the server, not from a constant here —
+        # hardcoding keys is the mismatch that shows up as "bad accuracy".
+        image_keys=metadata["image_keys"],
+        state_key=metadata["state_key"],
+        prompt=args.prompt,
+    )
     response = client.infer(observation)
 
     actions = np.asarray(response["actions"], dtype=np.float32)

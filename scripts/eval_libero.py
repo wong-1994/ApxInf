@@ -56,6 +56,13 @@ else:
 
 # --- rollout protocol constants (OpenPI's public PI0.5 LIBERO configuration) ---
 LIBERO_ACTION_DIM = 7
+
+#: LIBERO's camera wire keys, in model view-slot order. Stated here because the
+#: policy layer no longer defaults to them: these are a *dataset* convention, and
+#: a default in the model layer silently applied them to every checkpoint. The
+#: same pair is what the ``franka_libero`` preset serves.
+LIBERO_IMAGE_KEYS = ("observation/image", "observation/wrist_image")
+LIBERO_STATE_KEY = "observation/state"
 MAX_STEPS = 520
 WAIT_STEPS = 10
 REPLAN_STEPS = 5
@@ -249,9 +256,9 @@ def _observation(base, wrist, state, prompt) -> dict:
     """The OpenPI LIBERO observation both backends consume, identical on the wire
     and in-process."""
     return {
-        "observation/image": base,
-        "observation/wrist_image": wrist,
-        "observation/state": state,
+        LIBERO_IMAGE_KEYS[0]: base,
+        LIBERO_IMAGE_KEYS[1]: wrist,
+        LIBERO_STATE_KEY: state,
         "prompt": prompt,
     }
 
@@ -346,6 +353,10 @@ class InProcessBackend:
             device=args.device,
             precision=args.precision,
             action_dim=(args.action_dim or None),
+            # LIBERO's wire keys, stated rather than inherited: the policy layer
+            # holds no dataset's convention as a default.
+            image_keys=LIBERO_IMAGE_KEYS,
+            state_key=LIBERO_STATE_KEY,
             metadata={"precision": args.precision, "policy": "libero"},
             **{name: value for name, value in options.items() if value is not None},
         )

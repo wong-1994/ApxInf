@@ -14,6 +14,9 @@ points other layers code against:
 * :class:`ComposablePolicy` — the narrow extra capability a policy needs before
   an *outer* layer (a robot adapter) can wrap steps around its chain. Optional:
   a policy is a perfectly good :class:`Policy` without it.
+* :data:`VIEW_SLOTS` — the camera slot names a checkpoint's weights consume, in
+  order. Model vocabulary, kept here so a policy and a robot preset can both
+  name a slot without importing each other.
 
 It exists to pin these contracts *now*, before a second model lands, so the
 layout is set for whoever adds one. They intentionally stay tiny: extract richer
@@ -34,7 +37,22 @@ from typing import Any, Dict, Mapping, Optional, Protocol, Sequence, runtime_che
 
 import numpy as np
 
-__all__ = ["Policy", "BareModel", "ComposablePolicy"]
+__all__ = ["Policy", "BareModel", "ComposablePolicy", "VIEW_SLOTS"]
+
+#: Camera view slots, in the order a checkpoint's weights consume them, as named
+#: by openpi's ``model.IMAGE_KEYS``.
+#:
+#: These are **model** vocabulary, not wire keys and not a dataset's convention.
+#: A checkpoint's ``num_views`` says how many of these it was trained on; the
+#: *order* is baked into the weights, and nothing here ever crosses the network.
+#: They live in this module rather than in a robot preset or in ``pi05.py``
+#: because both sides need to agree on them without either importing the other:
+#: a policy uses them to name the cameras it wants when the caller does not, and
+#: a robot preset uses them to say which slot each of its wire keys fills.
+#:
+#: The pi05 family shares this vocabulary. A model with a different camera layout
+#: declares its own rather than stretching this tuple.
+VIEW_SLOTS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
 
 
 @runtime_checkable

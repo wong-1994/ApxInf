@@ -17,13 +17,16 @@ arrives as `observation/image` or as `obs["images"]["cam_high"]`, whether the
 state vector is discretized into the prompt or dropped, or whether the 32-wide
 model output should be truncated to 7 or to 16.
 
-Before presets, `Pi05Policy`'s LIBERO defaults applied to *every* checkpoint. A
-G1 checkpoint served with no extra arguments ran LIBERO's keys, dropped state,
-and skipped the G1 delta→absolute and 32→16 steps. Nothing failed. Nothing
-logged. It looked exactly like a "model accuracy problem."
+Before presets, `Pi05Policy` defaulted `image_keys` to LIBERO's two, so that
+contract applied to *every* checkpoint. A G1 checkpoint served with no extra
+arguments ran LIBERO's keys, dropped state, and skipped the G1 delta→absolute and
+32→16 steps. Nothing failed. Nothing logged. It looked exactly like a "model
+accuracy problem."
 
-So the embodiment is a named, explicit launch flag on both sides — the same shape
-OpenPI uses, so the two line up one-to-one:
+The model layer now names no wire keys at all — construct a policy without them
+and it falls back to its own view slots, which no client sends, so a mismatch is
+a `KeyError` naming both sides. The embodiment is a named, explicit launch flag
+on both sides — the same shape OpenPI uses, so the two line up one-to-one:
 
 ```
 openpi:  serve_policy.py --policy.config pi05_UnitreeG1_groundwire
@@ -37,7 +40,7 @@ things and they never need to be equal.
 
 | | what it is | where it lives | on the wire? |
 |---|---|---|---|
-| **view slots** | `base_0_rgb`, `left_wrist_0_rgb`, `right_wrist_0_rgb` | `VIEW_SLOTS` in `robots/presets.py` | never — the *order* is baked into the weights |
+| **view slots** | `base_0_rgb`, `left_wrist_0_rgb`, `right_wrist_0_rgb` | `VIEW_SLOTS` in `policies/base.py` | never — the *order* is baked into the weights |
 | **wire keys** | `observation/image`, `images/cam_high`, … | a preset's `slots` | yes — this is what the client sends |
 | **training feature names** | LeRobot `config.json` `input_features` | the checkpoint | no |
 
@@ -46,6 +49,13 @@ order-significant: entry *i* is stacked into model view slot *i*. A tuple writte
 in the wrong order still stacks, still has the right shape, and silently feeds
 the wrong camera to each slot — pairing every key with its slot makes that
 reviewable instead of positional.
+
+The slot names live in `policies/base.py`, not in the preset table: they are
+*model* vocabulary, so the robot layer reads them rather than restating them. The
+policy layer holds **no** wire keys at all. Construct a policy without naming
+cameras and it names them after its own view slots — a client sending
+`observation/image` then gets a `KeyError` naming both sides, instead of the old
+behaviour where LIBERO's two keys were the built-in default for every checkpoint.
 
 ## Launching a server for an existing embodiment
 

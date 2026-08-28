@@ -45,6 +45,16 @@ def parse_args() -> argparse.Namespace:
         metavar="JSON",
         help="extra concrete-policy options as a JSON object",
     )
+    parser.add_argument(
+        "--image-keys",
+        default=None,
+        help=(
+            "comma-separated camera wire keys, in model view-slot order. Omitted, "
+            "the policy names them after its own view slots (base_0_rgb, ...) — a "
+            "real deployment states its robot's keys, or uses --robot to select "
+            "a preset that supplies them."
+        ),
+    )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     return parser.parse_args()
@@ -58,9 +68,13 @@ def main() -> None:
         args.policy_options,
         device=args.device,
         precision=args.precision,
-        action_dim=args.action_dim,
+        action_dim=(args.action_dim or None),
         metadata={"protocol": "openpi.websocket_policy", "precision": args.precision},
     )
+    if args.image_keys:
+        options["image_keys"] = tuple(
+            key.strip() for key in args.image_keys.split(",") if key.strip()
+        )
     policy = (
         build_robot_policy(args.robot, args.model_dir, **options)
         if args.robot
