@@ -217,6 +217,58 @@ pub fn swiglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
     Ok(matrix_tensor(ctx, rows, inner, output))
 }
 
+/// Fuse optional bias, SwiGLU, and dynamic per-row E4M3 quantization.
+pub fn swiglu_quantize_rows_bf16_e4m3(
+    ctx: &CudaContext,
+    gate_up: &Tensor,
+    bias: Option<&Tensor>,
+    logical_inner: usize,
+    output_cols: usize,
+) -> Result<super::quantization::DynamicFp8Tensor> {
+    let (rows, input_cols) = matrix_shape(gate_up, "dynamic SwiGLU quantization")?;
+    if gate_up.dtype() != DType::BF16
+        || logical_inner == 0
+        || input_cols < 2 * logical_inner
+        || output_cols < logical_inner
+        || bias.is_some_and(|value| {
+            value.dtype() != DType::BF16 || value.shape().dims() != [2 * logical_inner]
+        })
+    {
+        return Err(Error::Other(
+            "dynamic SwiGLU quantization has incompatible input".into(),
+        ));
+    }
+    let values = output_buffer(
+        ctx,
+        rows.checked_mul(output_cols)
+            .ok_or_else(|| Error::Other("dynamic SwiGLU output size overflow".into()))?,
+    )?;
+    let scales = output_buffer(ctx, rows * DType::F32.size_in_bytes())?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_dynamic_swiglu_quantize_rows_bf16_e4m3(
+            gpu_ptr(gate_up)?,
+            optional_ptr(bias)?,
+            values.ptr(),
+            scales.ptr(),
+            rows as i32,
+            input_cols as i32,
+            logical_inner as i32,
+            output_cols as i32,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(super::quantization::DynamicFp8Tensor {
+        values: make_gpu_tensor(
+            Shape::new(vec![rows, output_cols]),
+            DType::F8E4M3,
+            ctx.device_id(),
+            values,
+        ),
+        scales: make_gpu_tensor(Shape::new(vec![rows]), DType::F32, ctx.device_id(), scales),
+    })
+}
+
 pub fn swiglu_quant_f16_e4m3(
     ctx: &CudaContext,
     gate_up: &Tensor,

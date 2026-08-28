@@ -23,7 +23,8 @@ use super::bf16_executor::{
 };
 use super::{
     multimodal_position_ids, sinusoidal_time_embedding, solver_times, DeviceVisionGeometry,
-    VisionGeometry, WallossActivationScales, WallossConfig, WallossFp8Weights, WallossWeights,
+    VisionGeometry, WallossActivationScales, WallossConfig, WallossDynamicFp8Weights,
+    WallossFp8Weights, WallossWeights,
 };
 use crate::pi05::StaticFp8Calibration;
 
@@ -84,6 +85,7 @@ struct WallossBf16CapturedGraph {
 
 enum WallossDeviceWeights {
     Bf16(WallossWeights),
+    DynamicFp8(WallossDynamicFp8Weights),
     Fp8(WallossFp8Weights),
 }
 
@@ -287,6 +289,15 @@ impl WallossPreparedInference {
                 &weights.action,
                 &weights.action_norm,
             ),
+            WallossDeviceWeights::DynamicFp8(weights) => self.execute_with(
+                inputs,
+                &weights.vision,
+                &weights.language_layers,
+                &weights.action_layers,
+                &weights.token_embedding,
+                &weights.action,
+                &weights.action_norm,
+            ),
         }
     }
 
@@ -423,9 +434,7 @@ pub(super) fn load_registered(
         options.precision,
         ModelPrecision::Auto | ModelPrecision::Bf16 | ModelPrecision::Fp8
     ) {
-        return Err(Error::Other(
-            "walloss supports BF16 and static FP8 on CUDA".into(),
-        ));
+        return Err(Error::Other("walloss supports BF16 and FP8 on CUDA".into()));
     }
     let backend = crate::accelerator::cuda::downcast_arc(backend)
         .ok_or_else(|| Error::Other("walloss is only registered for CUDA".into()))?;
@@ -436,7 +445,13 @@ pub(super) fn load_registered(
     };
     let mut config = WallossConfig::from_json_file(&root.join("config.json"))?;
     let host_weights = WallossWeights::from_safetensors(&mut config, path)?;
+    let dynamic_fp8 = matches!(options.precision, ModelPrecision::Fp8)
+        && options.uniform_fp8_scale.is_none()
+        && options.calibration_path.is_none();
     let tuning_path = options.tuning_path.clone().or_else(|| {
+        if dynamic_fp8 {
+            return None;
+        }
         let candidate = root.join("tactics.json");
         candidate.is_file().then_some(candidate)
     });
@@ -446,30 +461,28 @@ pub(super) fn load_registered(
     }
     let weights = match options.precision {
         ModelPrecision::Fp8 => {
-            let scales = if let Some(scale) = options.uniform_fp8_scale {
-                WallossActivationScales::uniform(&host_weights, scale)?
+            if let Some(scale) = options.uniform_fp8_scale {
+                let scales = WallossActivationScales::uniform(&host_weights, scale)?;
+                WallossDeviceWeights::Fp8(WallossFp8Weights::from_host(
+                    &host_weights,
+                    &*backend,
+                    &scales,
+                )?)
+            } else if let Some(calibration_path) = options.calibration_path.as_deref() {
+                let calibration = StaticFp8Calibration::from_json_file(calibration_path)?;
+                let scales =
+                    WallossActivationScales::from_calibration(&host_weights, &calibration)?;
+                WallossDeviceWeights::Fp8(WallossFp8Weights::from_host(
+                    &host_weights,
+                    &*backend,
+                    &scales,
+                )?)
             } else {
-                let calibration_path = options
-                    .calibration_path
-                    .clone()
-                    .or_else(|| {
-                        let candidate = root.join("calibration.json");
-                        candidate.is_file().then_some(candidate)
-                    })
-                    .ok_or_else(|| {
-                        Error::Other(
-                            "walloss FP8 requires LoadOptions.calibration_path, calibration.json, or an explicit uniform scale"
-                                .into(),
-                        )
-                    })?;
-                let calibration = StaticFp8Calibration::from_json_file(&calibration_path)?;
-                WallossActivationScales::from_calibration(&host_weights, &calibration)?
-            };
-            WallossDeviceWeights::Fp8(WallossFp8Weights::from_host(
-                &host_weights,
-                &*backend,
-                &scales,
-            )?)
+                WallossDeviceWeights::DynamicFp8(WallossDynamicFp8Weights::from_host(
+                    &host_weights,
+                    &*backend,
+                )?)
+            }
         }
         ModelPrecision::Auto | ModelPrecision::Bf16 => {
             WallossDeviceWeights::Bf16(host_weights.to_bf16_device(&*backend)?)

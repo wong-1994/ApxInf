@@ -45,29 +45,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|value| value.parse::<f32>())
         .transpose()?;
     let calibration_path = std::env::var_os("APXINF_WALLOSS_CALIBRATION").map(PathBuf::from);
+    let tuning_path = std::env::var_os("APXINF_WALLOSS_TUNING").map(PathBuf::from);
+    let dynamic_fp8 = std::env::var_os("APXINF_WALLOSS_FP8").is_some();
     let options = LoadOptions {
         model_name: Some("walloss".into()),
-        precision: if fp8_scale.is_some() || calibration_path.is_some() {
+        precision: if dynamic_fp8 || fp8_scale.is_some() || calibration_path.is_some() {
             ModelPrecision::Fp8
         } else {
             ModelPrecision::Bf16
         },
         uniform_fp8_scale: fp8_scale,
         calibration_path,
+        tuning_path,
         ..LoadOptions::default()
     };
     let load_start = Instant::now();
     let model = AutoModel::load_model(Device::Cuda(0), &checkpoint, &options)?;
     eprintln!("load_ms={:.3}", load_start.elapsed().as_secs_f64() * 1e3);
     let request = VlaRequest::provided(&observation, &latent);
-    let profile = std::env::var_os("APXINF_PROFILE_RUN").is_some();
+    let profile_run = std::env::var("APXINF_PROFILE_RUN")
+        .ok()
+        .map(|value| value.parse::<usize>())
+        .transpose()?;
+    let runs = std::env::var("APXINF_WALLOSS_RUNS")
+        .ok()
+        .map(|value| value.parse::<usize>())
+        .transpose()?
+        .unwrap_or(4);
+    if runs == 0 {
+        return Err("APXINF_WALLOSS_RUNS must be non-zero".into());
+    }
+    if profile_run.is_some_and(|run| run == 0 || run > runs) {
+        return Err("APXINF_PROFILE_RUN must be between 1 and APXINF_WALLOSS_RUNS".into());
+    }
     let mut reference = None::<Vec<f32>>;
-    for run in 0..4 {
-        if profile && run == 2 {
+    let mut elapsed_ms = Vec::with_capacity(runs);
+    for run in 0..runs {
+        if profile_run == Some(run + 1) {
             apxinf_cuda::profiler::start().map_err(std::io::Error::other)?;
         }
         let infer_start = Instant::now();
         let action = model.infer_host_f32(&request)?;
+        let run_ms = infer_start.elapsed().as_secs_f64() * 1e3;
+        elapsed_ms.push(run_ms);
         let max_abs_diff = reference
             .as_ref()
             .map(|expected| {
@@ -81,15 +101,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!(
             "infer_run={} infer_ms={:.3} output={} finite={} max_abs_diff={:.6}",
             run + 1,
-            infer_start.elapsed().as_secs_f64() * 1e3,
+            run_ms,
             action.len(),
             action.iter().all(|value| value.is_finite()),
             max_abs_diff,
         );
         reference.get_or_insert(action);
-        if profile && run == 2 {
+        if profile_run == Some(run + 1) {
             apxinf_cuda::profiler::stop().map_err(std::io::Error::other)?;
         }
+    }
+    if elapsed_ms.len() > 1 {
+        let mut steady = elapsed_ms[1..].to_vec();
+        steady.sort_by(f64::total_cmp);
+        let percentile = |p: f64| {
+            let index = ((steady.len() - 1) as f64 * p).round() as usize;
+            steady[index]
+        };
+        let mean = steady.iter().sum::<f64>() / steady.len() as f64;
+        eprintln!(
+            "steady_runs={} mean_ms={mean:.3} p50_ms={:.3} p90_ms={:.3} p95_ms={:.3} min_ms={:.3} max_ms={:.3}",
+            steady.len(),
+            percentile(0.50),
+            percentile(0.90),
+            percentile(0.95),
+            steady[0],
+            steady[steady.len() - 1],
+        );
     }
     if let (Some(path), Some(action)) = (
         std::env::var_os("APXINF_WALLOSS_OUTPUT_PATH"),

@@ -847,7 +847,7 @@ fn fa2_attention(
 
 #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
 #[allow(clippy::too_many_arguments)]
-fn fa2_attention_causal(
+pub(crate) fn fa2_attention_causal(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -886,7 +886,7 @@ fn fa2_attention_causal(
     ))
 }
 
-#[cfg(apxinf_fa2_sm80)]
+#[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
 fn fa2_splitkv_enabled(
     query_tokens: usize,
     key_tokens: usize,
@@ -897,12 +897,15 @@ fn fa2_splitkv_enabled(
     if std::env::var_os("APXINF_DISABLE_FA2_SPLITKV").is_some() {
         return false;
     }
-    query_tokens <= 64 && key_tokens > query_tokens && query_heads > kv_heads && head_dim == 256
+    query_tokens <= 64
+        && key_tokens > query_tokens
+        && query_heads > kv_heads
+        && matches!(head_dim, 128 | 256)
 }
 
-#[cfg(apxinf_fa2_sm80)]
+#[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
 #[allow(clippy::too_many_arguments)]
-fn fa2_attention_splitkv(
+pub(crate) fn fa2_attention_splitkv(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -913,6 +916,7 @@ fn fa2_attention_splitkv(
     query_heads: usize,
     kv_heads: usize,
     head_dim: usize,
+    causal: bool,
 ) -> Result<Tensor> {
     let output = output_buffer(ctx, q.size_in_bytes())?;
     let lse_elements = batches
@@ -957,25 +961,46 @@ fn fa2_attention_splitkv(
             })?,
     )?;
     unsafe {
-        ffi::check_cuda(ffi::apxinf_static_fa2_bf16_splitkv(
-            gpu_ptr(q)?,
-            gpu_ptr(k)?,
-            gpu_ptr(v)?,
-            output.ptr(),
-            softmax_lse.ptr(),
-            softmax_lse_accum.ptr(),
-            o_accum.ptr(),
-            batches as i32,
-            query_tokens as i32,
-            key_tokens as i32,
-            query_heads as i32,
-            kv_heads as i32,
-            head_dim as i32,
-            (head_dim as f32).sqrt().recip(),
-            ctx.caps().multiprocessor_count as i32,
-            ctx.stream().handle(),
-        ))
-        .map_err(Error::Cuda)?;
+        let status = if causal {
+            ffi::apxinf_static_fa2_bf16_causal_splitkv(
+                gpu_ptr(q)?,
+                gpu_ptr(k)?,
+                gpu_ptr(v)?,
+                output.ptr(),
+                softmax_lse.ptr(),
+                softmax_lse_accum.ptr(),
+                o_accum.ptr(),
+                batches as i32,
+                query_tokens as i32,
+                key_tokens as i32,
+                query_heads as i32,
+                kv_heads as i32,
+                head_dim as i32,
+                (head_dim as f32).sqrt().recip(),
+                ctx.caps().multiprocessor_count as i32,
+                ctx.stream().handle(),
+            )
+        } else {
+            ffi::apxinf_static_fa2_bf16_splitkv(
+                gpu_ptr(q)?,
+                gpu_ptr(k)?,
+                gpu_ptr(v)?,
+                output.ptr(),
+                softmax_lse.ptr(),
+                softmax_lse_accum.ptr(),
+                o_accum.ptr(),
+                batches as i32,
+                query_tokens as i32,
+                key_tokens as i32,
+                query_heads as i32,
+                kv_heads as i32,
+                head_dim as i32,
+                (head_dim as f32).sqrt().recip(),
+                ctx.caps().multiprocessor_count as i32,
+                ctx.stream().handle(),
+            )
+        };
+        ffi::check_cuda(status).map_err(Error::Cuda)?;
     }
     Ok(make_gpu_tensor(
         q.shape().clone(),
@@ -1044,7 +1069,7 @@ pub fn mqa_bf16(
     {
         if fa2_splitkv_enabled(q_shape[0], key_tokens, q_shape[1], 1, q_shape[2]) {
             return fa2_attention_splitkv(
-                ctx, q, k, v, 1, q_shape[0], key_tokens, q_shape[1], 1, q_shape[2],
+                ctx, q, k, v, 1, q_shape[0], key_tokens, q_shape[1], 1, q_shape[2], false,
             );
         }
         return fa2_attention(
@@ -1150,6 +1175,11 @@ pub fn causal_gqa_bf16(
     }
     #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
     {
+        if fa2_splitkv_enabled(q_shape[0], key_tokens, q_shape[1], k_shape[1], q_shape[2]) {
+            return fa2_attention_splitkv(
+                ctx, q, k, v, 1, q_shape[0], key_tokens, q_shape[1], k_shape[1], q_shape[2], true,
+            );
+        }
         return fa2_attention_causal(
             ctx, q, k, v, q_shape[0], key_tokens, q_shape[1], k_shape[1], q_shape[2],
         );

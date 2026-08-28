@@ -1,10 +1,172 @@
-//! Device-ready static-FP8 linear weights.
+//! Device-ready dynamic and calibrated FP8 linear weights.
 
 use apxinf_core::{Backend, DType, Error, Result, Tensor};
 
 #[cfg(feature = "cuda")]
 use super::backend::{kernels, RuntimeBackend};
-use super::{quantize_e4m3_absmax, LinearWeights};
+use super::{encode_e4m3, quantize_e4m3_absmax, LinearWeights, E4M3_MAX};
+
+#[derive(Debug)]
+pub struct DynamicFp8LinearWeights {
+    /// Contiguous output-major physical `[output, input]` E4M3 matrix.
+    pub weight: Tensor,
+    /// Same encoded values in contiguous `[input, output]` order for the
+    /// native NNT backend.
+    pub weight_kn: Tensor,
+    /// FP32 scale vector with one element per output channel.
+    pub channel_scales: Tensor,
+    /// Optional BF16 bias consumed by the rowwise CUTLASS epilogue.
+    pub bias: Option<Tensor>,
+    /// Logical input width before the resident matrix was aligned.
+    pub input_features: usize,
+    /// Logical output width before the resident matrix was aligned.
+    pub output_features: usize,
+}
+
+impl DynamicFp8LinearWeights {
+    #[cfg(feature = "cuda")]
+    pub fn as_kernel_view(&self) -> kernels::gemm::DynamicFp8WeightView<'_> {
+        kernels::gemm::DynamicFp8WeightView {
+            values_e4m3: &self.weight,
+            values_e4m3_kn: &self.weight_kn,
+            channel_scales: &self.channel_scales,
+        }
+    }
+
+    pub fn from_host(linear: &LinearWeights, backend: &dyn Backend) -> Result<Self> {
+        let shape = linear.weight.shape().dims();
+        if shape.len() != 2 || shape[0] == 0 || shape[1] == 0 {
+            return Err(Error::Other(format!(
+                "dynamic FP8 weight must be a non-empty 2D matrix, got {shape:?}"
+            )));
+        }
+
+        let input_features = shape[0];
+        let output_features = shape[1];
+        let padded_input_features = align_16(input_features);
+        let padded_output_features = align_16(output_features);
+        let padded_weight = pad_transpose_linear_weight(
+            &linear.weight,
+            padded_output_features,
+            padded_input_features,
+        )?;
+
+        #[cfg(feature = "cuda")]
+        let (weight, weight_kn, channel_scales) = if let Some(cuda_backend) =
+            backend.as_any().downcast_ref::<RuntimeBackend>()
+        {
+            let values = padded_weight
+                .to_f32_vec()?
+                .into_iter()
+                .map(half::bf16::from_f32)
+                .collect::<Vec<_>>();
+            let host_bf16 =
+                Tensor::from_bf16(vec![padded_output_features, padded_input_features], &values)?;
+            let device_bf16 = backend.to_device(&host_bf16)?;
+            let quantized = kernels::quantization::quantize_rows_bf16_e4m3(
+                cuda_backend.context(),
+                &device_bf16,
+            )?;
+            let weight_kn =
+                kernels::quantization::transpose_e4m3(cuda_backend.context(), &quantized.values)?;
+            (quantized.values, weight_kn, quantized.scales)
+        } else {
+            let (weight, channel_scales) = quantize_rows_host(&padded_weight, backend)?;
+            let weight_kn = transpose_e4m3_host(&weight, backend)?;
+            (weight, weight_kn, channel_scales)
+        };
+        #[cfg(not(feature = "cuda"))]
+        let (weight, weight_kn, channel_scales) = {
+            let (weight, channel_scales) = quantize_rows_host(&padded_weight, backend)?;
+            let weight_kn = transpose_e4m3_host(&weight, backend)?;
+            (weight, weight_kn, channel_scales)
+        };
+
+        let bias = linear
+            .bias
+            .as_ref()
+            .map(|bias| {
+                if bias.shape().dims() != [shape[1]] {
+                    return Err(Error::Other(format!(
+                        "dynamic FP8 bias must have shape [{}], got {:?}",
+                        shape[1],
+                        bias.shape().dims()
+                    )));
+                }
+                let mut values = bias
+                    .to_f32_vec()?
+                    .into_iter()
+                    .map(half::bf16::from_f32)
+                    .collect::<Vec<_>>();
+                values.resize(padded_output_features, half::bf16::from_f32(0.0));
+                backend.to_device(&Tensor::from_bf16(vec![padded_output_features], &values)?)
+            })
+            .transpose()?;
+        Ok(Self {
+            weight,
+            weight_kn,
+            channel_scales,
+            bias,
+            input_features,
+            output_features,
+        })
+    }
+}
+
+fn align_16(value: usize) -> usize {
+    value.div_ceil(16) * 16
+}
+
+fn pad_transpose_linear_weight(
+    weight: &Tensor,
+    padded_rows: usize,
+    padded_cols: usize,
+) -> Result<Tensor> {
+    let shape = weight.shape().dims();
+    let (input_features, output_features) = (shape[0], shape[1]);
+    let source = weight.to_f32_vec()?;
+    let mut padded = vec![0.0f32; padded_rows * padded_cols];
+    for input in 0..input_features {
+        for output in 0..output_features {
+            padded[output * padded_cols + input] = source[input * output_features + output];
+        }
+    }
+    Tensor::from_f32(vec![padded_rows, padded_cols], &padded)
+}
+
+fn quantize_rows_host(weight: &Tensor, backend: &dyn Backend) -> Result<(Tensor, Tensor)> {
+    let shape = weight.shape().dims();
+    let (rows, cols) = (shape[0], shape[1]);
+    let source = weight.to_f32_vec()?;
+    let mut scales = vec![1.0e-12f32; rows];
+    for row in 0..rows {
+        for col in 0..cols {
+            scales[row] = scales[row].max(source[row * cols + col].abs() / E4M3_MAX);
+        }
+    }
+    let values = source
+        .iter()
+        .enumerate()
+        .map(|(index, value)| encode_e4m3(*value / scales[index / cols]))
+        .collect::<Vec<_>>();
+    Ok((
+        backend.to_device(&Tensor::from_f8_e4m3(shape.to_vec(), &values)?)?,
+        backend.to_device(&Tensor::from_f32(vec![rows], &scales)?)?,
+    ))
+}
+
+fn transpose_e4m3_host(weight: &Tensor, backend: &dyn Backend) -> Result<Tensor> {
+    let shape = weight.shape().dims();
+    let (rows, cols) = (shape[0], shape[1]);
+    let source = weight.as_f8_e4m3()?;
+    let mut transposed = vec![0u8; source.len()];
+    for row in 0..rows {
+        for col in 0..cols {
+            transposed[col * rows + row] = source[row * cols + col];
+        }
+    }
+    backend.to_device(&Tensor::from_f8_e4m3(vec![cols, rows], &transposed)?)
+}
 
 #[derive(Debug)]
 pub struct Fp8LinearWeights {
@@ -328,6 +490,42 @@ mod tests {
         let bias = packed.bias.unwrap();
         assert_eq!(bias.dtype(), DType::F16);
         assert_eq!(bias.to_f32_vec().unwrap(), vec![1., 2., 3., 4.]);
+    }
+
+    #[test]
+    fn dynamic_fp8_weights_use_independent_output_channel_scales() {
+        let source = linear(
+            &[1.0, 2.0, 4.0, -3.0, -8.0, 12.0],
+            [2, 3],
+            Some(&[0.25, -0.5, 0.75]),
+        );
+        let quantized = DynamicFp8LinearWeights::from_host(&source, &CpuBackend).unwrap();
+        assert_eq!(quantized.weight.shape().dims(), &[16, 16]);
+        assert_eq!(quantized.weight_kn.shape().dims(), &[16, 16]);
+        assert_eq!(quantized.input_features, 2);
+        assert_eq!(quantized.output_features, 3);
+        assert_eq!(quantized.weight.dtype(), DType::F8E4M3);
+        let scales = quantized.channel_scales.to_f32_vec().unwrap();
+        assert_eq!(
+            &scales[..3],
+            &[3.0 / E4M3_MAX, 8.0 / E4M3_MAX, 12.0 / E4M3_MAX]
+        );
+        assert!(scales[3..].iter().all(|scale| *scale == 1.0e-12));
+        let values = quantized.weight.as_f8_e4m3().unwrap();
+        let values_kn = quantized.weight_kn.as_f8_e4m3().unwrap();
+        for (output, expected) in [[1.0, -3.0], [2.0, -8.0], [4.0, 12.0]]
+            .into_iter()
+            .enumerate()
+        {
+            for input in 0..2 {
+                let decoded =
+                    crate::pi05::decode_e4m3(values[output * 16 + input]) * scales[output];
+                assert!((decoded - expected[input]).abs() < expected[input].abs() * 0.05);
+                assert_eq!(values_kn[input * 16 + output], values[output * 16 + input]);
+            }
+        }
+        assert_eq!(quantized.bias.as_ref().unwrap().dtype(), DType::BF16);
+        assert_eq!(quantized.bias.as_ref().unwrap().shape().dims(), &[16]);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use super::contracts::{
 use crate::buffer::CudaBuffer;
 use crate::context::CudaContext;
 use crate::ffi;
+use crate::workspace::output_buffer;
 
 /// RMS normalization into caller-owned storage.
 #[allow(clippy::too_many_arguments)]
@@ -218,6 +219,57 @@ pub fn rms_bf16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) ->
         .map_err(Error::Cuda)?;
     }
     Ok(matrix_tensor(ctx, rows, cols, output))
+}
+
+/// Fuse BF16 RMSNorm with dynamic per-row E4M3 quantization.
+pub fn rms_quantize_rows_bf16_e4m3(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+    output_cols: usize,
+) -> Result<super::quantization::DynamicFp8Tensor> {
+    let (rows, cols) = matrix_shape(input, "dynamic RMSNorm quantization")?;
+    if input.dtype() != DType::BF16
+        || weight.dtype() != DType::BF16
+        || weight.shape().dims() != [cols]
+        || output_cols < cols
+        || !eps.is_finite()
+        || eps <= 0.0
+    {
+        return Err(Error::Other(
+            "dynamic RMSNorm quantization has incompatible input".into(),
+        ));
+    }
+    let values = output_buffer(
+        ctx,
+        rows.checked_mul(output_cols)
+            .ok_or_else(|| Error::Other("dynamic RMSNorm output size overflow".into()))?,
+    )?;
+    let scales = output_buffer(ctx, rows * DType::F32.size_in_bytes())?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_dynamic_rms_norm_quantize_rows_bf16_e4m3(
+            gpu_ptr(input)?,
+            gpu_ptr(weight)?,
+            values.ptr(),
+            scales.ptr(),
+            rows as i32,
+            cols as i32,
+            output_cols as i32,
+            eps,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(super::quantization::DynamicFp8Tensor {
+        values: make_gpu_tensor(
+            Shape::new(vec![rows, output_cols]),
+            DType::F8E4M3,
+            ctx.device_id(),
+            values,
+        ),
+        scales: make_gpu_tensor(Shape::new(vec![rows]), DType::F32, ctx.device_id(), scales),
+    })
 }
 
 pub fn layer_bf16(

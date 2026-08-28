@@ -404,6 +404,275 @@ __global__ void bias_residual_rms_norm_bf16_kernel(
   }
 }
 
+// Adds the projected branch into the residual in BF16, then directly emits
+// row-scaled E4M3 RMSNorm values for the following rowwise GEMM. One warp owns
+// one row; this is the latency-oriented path used by short VLA sequences.
+__global__ void
+bias_residual_rms_norm_quantize_rows_bf16_e4m3_vec8_kernel(
+    const __nv_bfloat16* projection, const __nv_bfloat16* bias,
+    const __nv_bfloat16* residual, const __nv_bfloat16* weight,
+    __nv_bfloat16* hidden, __nv_fp8_e4m3* normalized, float* scales,
+    int rows, int cols, int output_cols, float eps) {
+  constexpr int kRowsPerBlock = 8;
+  const int warp = threadIdx.x >> 5;
+  const int lane = threadIdx.x & 31;
+  const int row = blockIdx.x * kRowsPerBlock + warp;
+  if (row >= rows) return;
+
+  const int hidden_vectors = cols / 8;
+  const int output_vectors = output_cols / 8;
+  const int64_t hidden_offset = static_cast<int64_t>(row) * cols;
+  const int64_t output_offset = static_cast<int64_t>(row) * output_cols;
+  float square_sum = 0.0f;
+  for (int vector = lane; vector < hidden_vectors; vector += 32) {
+    const Bf16Pack8 projected = *reinterpret_cast<const Bf16Pack8*>(
+        projection + hidden_offset + vector * 8);
+    const Bf16Pack8 residual_values = *reinterpret_cast<const Bf16Pack8*>(
+        residual + hidden_offset + vector * 8);
+    Bf16Pack8 bias_values{};
+    if (bias != nullptr) {
+      bias_values =
+          *reinterpret_cast<const Bf16Pack8*>(bias + vector * 8);
+    }
+    Bf16Pack8 rounded_values;
+#pragma unroll
+    for (int item = 0; item < 8; ++item) {
+      float value = __bfloat162float(projected.values[item]) +
+                    __bfloat162float(residual_values.values[item]);
+      if (bias != nullptr) {
+        value += __bfloat162float(bias_values.values[item]);
+      }
+      const __nv_bfloat16 rounded = __float2bfloat16(value);
+      rounded_values.values[item] = rounded;
+      value = __bfloat162float(rounded);
+      square_sum += value * value;
+    }
+    *reinterpret_cast<Bf16Pack8*>(hidden + hidden_offset + vector * 8) =
+        rounded_values;
+  }
+  const float inverse_rms = rsqrtf(
+      warp_sum_all(square_sum) / static_cast<float>(cols) + eps);
+
+  float maximum = 0.0f;
+  for (int vector = lane; vector < hidden_vectors; vector += 32) {
+    const Bf16Pack8 hidden_values = *reinterpret_cast<const Bf16Pack8*>(
+        hidden + hidden_offset + vector * 8);
+    const Bf16Pack8 weights =
+        *reinterpret_cast<const Bf16Pack8*>(weight + vector * 8);
+#pragma unroll
+    for (int item = 0; item < 8; ++item) {
+      const float value = __bfloat162float(hidden_values.values[item]) *
+                          inverse_rms *
+                          __bfloat162float(weights.values[item]);
+      maximum = fmaxf(maximum, fabsf(value));
+    }
+  }
+  const float scale = fmaxf(warp_max(maximum) / 448.0f, 1.0e-12f);
+  const float inverse_scale = 1.0f / scale;
+  if (lane == 0) scales[row] = scale;
+
+  for (int vector = lane; vector < output_vectors; vector += 32) {
+    Fp8Pack8 quantized{};
+    if (vector < hidden_vectors) {
+      const Bf16Pack8 hidden_values = *reinterpret_cast<const Bf16Pack8*>(
+          hidden + hidden_offset + vector * 8);
+      const Bf16Pack8 weights =
+          *reinterpret_cast<const Bf16Pack8*>(weight + vector * 8);
+#pragma unroll
+      for (int item = 0; item < 8; ++item) {
+        float value = __bfloat162float(hidden_values.values[item]) *
+                      inverse_rms * __bfloat162float(weights.values[item]) *
+                      inverse_scale;
+        value = fminf(448.0f, fmaxf(-448.0f, value));
+        quantized.values[item] = static_cast<__nv_fp8_e4m3>(value);
+      }
+    }
+    *reinterpret_cast<Fp8Pack8*>(normalized + output_offset + vector * 8) =
+        quantized;
+  }
+}
+
+__global__ void bias_residual_rms_norm_quantize_rows_bf16_e4m3_kernel(
+    const __nv_bfloat16* projection, const __nv_bfloat16* bias,
+    const __nv_bfloat16* residual, const __nv_bfloat16* weight,
+    __nv_bfloat16* hidden, __nv_fp8_e4m3* normalized, float* scales,
+    int rows, int cols, int output_cols, float eps) {
+  constexpr int kWarpsPerBlock = 8;
+  const int warp = threadIdx.x >> 5;
+  const int lane = threadIdx.x & 31;
+  const int row = blockIdx.x * kWarpsPerBlock + warp;
+  if (row >= rows) return;
+
+  const int64_t hidden_offset = static_cast<int64_t>(row) * cols;
+  const int64_t output_offset = static_cast<int64_t>(row) * output_cols;
+  float square_sum = 0.0f;
+  for (int col = lane; col < cols; col += 32) {
+    const int64_t index = hidden_offset + col;
+    float value = __bfloat162float(projection[index]) +
+                  __bfloat162float(residual[index]);
+    if (bias != nullptr) value += __bfloat162float(bias[col]);
+    const __nv_bfloat16 rounded = __float2bfloat16(value);
+    hidden[index] = rounded;
+    value = __bfloat162float(rounded);
+    square_sum += value * value;
+  }
+  const float inverse_rms =
+      rsqrtf(warp_sum_all(square_sum) / static_cast<float>(cols) + eps);
+
+  float maximum = 0.0f;
+  for (int col = lane; col < cols; col += 32) {
+    const float value = __bfloat162float(hidden[hidden_offset + col]) *
+                        inverse_rms * __bfloat162float(weight[col]);
+    maximum = fmaxf(maximum, fabsf(value));
+  }
+  const float scale = fmaxf(warp_max(maximum) / 448.0f, 1.0e-12f);
+  if (lane == 0) scales[row] = scale;
+
+  for (int col = lane; col < output_cols; col += 32) {
+    float value = 0.0f;
+    if (col < cols) {
+      value = __bfloat162float(hidden[hidden_offset + col]) * inverse_rms *
+              __bfloat162float(weight[col]) / scale;
+      value = fminf(448.0f, fmaxf(-448.0f, value));
+    }
+    normalized[output_offset + col] = static_cast<__nv_fp8_e4m3>(value);
+  }
+}
+
+// High-row-count companion to the warp-per-row kernel above. A full block
+// cooperates on one row, which exposes enough parallelism for vision and
+// language prefill widths while retaining the same output contract.
+__global__ void
+bias_residual_rms_norm_quantize_rows_bf16_e4m3_large_vec8_kernel(
+    const __nv_bfloat16* projection, const __nv_bfloat16* bias,
+    const __nv_bfloat16* residual, const __nv_bfloat16* weight,
+    __nv_bfloat16* hidden, __nv_fp8_e4m3* normalized, float* scales,
+    int rows, int cols, int output_cols, float eps) {
+  __shared__ float scratch[8];
+  const int row = blockIdx.x;
+  if (row >= rows) return;
+
+  const int hidden_vectors = cols / 8;
+  const int output_vectors = output_cols / 8;
+  const int64_t hidden_offset = static_cast<int64_t>(row) * cols;
+  const int64_t output_offset = static_cast<int64_t>(row) * output_cols;
+  float square_sum = 0.0f;
+  for (int vector = threadIdx.x; vector < hidden_vectors;
+       vector += blockDim.x) {
+    const Bf16Pack8 projected = *reinterpret_cast<const Bf16Pack8*>(
+        projection + hidden_offset + vector * 8);
+    const Bf16Pack8 residual_values = *reinterpret_cast<const Bf16Pack8*>(
+        residual + hidden_offset + vector * 8);
+    Bf16Pack8 bias_values{};
+    if (bias != nullptr) {
+      bias_values =
+          *reinterpret_cast<const Bf16Pack8*>(bias + vector * 8);
+    }
+    Bf16Pack8 rounded_values;
+#pragma unroll
+    for (int item = 0; item < 8; ++item) {
+      float value = __bfloat162float(projected.values[item]) +
+                    __bfloat162float(residual_values.values[item]);
+      if (bias != nullptr) {
+        value += __bfloat162float(bias_values.values[item]);
+      }
+      const __nv_bfloat16 rounded = __float2bfloat16(value);
+      rounded_values.values[item] = rounded;
+      value = __bfloat162float(rounded);
+      square_sum += value * value;
+    }
+    *reinterpret_cast<Bf16Pack8*>(hidden + hidden_offset + vector * 8) =
+        rounded_values;
+  }
+  const float inverse_rms = rsqrtf(
+      block_sum(square_sum, scratch) / static_cast<float>(cols) + eps);
+
+  float maximum = 0.0f;
+  for (int vector = threadIdx.x; vector < hidden_vectors;
+       vector += blockDim.x) {
+    const Bf16Pack8 hidden_values = *reinterpret_cast<const Bf16Pack8*>(
+        hidden + hidden_offset + vector * 8);
+    const Bf16Pack8 weights =
+        *reinterpret_cast<const Bf16Pack8*>(weight + vector * 8);
+#pragma unroll
+    for (int item = 0; item < 8; ++item) {
+      const float value = __bfloat162float(hidden_values.values[item]) *
+                          inverse_rms *
+                          __bfloat162float(weights.values[item]);
+      maximum = fmaxf(maximum, fabsf(value));
+    }
+  }
+  const float scale = fmaxf(block_max(maximum, scratch) / 448.0f, 1.0e-12f);
+  const float inverse_scale = 1.0f / scale;
+  if (threadIdx.x == 0) scales[row] = scale;
+
+  for (int vector = threadIdx.x; vector < output_vectors;
+       vector += blockDim.x) {
+    Fp8Pack8 quantized{};
+    if (vector < hidden_vectors) {
+      const Bf16Pack8 hidden_values = *reinterpret_cast<const Bf16Pack8*>(
+          hidden + hidden_offset + vector * 8);
+      const Bf16Pack8 weights =
+          *reinterpret_cast<const Bf16Pack8*>(weight + vector * 8);
+#pragma unroll
+      for (int item = 0; item < 8; ++item) {
+        float value = __bfloat162float(hidden_values.values[item]) *
+                      inverse_rms * __bfloat162float(weights.values[item]) *
+                      inverse_scale;
+        value = fminf(448.0f, fmaxf(-448.0f, value));
+        quantized.values[item] = static_cast<__nv_fp8_e4m3>(value);
+      }
+    }
+    *reinterpret_cast<Fp8Pack8*>(normalized + output_offset + vector * 8) =
+        quantized;
+  }
+}
+
+__global__ void bias_residual_rms_norm_quantize_rows_bf16_e4m3_large_kernel(
+    const __nv_bfloat16* projection, const __nv_bfloat16* bias,
+    const __nv_bfloat16* residual, const __nv_bfloat16* weight,
+    __nv_bfloat16* hidden, __nv_fp8_e4m3* normalized, float* scales,
+    int rows, int cols, int output_cols, float eps) {
+  __shared__ float scratch[8];
+  const int row = blockIdx.x;
+  if (row >= rows) return;
+  const int64_t hidden_offset = static_cast<int64_t>(row) * cols;
+  const int64_t output_offset = static_cast<int64_t>(row) * output_cols;
+
+  float square_sum = 0.0f;
+  for (int col = threadIdx.x; col < cols; col += blockDim.x) {
+    const int64_t index = hidden_offset + col;
+    float value = __bfloat162float(projection[index]) +
+                  __bfloat162float(residual[index]);
+    if (bias != nullptr) value += __bfloat162float(bias[col]);
+    const __nv_bfloat16 rounded = __float2bfloat16(value);
+    hidden[index] = rounded;
+    value = __bfloat162float(rounded);
+    square_sum += value * value;
+  }
+  const float inverse_rms =
+      rsqrtf(block_sum(square_sum, scratch) / static_cast<float>(cols) + eps);
+
+  float maximum = 0.0f;
+  for (int col = threadIdx.x; col < cols; col += blockDim.x) {
+    const float value = __bfloat162float(hidden[hidden_offset + col]) *
+                        inverse_rms * __bfloat162float(weight[col]);
+    maximum = fmaxf(maximum, fabsf(value));
+  }
+  const float scale = fmaxf(block_max(maximum, scratch) / 448.0f, 1.0e-12f);
+  if (threadIdx.x == 0) scales[row] = scale;
+
+  for (int col = threadIdx.x; col < output_cols; col += blockDim.x) {
+    float value = 0.0f;
+    if (col < cols) {
+      value = __bfloat162float(hidden[hidden_offset + col]) * inverse_rms *
+              __bfloat162float(weight[col]) / scale;
+      value = fminf(448.0f, fmaxf(-448.0f, value));
+    }
+    normalized[output_offset + col] = static_cast<__nv_fp8_e4m3>(value);
+  }
+}
+
 __global__ void bias_residual_rms_norm_quant_f16_bf16_e4m3_kernel(
     const half* projection, const __nv_bfloat16* bias,
     const __nv_bfloat16* residual, const __nv_bfloat16* weight,

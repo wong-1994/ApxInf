@@ -18,6 +18,84 @@ extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub fn apxinf_dynamic_quantize_rows_bf16_e4m3(
+        input: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        input_cols: i32,
+        output_cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_dynamic_rms_norm_quantize_rows_bf16_e4m3(
+        input: *const c_void,
+        weight: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        input_cols: i32,
+        output_cols: i32,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_dynamic_swiglu_quantize_rows_bf16_e4m3(
+        gate_up: *const c_void,
+        bias: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        input_cols: i32,
+        inner: i32,
+        output_cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_dynamic_bias_residual_rms_norm_quantize_rows_bf16_e4m3(
+        projection: *const c_void,
+        bias: *const c_void,
+        residual: *const c_void,
+        weight: *const c_void,
+        hidden: *mut c_void,
+        normalized: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        cols: i32,
+        output_cols: i32,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_slice_columns_bf16(
+        input: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        input_cols: i32,
+        output_cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_transpose_e4m3(
+        input: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+    pub fn apxinf_dynamic_rescale_rows_columns_bias_bf16(
+        values: *mut c_void,
+        row_scales: *const f32,
+        channel_scales: *const f32,
+        bias: *const c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_dynamic_quantize_columns_f16_e4m3(
+        input: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_static_cast_f16_bf16(
         input: *const c_void,
         output: *mut c_void,

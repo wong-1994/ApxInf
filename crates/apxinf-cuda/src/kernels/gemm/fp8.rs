@@ -10,11 +10,49 @@ use crate::tuning::{
 };
 
 #[derive(Clone, Copy, Debug)]
-struct ColdL2TuningMetadata {
-    eviction_buffer_bytes: usize,
+pub struct CutlassTacticTiming {
+    pub tactic: i32,
+    pub milliseconds: f64,
 }
 
-fn cold_l2_tuning_metadata(ctx: &CudaContext) -> Result<ColdL2TuningMetadata> {
+#[derive(Clone, Copy, Debug)]
+pub struct CublasLtAlgorithmTiming {
+    pub heuristic_rank: i32,
+    pub milliseconds: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ColdL2TuningMetadata {
+    pub l2_cache_bytes: usize,
+    pub eviction_buffer_bytes: usize,
+}
+
+fn dynamic_fp8_tactic(m: usize, n: usize, k: usize) -> i32 {
+    match (m, n, k) {
+        (10, 1024, 2048) => 1,
+        (10, 2560, 1024) => 11,
+        (10, 4096, 1024) => 13,
+        (217, 22016, 2048) => 12,
+        (217, 2048, 11008) => 6,
+        (217, 2560, 2048) => 8,
+        (217, 2048, 2048) => 10,
+        (648, 1280, 1280) => 8,
+        (648, 1280, 3424) => 9,
+        (648, 3840, 1280) => 9,
+        (648, 6848, 1280) => 6,
+        _ if m <= 64 => 1,
+        _ if m <= 256 && n >= 10_000 => 0,
+        _ if m <= 256 && k >= 10_000 => 6,
+        _ if m <= 256 && n >= 2_500 => 8,
+        _ if m <= 256 => 3,
+        _ if n >= 5_000 => 6,
+        _ if k >= 3_000 => 8,
+        _ if n >= 2_500 => 6,
+        _ => 8,
+    }
+}
+
+pub fn cold_l2_tuning_metadata(ctx: &CudaContext) -> Result<ColdL2TuningMetadata> {
     let mut l2_cache_bytes = 0i32;
     unsafe {
         ffi::check_cuda(ffi::cudaDeviceGetAttribute(
@@ -34,6 +72,7 @@ fn cold_l2_tuning_metadata(ctx: &CudaContext) -> Result<ColdL2TuningMetadata> {
         .map(|bytes| bytes & !255usize)
         .ok_or_else(|| Error::Other("cold-L2 eviction buffer size overflow".into()))?;
     Ok(ColdL2TuningMetadata {
+        l2_cache_bytes,
         eviction_buffer_bytes,
     })
 }
@@ -177,6 +216,16 @@ pub struct Fp8WeightView<'a> {
     /// Optional auto-mode physical [gate256,up256] matrix. The primary tensor
     /// remains plain and is used by every non-dual route.
     pub dual_geglu_auto_interleaved: Option<&'a Tensor>,
+}
+
+#[derive(Clone, Copy)]
+pub struct DynamicFp8WeightView<'a> {
+    /// Contiguous output-major physical `[N, K]` E4M3 matrix.
+    pub values_e4m3: &'a Tensor,
+    /// The same encoded weights in contiguous `[K, N]` order.
+    pub values_e4m3_kn: &'a Tensor,
+    /// FP32 scale for each output channel, shape `[N]`.
+    pub channel_scales: &'a Tensor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -447,6 +496,143 @@ pub fn gemm_fp8(
         )?;
     }
     Ok(output.into_tensor(Shape::new(vec![m, n]), DType::F16))
+}
+
+/// Dynamic W8A8 GEMM with one activation scale per row and one weight scale
+/// per output channel. Native backends apply both vectors and an optional
+/// BF16 bias before returning the final BF16 matrix.
+pub fn gemm_fp8_dynamic_bf16(
+    ctx: &CudaContext,
+    activation: &Tensor,
+    activation_scales: &Tensor,
+    weight: DynamicFp8WeightView<'_>,
+    bias: Option<&Tensor>,
+) -> Result<Tensor> {
+    if activation.dtype() != DType::F8E4M3 || weight.values_e4m3.dtype() != DType::F8E4M3 {
+        return Err(Error::Other(format!(
+            "dynamic FP8 GEMM expects E4M3 operands, got {} and {}",
+            activation.dtype(),
+            weight.values_e4m3.dtype()
+        )));
+    }
+    if activation_scales.dtype() != DType::F32 || weight.channel_scales.dtype() != DType::F32 {
+        return Err(Error::Other(format!(
+            "dynamic FP8 GEMM expects FP32 scale vectors, got {} and {}",
+            activation_scales.dtype(),
+            weight.channel_scales.dtype()
+        )));
+    }
+    let a = activation.shape().dims();
+    let b = weight.values_e4m3.shape().dims();
+    let b_kn = weight.values_e4m3_kn.shape().dims();
+    if a.len() != 2 || b.len() != 2 || b_kn.len() != 2 || a[1] != b[1] || b_kn != [b[1], b[0]] {
+        return Err(Error::Other(format!(
+            "dynamic FP8 GEMM shape mismatch: activation {a:?}, NK weight {b:?}, KN weight {b_kn:?}"
+        )));
+    }
+    let (m, k, n) = (a[0], a[1], b[0]);
+    if activation_scales.shape().dims() != [m] || weight.channel_scales.shape().dims() != [n] {
+        return Err(Error::Other(format!(
+            "dynamic FP8 GEMM scale mismatch: activation {:?}, weight {:?}, expected [{m}] and [{n}]",
+            activation_scales.shape().dims(),
+            weight.channel_scales.shape().dims()
+        )));
+    }
+    if let Some(bias) = bias {
+        if bias.dtype() != DType::BF16 || bias.shape().dims() != [n] {
+            return Err(Error::Other(format!(
+                "dynamic FP8 GEMM bias must be BF16 [{n}], got {} {:?}",
+                bias.dtype(),
+                bias.shape().dims()
+            )));
+        }
+    }
+    let expected_device = Device::Cuda(ctx.device_id());
+    for tensor in [
+        activation,
+        activation_scales,
+        weight.values_e4m3,
+        weight.values_e4m3_kn,
+        weight.channel_scales,
+    ] {
+        if tensor.device() != expected_device {
+            return Err(Error::DeviceMismatch {
+                expected: expected_device,
+                got: tensor.device(),
+            });
+        }
+    }
+    if let Some(bias) = bias {
+        if bias.device() != expected_device {
+            return Err(Error::DeviceMismatch {
+                expected: expected_device,
+                got: bias.device(),
+            });
+        }
+    }
+    if crate::workspace::fp8_emulation_required(ctx)? {
+        return Err(Error::Other(
+            "dynamic rowwise FP8 GEMM requires native FP8 Tensor Cores".into(),
+        ));
+    }
+    if n % 16 != 0 || k % 16 != 0 {
+        return Err(Error::Other(format!(
+            "dynamic rowwise FP8 GEMM requires N and K divisible by 16, got N={n}, K={k}"
+        )));
+    }
+
+    let output = crate::workspace::output_buffer(
+        ctx,
+        m.checked_mul(n)
+            .and_then(|elements| elements.checked_mul(DType::BF16.size_in_bytes()))
+            .ok_or_else(|| Error::Other("dynamic FP8 GEMM output size overflow".into()))?,
+    )?;
+    let activation_buffer = CudaBuffer::from_tensor(activation).map_err(Error::Cuda)?;
+    let weight_buffer = CudaBuffer::from_tensor(weight.values_e4m3).map_err(Error::Cuda)?;
+    let activation_scale_buffer =
+        CudaBuffer::from_tensor(activation_scales).map_err(Error::Cuda)?;
+    let weight_scale_buffer =
+        CudaBuffer::from_tensor(weight.channel_scales).map_err(Error::Cuda)?;
+    let bias_buffer = bias
+        .map(CudaBuffer::from_tensor)
+        .transpose()
+        .map_err(Error::Cuda)?;
+    let bias_pointer = bias_buffer.as_ref().map_or(std::ptr::null(), |buffer| {
+        buffer.ptr() as *const std::ffi::c_void
+    });
+
+    #[cfg(not(apxinf_cutlass_gemm))]
+    {
+        return Err(Error::Other(
+            "dynamic rowwise FP8 GEMM requires an SM100-family native backend".into(),
+        ));
+    }
+
+    #[cfg(apxinf_cutlass_gemm)]
+    {
+        let tactic = dynamic_fp8_tactic(m, n, k);
+        let status = unsafe {
+            ffi::apxinf_dynamic_cutlass_fp8_gemm_bf16(
+                activation_buffer.ptr(),
+                weight_buffer.ptr(),
+                activation_scale_buffer.ptr().cast::<f32>(),
+                weight_scale_buffer.ptr().cast::<f32>(),
+                bias_pointer,
+                output.ptr(),
+                m as i32,
+                n as i32,
+                k as i32,
+                tactic,
+                ctx.stream().handle(),
+            )
+        };
+        if status != 0 {
+            return Err(Error::Cuda(format!(
+                "dynamic rowwise FP8 GEMM rejected [{m},{n},{k}] tactic {tactic} ({status})"
+            )));
+        }
+        Ok(output.into_tensor(Shape::new(vec![m, n]), DType::BF16))
+    }
 }
 
 /// Run the configured cuBLASLt gate + CUTLASS up/GeGLU/E4M3 fused tactic.
@@ -1251,6 +1437,252 @@ pub fn cublaslt_fp8_gemm_split_first_f16(
         )
     };
     ffi::check_cublas(status).map_err(Error::Cuda)
+}
+
+#[cfg(apxinf_cutlass_gemm)]
+pub fn autotune_cutlass_gemm_f16(
+    ctx: &CudaContext,
+    activation: &Tensor,
+    weight: &Tensor,
+    activation_scale: f32,
+    weight_scale: f32,
+    warmup: usize,
+    iterations: usize,
+) -> Result<Vec<CutlassTacticTiming>> {
+    if iterations == 0 {
+        return Err(Error::Other(
+            "CUTLASS autotune iterations must be non-zero".into(),
+        ));
+    }
+    let a = activation.shape().dims();
+    let b = weight.shape().dims();
+    if activation.dtype() != DType::F8E4M3
+        || weight.dtype() != DType::F8E4M3
+        || a.len() != 2
+        || b.len() != 2
+        || a[1] != b[0]
+        || b[1] % 16 != 0
+        || a[1] % 16 != 0
+    {
+        return Err(Error::Other(
+            "CUTLASS autotune expects aligned FP8 [M,K] @ [K,N]".into(),
+        ));
+    }
+    let (m, k, n) = (a[0], a[1], b[1]);
+    let output = CudaBuffer::alloc_zeros(m * n * 2, ctx.device_id()).map_err(Error::Cuda)?;
+    let mut evictor = ColdL2Evictor::new(ctx)?;
+    let events = CudaEventPair::new()?;
+    let mut timings = Vec::new();
+    // All exposed candidates are ordinary auto-scheduled one-SM kernels.
+    // Explicit two-SM schedules are intentionally not compiled because they
+    // can wedge CUDA graph replay on the current Thor-U software stack.
+    for tactic in 0..=7 {
+        let launch = || -> Result<()> {
+            let status = unsafe {
+                ffi::apxinf_static_cutlass_fp8_gemm_f16(
+                    gpu_ptr(activation)?,
+                    gpu_ptr(weight)?,
+                    output.ptr(),
+                    m as i32,
+                    n as i32,
+                    k as i32,
+                    activation_scale * weight_scale,
+                    tactic,
+                    ctx.stream().handle(),
+                )
+            };
+            if status == 0 {
+                Ok(())
+            } else {
+                Err(Error::Cuda(format!(
+                    "CUTLASS tactic {tactic} rejected shape [{m},{n},{k}] ({status})"
+                )))
+            }
+        };
+        if (0..warmup)
+            .try_for_each(|_| {
+                evictor.evict(ctx)?;
+                launch()
+            })
+            .is_err()
+        {
+            continue;
+        }
+        ctx.stream().synchronize().map_err(Error::Cuda)?;
+        let mut milliseconds = 0.0f64;
+        for _ in 0..iterations {
+            milliseconds += events.measure(ctx, &mut evictor, &launch)?;
+        }
+        timings.push(CutlassTacticTiming {
+            tactic,
+            milliseconds: milliseconds / iterations as f64,
+        });
+    }
+    Ok(timings)
+}
+
+#[cfg(all(test, apxinf_cutlass_gemm))]
+pub fn autotune_cutlass_dynamic_bf16(
+    ctx: &CudaContext,
+    activation: &Tensor,
+    activation_scales: &Tensor,
+    weight: DynamicFp8WeightView<'_>,
+    warmup: usize,
+    iterations: usize,
+) -> Result<Vec<CutlassTacticTiming>> {
+    if iterations == 0 {
+        return Err(Error::Other(
+            "dynamic CUTLASS autotune iterations must be non-zero".into(),
+        ));
+    }
+    let a = activation.shape().dims();
+    let b = weight.values_e4m3.shape().dims();
+    if activation.dtype() != DType::F8E4M3
+        || weight.values_e4m3.dtype() != DType::F8E4M3
+        || activation_scales.dtype() != DType::F32
+        || weight.channel_scales.dtype() != DType::F32
+        || a.len() != 2
+        || b.len() != 2
+        || a[1] != b[1]
+        || activation_scales.shape().dims() != [a[0]]
+        || weight.channel_scales.shape().dims() != [b[0]]
+        || a[1] % 16 != 0
+        || b[0] % 16 != 0
+    {
+        return Err(Error::Other(
+            "dynamic CUTLASS autotune expects aligned rowwise E4M3 operands and FP32 scales".into(),
+        ));
+    }
+    let (m, k, n) = (a[0], a[1], b[0]);
+    let output = CudaBuffer::alloc_zeros(m * n * 2, ctx.device_id()).map_err(Error::Cuda)?;
+    let mut evictor = ColdL2Evictor::new(ctx)?;
+    let events = CudaEventPair::new()?;
+    let mut timings = Vec::new();
+    for tactic in 0..=14 {
+        let launch = || -> Result<()> {
+            let status = unsafe {
+                ffi::apxinf_dynamic_cutlass_fp8_gemm_bf16(
+                    gpu_ptr(activation)?,
+                    gpu_ptr(weight.values_e4m3)?,
+                    gpu_ptr(activation_scales)?.cast::<f32>(),
+                    gpu_ptr(weight.channel_scales)?.cast::<f32>(),
+                    std::ptr::null(),
+                    output.ptr(),
+                    m as i32,
+                    n as i32,
+                    k as i32,
+                    tactic,
+                    ctx.stream().handle(),
+                )
+            };
+            if status == 0 {
+                Ok(())
+            } else {
+                Err(Error::Cuda(format!(
+                    "dynamic CUTLASS tactic {tactic} rejected shape [{m},{n},{k}] ({status})"
+                )))
+            }
+        };
+        if (0..warmup)
+            .try_for_each(|_| {
+                evictor.evict(ctx)?;
+                launch()
+            })
+            .is_err()
+        {
+            continue;
+        }
+        ctx.stream().synchronize().map_err(Error::Cuda)?;
+        let mut milliseconds = 0.0f64;
+        for _ in 0..iterations {
+            milliseconds += events.measure(ctx, &mut evictor, &launch)?;
+        }
+        timings.push(CutlassTacticTiming {
+            tactic,
+            milliseconds: milliseconds / iterations as f64,
+        });
+    }
+    Ok(timings)
+}
+
+#[cfg(not(apxinf_cutlass_gemm))]
+#[allow(clippy::too_many_arguments)]
+pub fn autotune_cutlass_gemm_f16(
+    _ctx: &CudaContext,
+    _activation: &Tensor,
+    _weight: &Tensor,
+    _activation_scale: f32,
+    _weight_scale: f32,
+    _warmup: usize,
+    _iterations: usize,
+) -> Result<Vec<CutlassTacticTiming>> {
+    Err(Error::Other(
+        "CUTLASS FP8 autotune requires an SM100-family CUDA build".into(),
+    ))
+}
+
+pub fn autotune_cublaslt_gemm_f16(
+    ctx: &CudaContext,
+    activation: &Tensor,
+    weight: &Tensor,
+    activation_scale: f32,
+    weight_scale: f32,
+    max_algorithms: usize,
+    warmup: usize,
+    iterations: usize,
+) -> Result<Vec<CublasLtAlgorithmTiming>> {
+    if max_algorithms == 0 || max_algorithms > 64 || iterations == 0 {
+        return Err(Error::Other(
+            "cuBLASLt autotune expects 1..=64 algorithms and non-zero iterations".into(),
+        ));
+    }
+    let a = activation.shape().dims();
+    let b = weight.shape().dims();
+    if activation.dtype() != DType::F8E4M3
+        || weight.dtype() != DType::F8E4M3
+        || a.len() != 2
+        || b.len() != 2
+        || a[1] != b[0]
+    {
+        return Err(Error::Other(
+            "cuBLASLt autotune expects FP8 [M,K] @ [K,N]".into(),
+        ));
+    }
+    let (m, k, n) = (a[0], a[1], b[1]);
+    let output = CudaBuffer::alloc_zeros(m * n * 2, ctx.device_id()).map_err(Error::Cuda)?;
+    let evictor = ColdL2Evictor::new(ctx)?;
+    let mut returned = 0i32;
+    let mut milliseconds = vec![-1.0f32; max_algorithms];
+    let status = unsafe {
+        ffi::apxinf_static_autotune_cublaslt_fp8_gemm_f16(
+            gpu_ptr(activation)?,
+            gpu_ptr(weight)?,
+            output.ptr(),
+            evictor.buffer.ptr(),
+            evictor.metadata.eviction_buffer_bytes,
+            m as i32,
+            n as i32,
+            k as i32,
+            activation_scale * weight_scale,
+            max_algorithms as i32,
+            warmup as i32,
+            iterations as i32,
+            &mut returned,
+            milliseconds.as_mut_ptr(),
+            ctx.stream().handle(),
+        )
+    };
+    ffi::check_cublas(status).map_err(Error::Cuda)?;
+    Ok(milliseconds
+        .into_iter()
+        .take(returned.max(0) as usize)
+        .enumerate()
+        .filter(|(_, milliseconds)| *milliseconds >= 0.0)
+        .map(|(heuristic_rank, milliseconds)| CublasLtAlgorithmTiming {
+            heuristic_rank: heuristic_rank as i32,
+            milliseconds: milliseconds as f64,
+        })
+        .collect())
 }
 
 #[cfg(test)]

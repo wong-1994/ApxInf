@@ -9,7 +9,11 @@ use crate::kernels::attention::*;
 use crate::kernels::elementwise::*;
 use crate::kernels::embedding::*;
 use crate::kernels::fused::*;
-use crate::kernels::gemm::prepare_cublaslt_fp8_gemm;
+use crate::kernels::gemm::{
+    autotune_cutlass_dynamic_bf16, gemm_fp8_dynamic_bf16, prepare_cublaslt_fp8_gemm,
+    DynamicFp8WeightView,
+};
+use crate::kernels::norm::*;
 use crate::kernels::preprocess::*;
 use crate::kernels::quantization::*;
 use crate::workspace::{prepare_with_workspace, with_workspace, GraphWorkspace};
@@ -442,6 +446,93 @@ fn fa2_language_mqa_f16_matches_cublas() {
     );
 }
 
+#[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
+#[test]
+fn action_flash_decode_matches_regular_causal_gqa() {
+    let _gpu = crate::tests::gpu_smem_guard();
+    const QUERY_TOKENS: usize = 10;
+    const KEY_TOKENS: usize = 810;
+    const QUERY_HEADS: usize = 16;
+    const KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 128;
+
+    let backend = CudaBackend::new(0).unwrap();
+    let q_values = (0..QUERY_TOKENS * QUERY_HEADS * HEAD_DIM)
+        .map(|index| bf16::from_f32(((index * 17 % 127) as f32 - 63.0) / 128.0))
+        .collect::<Vec<_>>();
+    let k_values = (0..KEY_TOKENS * KV_HEADS * HEAD_DIM)
+        .map(|index| bf16::from_f32(((index * 29 % 131) as f32 - 65.0) / 128.0))
+        .collect::<Vec<_>>();
+    let v_values = (0..KEY_TOKENS * KV_HEADS * HEAD_DIM)
+        .map(|index| bf16::from_f32(((index * 31 % 137) as f32 - 68.0) / 128.0))
+        .collect::<Vec<_>>();
+    let q = backend
+        .to_device(
+            &Tensor::from_bf16(vec![QUERY_TOKENS, QUERY_HEADS, HEAD_DIM], &q_values).unwrap(),
+        )
+        .unwrap();
+    let k = backend
+        .to_device(&Tensor::from_bf16(vec![KEY_TOKENS, KV_HEADS, HEAD_DIM], &k_values).unwrap())
+        .unwrap();
+    let v = backend
+        .to_device(&Tensor::from_bf16(vec![KEY_TOKENS, KV_HEADS, HEAD_DIM], &v_values).unwrap())
+        .unwrap();
+
+    let workspace = GraphWorkspace::new(32 << 20, backend.device_id()).unwrap();
+    let (reference, actual) = prepare_with_workspace(&workspace, || {
+        let reference = crate::kernels::attention::fa2_attention_causal(
+            backend.context(),
+            &q,
+            &k,
+            &v,
+            QUERY_TOKENS,
+            KEY_TOKENS,
+            QUERY_HEADS,
+            KV_HEADS,
+            HEAD_DIM,
+        )?;
+        let actual = crate::kernels::attention::fa2_attention_splitkv(
+            backend.context(),
+            &q,
+            &k,
+            &v,
+            1,
+            QUERY_TOKENS,
+            KEY_TOKENS,
+            QUERY_HEADS,
+            KV_HEADS,
+            HEAD_DIM,
+            true,
+        )?;
+        Ok((reference, actual))
+    })
+    .unwrap();
+    backend.synchronize().unwrap();
+    let reference = backend.to_cpu(&reference).unwrap().to_f32_vec().unwrap();
+    let actual = backend.to_cpu(&actual).unwrap().to_f32_vec().unwrap();
+
+    let mut dot = 0.0f64;
+    let mut reference_norm = 0.0f64;
+    let mut actual_norm = 0.0f64;
+    let mut error_norm = 0.0f64;
+    for (&actual, &reference) in actual.iter().zip(&reference) {
+        let actual = f64::from(actual);
+        let reference = f64::from(reference);
+        let error = actual - reference;
+        dot += actual * reference;
+        actual_norm += actual * actual;
+        reference_norm += reference * reference;
+        error_norm += error * error;
+    }
+    let cosine = dot / (actual_norm * reference_norm).sqrt();
+    let relative_l2 = (error_norm / reference_norm).sqrt();
+    eprintln!("Action flash decode: cosine={cosine:.9}, relative_l2={relative_l2:.9}");
+    assert!(
+        cosine >= 0.999 && relative_l2 <= 0.02,
+        "Action flash decode mismatch: cosine={cosine}, relative_l2={relative_l2}"
+    );
+}
+
 #[cfg(apxinf_fa2_direct_e4m3_sm100)]
 #[test]
 fn fa2_language_direct_e4m3_matches_packed4_bytes() {
@@ -694,6 +785,490 @@ fn fp8_identity_gemm_runs_on_device() {
     let output = backend.to_cpu(&output).unwrap().to_f32_vec().unwrap();
     for (actual, expected) in output.iter().zip(&activation) {
         assert!((actual - expected).abs() < 0.04, "{actual} != {expected}");
+    }
+}
+
+#[test]
+fn dynamic_fp8_row_channel_scales_match_bf16_reference() {
+    // Use an actual Action projection shape because cuBLASLt only publishes
+    // the fast NNT FP8 heuristics for production-sized matrices on Thor.
+    const M: usize = 10;
+    const N: usize = 1024;
+    const N_PADDED: usize = 1024;
+    const K: usize = 2048;
+    const K_PADDED: usize = 2048;
+    let backend = CudaBackend::new(0).unwrap();
+    let activation = (0..M * K)
+        .map(|index| {
+            let row = index / K;
+            let col = index % K;
+            ((col * 17 % 31) as f32 - 15.0) / 19.0 * (row as f32 + 1.0) / 5.0
+        })
+        .collect::<Vec<_>>();
+    let weight = (0..K * N)
+        .map(|index| {
+            let row = index / N;
+            let col = index % N;
+            ((row * 13 % 29) as f32 - 14.0) / 23.0 * (col as f32 + 2.0) / 7.0
+        })
+        .collect::<Vec<_>>();
+    let bias = (0..N)
+        .map(|col| (col as f32 - 7.0) / 11.0)
+        .collect::<Vec<_>>();
+    let activation_bf16 = activation
+        .iter()
+        .copied()
+        .map(bf16::from_f32)
+        .collect::<Vec<_>>();
+    let mut weight_bf16 = vec![bf16::ZERO; N_PADDED * K_PADDED];
+    for row in 0..K {
+        for col in 0..N {
+            weight_bf16[col * K_PADDED + row] = bf16::from_f32(weight[row * N + col]);
+        }
+    }
+    let mut bias_values_bf16 = bias.iter().copied().map(bf16::from_f32).collect::<Vec<_>>();
+    bias_values_bf16.resize(N_PADDED, bf16::ZERO);
+    let activation_gpu = backend
+        .to_device(&Tensor::from_bf16(vec![M, K], &activation_bf16).unwrap())
+        .unwrap();
+    let weight_gpu = backend
+        .to_device(&Tensor::from_bf16(vec![N_PADDED, K_PADDED], &weight_bf16).unwrap())
+        .unwrap();
+    let bias_gpu = backend
+        .to_device(&Tensor::from_bf16(vec![N_PADDED], &bias_values_bf16).unwrap())
+        .unwrap();
+    let activation_fp8 =
+        quantize_rows_bf16_e4m3_padded(backend.context(), &activation_gpu, K_PADDED).unwrap();
+    let weight_fp8 = quantize_rows_bf16_e4m3(backend.context(), &weight_gpu).unwrap();
+    let weight_fp8_kn = transpose_e4m3(backend.context(), &weight_fp8.values).unwrap();
+    let output_padded = gemm_fp8_dynamic_bf16(
+        backend.context(),
+        &activation_fp8.values,
+        &activation_fp8.scales,
+        DynamicFp8WeightView {
+            values_e4m3: &weight_fp8.values,
+            values_e4m3_kn: &weight_fp8_kn,
+            channel_scales: &weight_fp8.scales,
+        },
+        Some(&bias_gpu),
+    )
+    .unwrap();
+    let output = slice_columns_bf16(backend.context(), &output_padded, N).unwrap();
+    let outer_buffer =
+        CudaBuffer::alloc_zeros(M * N_PADDED * DType::BF16.size_in_bytes(), 0).unwrap();
+    let prepare = unsafe {
+        ffi::apxinf_dynamic_prepare_fp8_gemm_bf16(
+            std::ptr::null(),
+            M as i32,
+            N_PADDED as i32,
+            K_PADDED as i32,
+        )
+    };
+    assert_eq!(prepare, 0);
+    let outer_status = unsafe {
+        ffi::apxinf_dynamic_fp8_gemm_bf16(
+            gpu_ptr(&activation_fp8.values).unwrap(),
+            gpu_ptr(&weight_fp8_kn).unwrap(),
+            gpu_ptr(&activation_fp8.scales).unwrap().cast::<f32>(),
+            gpu_ptr(&weight_fp8.scales).unwrap().cast::<f32>(),
+            std::ptr::null(),
+            outer_buffer.ptr(),
+            M as i32,
+            N_PADDED as i32,
+            K_PADDED as i32,
+            backend.context().stream().handle(),
+        )
+    };
+    assert_eq!(outer_status, 0);
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_dynamic_rescale_rows_columns_bias_bf16(
+            outer_buffer.ptr(),
+            gpu_ptr(&activation_fp8.scales).unwrap().cast::<f32>(),
+            gpu_ptr(&weight_fp8.scales).unwrap().cast::<f32>(),
+            gpu_ptr(&bias_gpu).unwrap(),
+            M as i32,
+            N_PADDED as i32,
+            backend.context().stream().handle(),
+        ))
+        .unwrap();
+    }
+    let outer_padded = outer_buffer.into_tensor(Shape::new(vec![M, N_PADDED]), DType::BF16);
+    let outer_output = slice_columns_bf16(backend.context(), &outer_padded, N).unwrap();
+    backend.synchronize().unwrap();
+
+    let row_scales = backend
+        .to_cpu(&activation_fp8.scales)
+        .unwrap()
+        .to_f32_vec()
+        .unwrap();
+    let column_scales = backend
+        .to_cpu(&weight_fp8.scales)
+        .unwrap()
+        .to_f32_vec()
+        .unwrap();
+    assert!(row_scales.windows(2).all(|pair| pair[1] > pair[0]));
+    assert!(column_scales[..N].windows(2).all(|pair| pair[1] >= pair[0]));
+    assert!(column_scales[N - 1] > column_scales[0]);
+    assert!(column_scales[N..].iter().all(|scale| *scale == 1.0e-12));
+
+    let output = backend.to_cpu(&output).unwrap().to_f32_vec().unwrap();
+    let outer_output = backend.to_cpu(&outer_output).unwrap().to_f32_vec().unwrap();
+    let mut maximum_error = 0.0f32;
+    let mut outer_maximum_error = 0.0f32;
+    let mut maximum_reference = 0.0f32;
+    for row in 0..M {
+        for col in 0..N {
+            let mut expected = bias[col];
+            for inner in 0..K {
+                expected += activation[row * K + inner] * weight[inner * N + col];
+            }
+            maximum_error = maximum_error.max((output[row * N + col] - expected).abs());
+            outer_maximum_error =
+                outer_maximum_error.max((outer_output[row * N + col] - expected).abs());
+            maximum_reference = maximum_reference.max(expected.abs());
+        }
+    }
+    assert!(
+        maximum_error / maximum_reference < 0.04,
+        "dynamic FP8 relative max error is {}",
+        maximum_error / maximum_reference
+    );
+    assert!(
+        outer_maximum_error / maximum_reference < 0.04,
+        "native NNT FP8 relative max error is {}",
+        outer_maximum_error / maximum_reference
+    );
+}
+
+#[test]
+fn dynamic_fp8_vla_fusions_match_composed_operators() {
+    const ROWS: usize = 10;
+    const COLS: usize = 64;
+    const PADDED: usize = 72;
+    let backend = CudaBackend::new(0).unwrap();
+    let values = (0..ROWS * COLS)
+        .map(|index| bf16::from_f32(((index * 17 % 101) as f32 - 50.0) / 29.0))
+        .collect::<Vec<_>>();
+    let residual_values = (0..ROWS * COLS)
+        .map(|index| bf16::from_f32(((index * 11 % 67) as f32 - 33.0) / 41.0))
+        .collect::<Vec<_>>();
+    let norm_values = (0..COLS)
+        .map(|index| bf16::from_f32(0.75 + index as f32 / 244.0))
+        .collect::<Vec<_>>();
+    let bias_values = (0..COLS)
+        .map(|index| bf16::from_f32((index as f32 - 30.0) / 211.0))
+        .collect::<Vec<_>>();
+    let input = backend
+        .to_device(&Tensor::from_bf16(vec![ROWS, COLS], &values).unwrap())
+        .unwrap();
+    let residual = backend
+        .to_device(&Tensor::from_bf16(vec![ROWS, COLS], &residual_values).unwrap())
+        .unwrap();
+    let norm_weight = backend
+        .to_device(&Tensor::from_bf16(vec![COLS], &norm_values).unwrap())
+        .unwrap();
+    let bias = backend
+        .to_device(&Tensor::from_bf16(vec![COLS], &bias_values).unwrap())
+        .unwrap();
+
+    let decode = |quantized: &DynamicFp8Tensor| {
+        let shape = quantized.values.shape().dims();
+        let width = shape[1];
+        let values = backend
+            .to_cpu(&quantized.values)
+            .unwrap()
+            .as_f8_e4m3()
+            .unwrap()
+            .iter()
+            .map(|byte| {
+                let sign = if byte & 0x80 == 0 { 1.0 } else { -1.0 };
+                let exponent = (byte >> 3) & 0x0f;
+                let mantissa = byte & 0x07;
+                if exponent == 0 {
+                    sign * mantissa as f32 * 2f32.powi(-9)
+                } else if exponent == 0x0f && mantissa == 0x07 {
+                    f32::NAN
+                } else {
+                    sign * (1.0 + mantissa as f32 / 8.0) * 2f32.powi(exponent as i32 - 7)
+                }
+            })
+            .collect::<Vec<_>>();
+        let scales = backend
+            .to_cpu(&quantized.scales)
+            .unwrap()
+            .to_f32_vec()
+            .unwrap();
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| value * scales[index / width])
+            .collect::<Vec<_>>()
+    };
+    let compare = |name: &str, actual: &[f32], expected: &[f32]| {
+        let error = actual
+            .iter()
+            .zip(expected)
+            .map(|(a, b)| f64::from(a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let norm = expected
+            .iter()
+            .map(|value| f64::from(*value).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        assert!(error / norm < 0.02, "{name} relative L2={}", error / norm);
+    };
+
+    let norm_reference = rms_bf16(backend.context(), &input, &norm_weight, 1.0e-6).unwrap();
+    let norm_reference =
+        quantize_rows_bf16_e4m3_padded(backend.context(), &norm_reference, PADDED).unwrap();
+    let norm_fused =
+        rms_quantize_rows_bf16_e4m3(backend.context(), &input, &norm_weight, 1.0e-6, PADDED)
+            .unwrap();
+    compare(
+        "RMSNorm quantization",
+        &decode(&norm_fused),
+        &decode(&norm_reference),
+    );
+
+    let residual_reference = bias_residual_rms_bf16(
+        backend.context(),
+        &input,
+        Some(&bias),
+        &residual,
+        &norm_weight,
+        1.0e-6,
+    )
+    .unwrap();
+    let residual_reference =
+        quantize_rows_bf16_e4m3_padded(backend.context(), &residual_reference.normalized, PADDED)
+            .unwrap();
+    let residual_fused = bias_residual_rms_quantize_rows_bf16_e4m3(
+        backend.context(),
+        &input,
+        Some(&bias),
+        &residual,
+        &norm_weight,
+        1.0e-6,
+        PADDED,
+    )
+    .unwrap();
+    compare(
+        "residual RMSNorm quantization",
+        &decode(&residual_fused.normalized),
+        &decode(&residual_reference),
+    );
+
+    let mut gate_up_values = (0..ROWS * (2 * COLS))
+        .map(|index| bf16::from_f32(((index * 19 % 83) as f32 - 41.0) / 37.0))
+        .collect::<Vec<_>>();
+    let mut physical_gate_up = vec![bf16::from_f32(100.0); ROWS * 2 * PADDED];
+    for row in 0..ROWS {
+        physical_gate_up[row * 2 * PADDED..row * 2 * PADDED + 2 * COLS]
+            .copy_from_slice(&gate_up_values[row * 2 * COLS..(row + 1) * 2 * COLS]);
+    }
+    gate_up_values.clear();
+    let gate_up = backend
+        .to_device(&Tensor::from_bf16(vec![ROWS, 2 * PADDED], &physical_gate_up).unwrap())
+        .unwrap();
+    let gate_up_logical = slice_columns_bf16(backend.context(), &gate_up, 2 * COLS).unwrap();
+    let swiglu_reference = swiglu_bf16(backend.context(), &gate_up_logical).unwrap();
+    let swiglu_reference =
+        quantize_rows_bf16_e4m3_padded(backend.context(), &swiglu_reference, PADDED).unwrap();
+    let swiglu_fused =
+        swiglu_quantize_rows_bf16_e4m3(backend.context(), &gate_up, None, COLS, PADDED).unwrap();
+    backend.synchronize().unwrap();
+    compare(
+        "SwiGLU quantization",
+        &decode(&swiglu_fused),
+        &decode(&swiglu_reference),
+    );
+}
+
+#[test]
+fn dynamic_fp8_vec4_and_large_vec8_fusions_match_composed_operators() {
+    let backend = CudaBackend::new(0).unwrap();
+    let decode = |quantized: &DynamicFp8Tensor| {
+        let width = quantized.values.shape().dims()[1];
+        let values = backend
+            .to_cpu(&quantized.values)
+            .unwrap()
+            .as_f8_e4m3()
+            .unwrap()
+            .iter()
+            .map(|byte| {
+                let sign = if byte & 0x80 == 0 { 1.0 } else { -1.0 };
+                let exponent = (byte >> 3) & 0x0f;
+                let mantissa = byte & 0x07;
+                if exponent == 0 {
+                    sign * mantissa as f32 * 2f32.powi(-9)
+                } else if exponent == 0x0f && mantissa == 0x07 {
+                    f32::NAN
+                } else {
+                    sign * (1.0 + mantissa as f32 / 8.0) * 2f32.powi(exponent as i32 - 7)
+                }
+            })
+            .collect::<Vec<_>>();
+        let scales = backend
+            .to_cpu(&quantized.scales)
+            .unwrap()
+            .to_f32_vec()
+            .unwrap();
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| value * scales[index / width])
+            .collect::<Vec<_>>()
+    };
+    let compare = |name: &str, actual: &[f32], expected: &[f32]| {
+        let error = actual
+            .iter()
+            .zip(expected)
+            .map(|(a, b)| f64::from(a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let norm = expected
+            .iter()
+            .map(|value| f64::from(*value).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        assert!(error / norm < 0.02, "{name} relative L2={}", error / norm);
+    };
+
+    const SWIGLU_ROWS: usize = 3;
+    const INNER: usize = 60;
+    const SWIGLU_PADDED: usize = 64;
+    let logical = (0..SWIGLU_ROWS * 2 * INNER)
+        .map(|index| bf16::from_f32(((index * 13 % 89) as f32 - 44.0) / 31.0))
+        .collect::<Vec<_>>();
+    let mut physical = vec![bf16::from_f32(100.0); SWIGLU_ROWS * 2 * SWIGLU_PADDED];
+    for row in 0..SWIGLU_ROWS {
+        physical[row * 2 * SWIGLU_PADDED..row * 2 * SWIGLU_PADDED + 2 * INNER]
+            .copy_from_slice(&logical[row * 2 * INNER..(row + 1) * 2 * INNER]);
+    }
+    let gate_up = backend
+        .to_device(&Tensor::from_bf16(vec![SWIGLU_ROWS, 2 * SWIGLU_PADDED], &physical).unwrap())
+        .unwrap();
+    let logical_gate_up = slice_columns_bf16(backend.context(), &gate_up, 2 * INNER).unwrap();
+    let swiglu_reference = swiglu_bf16(backend.context(), &logical_gate_up).unwrap();
+    let swiglu_reference =
+        quantize_rows_bf16_e4m3_padded(backend.context(), &swiglu_reference, SWIGLU_PADDED)
+            .unwrap();
+    let swiglu_fused =
+        swiglu_quantize_rows_bf16_e4m3(backend.context(), &gate_up, None, INNER, SWIGLU_PADDED)
+            .unwrap();
+    compare(
+        "vec4 SwiGLU quantization",
+        &decode(&swiglu_fused),
+        &decode(&swiglu_reference),
+    );
+
+    const RESIDUAL_ROWS: usize = 72;
+    const COLS: usize = 64;
+    const RESIDUAL_PADDED: usize = 72;
+    let projection_values = (0..RESIDUAL_ROWS * COLS)
+        .map(|index| bf16::from_f32(((index * 17 % 101) as f32 - 50.0) / 29.0))
+        .collect::<Vec<_>>();
+    let residual_values = (0..RESIDUAL_ROWS * COLS)
+        .map(|index| bf16::from_f32(((index * 11 % 67) as f32 - 33.0) / 41.0))
+        .collect::<Vec<_>>();
+    let weight_values = (0..COLS)
+        .map(|index| bf16::from_f32(0.75 + index as f32 / 256.0))
+        .collect::<Vec<_>>();
+    let bias_values = (0..COLS)
+        .map(|index| bf16::from_f32((index as f32 - 31.0) / 211.0))
+        .collect::<Vec<_>>();
+    let projection = backend
+        .to_device(&Tensor::from_bf16(vec![RESIDUAL_ROWS, COLS], &projection_values).unwrap())
+        .unwrap();
+    let residual = backend
+        .to_device(&Tensor::from_bf16(vec![RESIDUAL_ROWS, COLS], &residual_values).unwrap())
+        .unwrap();
+    let weight = backend
+        .to_device(&Tensor::from_bf16(vec![COLS], &weight_values).unwrap())
+        .unwrap();
+    let bias = backend
+        .to_device(&Tensor::from_bf16(vec![COLS], &bias_values).unwrap())
+        .unwrap();
+    let residual_reference = bias_residual_rms_bf16(
+        backend.context(),
+        &projection,
+        Some(&bias),
+        &residual,
+        &weight,
+        1.0e-6,
+    )
+    .unwrap();
+    let residual_reference = quantize_rows_bf16_e4m3_padded(
+        backend.context(),
+        &residual_reference.normalized,
+        RESIDUAL_PADDED,
+    )
+    .unwrap();
+    let residual_fused = bias_residual_rms_quantize_rows_bf16_e4m3(
+        backend.context(),
+        &projection,
+        Some(&bias),
+        &residual,
+        &weight,
+        1.0e-6,
+        RESIDUAL_PADDED,
+    )
+    .unwrap();
+    backend.synchronize().unwrap();
+    compare(
+        "large vec8 residual RMSNorm quantization",
+        &decode(&residual_fused.normalized),
+        &decode(&residual_reference),
+    );
+}
+
+#[cfg(apxinf_cutlass_gemm)]
+#[test]
+#[ignore = "Thor-only cold-L2 tactic scan"]
+fn dynamic_fp8_walloss_shape_tactics() {
+    let backend = CudaBackend::new(0).unwrap();
+    let shapes = [
+        (10, 1024, 2048),
+        (10, 2560, 1024),
+        (10, 4096, 1024),
+        (217, 2048, 2048),
+        (217, 2560, 2048),
+        (217, 22016, 2048),
+        (217, 2048, 11008),
+        (648, 1280, 1280),
+        (648, 3840, 1280),
+        (648, 6848, 1280),
+        (648, 1280, 3424),
+    ];
+    for (m, n, k) in shapes {
+        let activation = backend
+            .to_device(&Tensor::from_f8_e4m3(vec![m, k], &vec![0; m * k]).unwrap())
+            .unwrap();
+        let weight = backend
+            .to_device(&Tensor::from_f8_e4m3(vec![n, k], &vec![0; k * n]).unwrap())
+            .unwrap();
+        let activation_scales = backend
+            .to_device(&Tensor::from_f32(vec![m], &vec![1.0; m]).unwrap())
+            .unwrap();
+        let channel_scales = backend
+            .to_device(&Tensor::from_f32(vec![n], &vec![1.0; n]).unwrap())
+            .unwrap();
+        let mut timings = autotune_cutlass_dynamic_bf16(
+            backend.context(),
+            &activation,
+            &activation_scales,
+            DynamicFp8WeightView {
+                values_e4m3: &weight,
+                values_e4m3_kn: &weight,
+                channel_scales: &channel_scales,
+            },
+            2,
+            10,
+        )
+        .unwrap();
+        timings.sort_by(|left, right| left.milliseconds.total_cmp(&right.milliseconds));
+        println!("shape [{m},{n},{k}] {timings:?}");
     }
 }
 

@@ -18,8 +18,9 @@ mod weights;
 pub use config::{WallossActionConfig, WallossConfig, WallossTextConfig, WallossVisionConfig};
 #[cfg(feature = "cuda")]
 pub use fp8_weights::{
-    WallossActivationScales, WallossFp8LayerWeights, WallossFp8VisionBlockWeights,
-    WallossFp8VisionWeights, WallossFp8Weights,
+    WallossActivationScales, WallossDynamicFp8LayerWeights, WallossDynamicFp8VisionBlockWeights,
+    WallossDynamicFp8VisionWeights, WallossDynamicFp8Weights, WallossFp8LayerWeights,
+    WallossFp8VisionBlockWeights, WallossFp8VisionWeights, WallossFp8Weights,
 };
 #[cfg(feature = "cuda")]
 pub use geometry::DeviceVisionGeometry;
