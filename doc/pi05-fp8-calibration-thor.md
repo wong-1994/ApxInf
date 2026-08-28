@@ -16,8 +16,7 @@ and tactic selection remains a separate artifact and workflow.
 - Python extension: CPython 3.10 wheel built with maturin 1.15.0
 - Calibration implementation revision:
   `4d38f1f1c6d909d635aa22b81dca032d2b0028f9`
-- Validator revision: `5ace7ce` (the follow-up review commit changes only
-  provenance fields and documentation)
+- Validator revision: `4f6f95dd2752b790137609440d69675eff3e4a4a`
 - Checkpoint: `/home/wwxq/Projects/models/pi05_libero_base`
 - Data: 16 deterministic records drawn across 14 tasks from the first-party
   LeRobot LIBERO v3 dataset (273,465 frames, 40 tasks). Each public Observation
@@ -79,7 +78,7 @@ python scripts/validate_pi05_calibration.py \
   "${inputs[@]}" \
   --action-dim 7 --action-horizon 50 --seed 0 \
   --max-relative-l2 0.20 --warmup 1 --samples 1 \
-  --validator-revision 5ace7ce \
+  --validator-revision 4f6f95dd2752b790137609440d69675eff3e4a4a \
   --out evidence/thor-validation-text-only-loaded.json
 ```
 
@@ -96,15 +95,15 @@ python scripts/validate_pi05_calibration.py \
 | Compared deployed-action elements | 5,600 |
 | Non-finite outputs | 0 |
 | Maximum absolute error | 0.0624875 |
-| Mean absolute error | 0.00792555 |
-| RMSE | 0.0131236 |
-| Relative L2 | **0.0290468** |
+| Mean absolute error | 0.00790789 |
+| RMSE | 0.0131255 |
+| Relative L2 | **0.0290504** |
 | Relative-L2 gate | **PASS** (≤ 0.20) |
 
 The raw deployed BF16/FP8 actions and aggregate calculations are stored in the
 generated `evidence/thor-validation-text-only-loaded.json` on the validation host. Its
 SHA-256 is
-`d7d9b4debaa11c263ae2bb1f9d3862a461dd2c0b7345f714ec25c5c43152883a`.
+`a933818e2ae7abdec899ae6c22769dfc2f87964bc4be3e36e0f79f4869a124f4`.
 
 ## Sample-count evidence and production recommendation
 
@@ -126,11 +125,10 @@ held-out business-action accuracy stabilize.
 
 ## Performance protocol and status
 
-Formal latency sampling uses identical images, the README's T=10 text-only
-prompt, explicit noise, H=10, 10 warmups, 30 measured calls, and the model
-subspan of `Pi05Policy.infer`. Returning host action arrays includes the
-synchronizing device-to-host copy. The collector is disabled for both inference
-runs, and no other CUDA build or GPU process was active.
+Latency sampling uses identical images, the README's T=10 text-only prompt,
+explicit noise, H=10, 10 warmups, 30 measured calls, and the model subspan of
+`Pi05Policy.infer`. Returning host action arrays includes the synchronizing
+device-to-host copy. The collector is disabled for both inference runs.
 
 The exact performance command used the same profiles and a latency-only
 Observation whose images came from `sample-000.npz` and whose prompt was the
@@ -144,21 +142,28 @@ python scripts/validate_pi05_calibration.py \
   --input evidence/latency-t10.npz \
   --action-dim 7 --action-horizon 10 --seed 0 \
   --max-relative-l2 0.20 --warmup 10 --samples 30 \
-  --validator-revision 5ace7ce \
+  --validator-revision 4f6f95dd2752b790137609440d69675eff3e4a4a \
   --out evidence/thor-h10-t10-regression-text-only.json
 ```
 
-| Precision | Min | P50 | P95 | Max | Mean | Stddev |
-|---|---:|---:|---:|---:|---:|---:|
-| BF16 | 73.15 ms | 73.77 ms | 74.23 ms | 74.85 ms | 73.79 ms | 0.33 ms |
-| calibrated FP8 | 42.71 ms | 42.99 ms | 50.64 ms | 51.44 ms | 43.82 ms | 2.40 ms |
+Two aligned runs exposed a shared-host limitation:
 
-FP8 reduces P50 by 41.7% relative to BF16 for this aligned workload. Against
-the README's pre-instrumentation collector-disabled baselines (72.45 ms BF16,
-41.16 ms FP8), the new P50 values are +1.82% and +4.46%. Both are inside the 5%
-material-regression boundary used for this report. That boundary was not supplied
-by the ticket, so consumers needing a stricter release gate must rerun with their
-own threshold.
+| Run | Precision | P50 | P95 | Mean | Host state discovered afterward |
+|---|---|---:|---:|---:|---|
+| A | BF16 | 73.77 ms | 74.23 ms | 73.79 ms | low contention, but the process filter was incomplete |
+| A | calibrated FP8 | 42.99 ms | 50.64 ms | 43.82 ms | low contention, but the process filter was incomplete |
+| B | BF16 | 79.76 ms | 80.59 ms | 79.86 ms | concurrent CUDA compilation |
+| B | calibrated FP8 | 63.01 ms | 65.36 ms | 63.43 ms | concurrent CUDA compilation |
+
+Run A is close to the README's pre-instrumentation baselines (72.45 ms BF16,
+41.16 ms FP8), but a later global process audit showed that checking one known
+build path was insufficient on this 17-user host. Run B's committed-validator
+artifact was definitely contaminated by several other users' `nvcc`/`cicc`
+processes and shared power/clock effects. A non-invasive wait for all CUDA
+compilers to reach zero never found an idle window. Therefore this report does
+**not** claim a production steady-state latency or prove the no-regression gate;
+those two performance requirements remain pending an exclusive or verified-idle
+Thor window with fixed clocks.
 
 Raw model latency samples in milliseconds:
 
@@ -167,10 +172,12 @@ BF16: [73.514, 73.154, 73.894, 73.661, 73.465, 73.533, 73.709, 73.881, 73.748, 7
 FP8:  [50.636, 50.941, 51.436, 42.711, 42.914, 43.565, 43.015, 42.831, 42.988, 42.954, 42.829, 43.235, 42.995, 42.880, 43.088, 42.969, 43.260, 43.120, 43.465, 43.001, 42.919, 42.874, 42.916, 43.085, 43.109, 43.038, 42.834, 42.912, 42.883, 43.256]
 ```
 
-The complete regression artifact is
+Run B's complete raw regression artifact is
 `evidence/thor-h10-t10-regression-text-only.json` on the validation host,
 SHA-256
-`2f3a7fd4a5f606522136a9e9c8183013dcd9101f86f97eee0d5e719dcffa0e6b`.
+`28b0cc6690f5b47c6752e9a49283000d27b0a72bfcd1bd85ed8db5b0316b12d2`.
+Run A's raw samples are preserved above even though its JSON was superseded by
+the provenance rerun.
 
 ## Remaining limitations
 
@@ -180,5 +187,7 @@ SHA-256
   framework-wide precision contract.
 - The sample-count experiment shows that 8 is insufficient but does not prove
   convergence at 16.
+- Formal steady-state and instrumentation-regression conclusions require a
+  verified-idle Thor window; shared compilation made repeated timing unstable.
 - Calibration profiles and tactic databases remain separate. This evidence does
   not retune or validate every alternate tactic database.
