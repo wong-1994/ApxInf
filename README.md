@@ -336,6 +336,36 @@ replace the `--input` flags with `--zero-fixture`; the manifest labels that
 profile synthetic and non-production so it cannot be mistaken for representative
 calibration. Calibration and tactic tuning remain separate workflows.
 
+Validate two independent runs on the deployment GPU before shipping a profile:
+
+```bash
+python3 scripts/validate_pi05_calibration.py \
+  --model-dir "$APXINF_MODEL_DIR" \
+  --profile /path/to/calibration-run-1.json \
+  --profile /path/to/calibration-run-2.json \
+  --input /path/to/calibration-sample-000.npz \
+  --input /path/to/calibration-sample-001.npz \
+  --max-relative-l2 0.20 --warmup 10 --samples 30 \
+  --out /path/to/thor-validation.json
+```
+
+The validator loads BF16 and FP8 in separate processes because CUDA tactic
+stores are process-global. It requires equivalent manifests (ignoring only the
+declared `device` metadata), exact required/observed/generated site coverage,
+and an FP8 runtime load before comparing aligned explicit-noise business
+actions. The JSON contains raw actions and latency samples as well as aggregates.
+
+The Thor validation in [PI0.5 FP8 calibration on Thor](doc/pi05-fp8-calibration-thor.md)
+supports `absmax`, margin `1.1`, and the deterministic
+`numpy-pcg64-seed-sequence-v1` policy for its stated LIBERO fixture. Sixteen
+task-stratified observations are the validated lower bound, **not** a universal
+sample-count default: 8→16 samples still increased 103 of 256 site maxima.
+Production datasets must represent the deployed task, camera, and prompt
+distributions (plus state when state injection is enabled) and should be enlarged
+until per-site statistics and held-out business-output accuracy stabilize. Set
+the accuracy threshold from the product contract; `0.20` relative L2 is the
+explicit gate used by that Thor run.
+
 ### INT8
 
 W8A8, optimized for Orin (SM87) and Ada (SM89). Needs nothing beyond the
