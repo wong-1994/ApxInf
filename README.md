@@ -307,6 +307,35 @@ policy = AutoPolicy.from_pretrained(
 The calibration is per-tensor activation scales from a calibration sweep and
 decides accuracy; `uniform:SCALE` is a flat stand-in for latency work only.
 
+Generate one with ApxInf's native BF16 eager collector. Each input is an NPZ
+containing the same business Observation fields used for inference: configured
+camera keys such as `observation/image`, a string `prompt`, and (when enabled)
+`observation/state`. Image resizing, view stacking, state normalization,
+tokenization, and deterministic calibration noise all run through the normal
+`Pi05Policy` preprocessing path; callers never build `rgb`, `token_ids`, or
+`noise` tensors.
+
+```bash
+python3 scripts/calibrate_pi05.py \
+  --model-dir "$APXINF_MODEL_DIR" \
+  --input /path/to/calibration-sample-000.npz \
+  --input /path/to/calibration-sample-001.npz \
+  --output "${APXINF_MODEL_DIR}/calibration.json" --margin 2.35
+```
+
+Use the same policy-shaping flags as deployment for non-default checkpoints,
+including repeated `--image-key`, `--num-views`, `--prompt-key`, `--state-key`,
+`--discrete-state`, `--state-norm-key`, `--tokenizer-path`, and
+`--action-horizon`. Released installations without Git metadata must also pass
+`--source-revision` so provenance never degrades to an unknown value.
+
+The output is a self-describing, checkpoint-bound profile whose logical site set
+must exactly match the FP8 execution plan before inference can start. Existing
+outputs are protected unless `--force` is passed. For a smoke-only bootstrap,
+replace the `--input` flags with `--zero-fixture`; the manifest labels that
+profile synthetic and non-production so it cannot be mistaken for representative
+calibration. Calibration and tactic tuning remain separate workflows.
+
 ### INT8
 
 W8A8, optimized for Orin (SM87) and Ada (SM89). Needs nothing beyond the

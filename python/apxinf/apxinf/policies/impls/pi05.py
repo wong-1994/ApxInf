@@ -422,19 +422,10 @@ class Pi05Policy:
 
     # --- inference ---------------------------------------------------------
 
-    def infer(self, observation: Mapping[str, Any], *, noise: Optional[np.ndarray] = None) -> dict:
-        """Run pre-pipeline -> model -> post-pipeline on one raw observation dict.
-
-        Returns ``actions`` (unnormalized ``float32`` ``[horizon, action_dim]``),
-        ``normalized_actions`` (the model's raw output), ``token_ids``, the
-        caller-provided ``noise`` (or ``None`` for internal sampling), and a
-        ``timing`` dict distinguishing pure-model from end-to-end latency.
-
-        ``noise`` is optional. An explicit keyword wins over ``observation["noise"]``
-        and over a custom input-pipeline sampler. If all are absent, the bare model
-        generates standard-normal noise directly in its device buffer.
-        """
-        started = time.perf_counter()
+    def _model_inputs(
+        self, observation: Mapping[str, Any], noise: Optional[np.ndarray]
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Mapping[str, Any]]:
+        """Apply the one canonical Observation-to-model-input preprocessing path."""
         if not isinstance(observation, Mapping):
             raise TypeError(f"observation must be a mapping, got {type(observation)!r}")
         self._require_keys(observation)
@@ -443,10 +434,7 @@ class Pi05Policy:
         if not isinstance(prompt, str):
             raise TypeError(f"{self.prompt_key} must be a string, got {type(prompt)!r}")
 
-        # pre: obs dict -> model inputs (rgb / token_ids / optional noise)
         data = self.input_pipeline({OBSERVATION: observation, PROMPT: prompt})
-        rgb = data[RGB]
-        token_ids = data[TOKEN_IDS]
         selected_noise = noise
         if selected_noise is None:
             selected_noise = observation.get(NOISE)
@@ -461,6 +449,39 @@ class Pi05Policy:
                 )
             if not np.isfinite(selected_noise).all():
                 raise ValueError("noise must contain only finite values")
+        return data[RGB], data[TOKEN_IDS], selected_noise, data
+
+    def calibrate_observation(
+        self, observation: Mapping[str, Any], *, noise: np.ndarray
+    ) -> Mapping[str, float]:
+        """Collect FP8 statistics from one normal business Observation.
+
+        Calibration deliberately requires an explicit latent so a dataset and
+        seed policy can be reproduced independently of the model handle's
+        mutable inference RNG stream.
+        """
+        rgb, token_ids, selected_noise, _ = self._model_inputs(observation, noise)
+        if selected_noise is None:
+            raise ValueError("calibration requires an explicit deterministic noise tensor")
+        calibrate = getattr(self.model, "_calibrate_rgb", None)
+        if not callable(calibrate):
+            raise RuntimeError("the loaded model does not support PI0.5 calibration")
+        return calibrate(rgb, "nhwc", token_ids, selected_noise)
+
+    def infer(self, observation: Mapping[str, Any], *, noise: Optional[np.ndarray] = None) -> dict:
+        """Run pre-pipeline -> model -> post-pipeline on one raw observation dict.
+
+        Returns ``actions`` (unnormalized ``float32`` ``[horizon, action_dim]``),
+        ``normalized_actions`` (the model's raw output), ``token_ids``, the
+        caller-provided ``noise`` (or ``None`` for internal sampling), and a
+        ``timing`` dict distinguishing pure-model from end-to-end latency.
+
+        ``noise`` is optional. An explicit keyword wins over ``observation["noise"]``
+        and over a custom input-pipeline sampler. If all are absent, the bare model
+        generates standard-normal noise directly in its device buffer.
+        """
+        started = time.perf_counter()
+        rgb, token_ids, selected_noise, data = self._model_inputs(observation, noise)
 
         # model: the policy's own middle step (not a pipeline stage)
         model_started = time.perf_counter()
