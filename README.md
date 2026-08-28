@@ -77,8 +77,7 @@ client = websocket_client_policy.WebsocketClientPolicy("127.0.0.1", 8000)
 actions = client.infer(observation)["actions"]
 ```
 
-From a separate environment containing LIBERO and `openpi-client`, run one
-client-side accuracy smoke episode against that server:
+Connect to this server to evaluate LIBERO accuracy:
 
 ```bash
 python -m evaluation.libero.client \
