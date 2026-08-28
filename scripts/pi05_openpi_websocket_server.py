@@ -103,7 +103,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="serve a checkpoint-free engine with deterministic random weights and "
         "synthetic processors (latency-only; actions are numerically meaningless). "
-        "No --model-dir needed.",
+        "Reproduces --robot's wire keys and view count but not its robot pre/post "
+        "steps, which need a checkpoint; the served metadata says robot_steps=false "
+        "and startup warns per gap. No --model-dir needed.",
     )
     parser.add_argument(
         "--checkpoint",
@@ -243,18 +245,28 @@ def main() -> None:
         # The preset's cameras define the synthetic view count unless --num-views is
         # given explicitly, so --robot alone yields a servable synthetic engine.
         num_views = args.num_views if args.num_views is not None else len(image_keys)
-        # The synthetic tokenizer emits a fixed token stream and never reads state,
-        # so this server cannot reproduce a discrete-state preset. Say so: the
-        # published metadata is the wire contract, and silently serving
-        # discrete_state=False for a preset that declares True is precisely the
-        # mismatch --robot exists to prevent.
-        if discrete_state:
+        # A checkpoint-free engine still serves the preset's *deployable* width, so a
+        # client previews the action shape it will get in production. --action-dim
+        # outranks it (and also sets the synthetic model's own width).
+        model_dim = args.action_dim or 32
+        trim_dim = args.action_dim if args.action_dim is not None else preset.action_dim
+        served_dim = trim_dim or model_dim
+        # The synthetic path reproduces the preset's wire keys and view count and
+        # nothing else: the tokenizer emits a fixed token stream and never reads
+        # state, and preset.builder never runs. The published metadata is the wire
+        # contract, so name every gap and mark robot_steps=False below — silently
+        # serving half an embodiment under its own name is precisely the mismatch
+        # --robot exists to prevent.
+        gaps = preset.synthetic_gaps(
+            discrete_state=discrete_state, served_action_dim=served_dim
+        )
+        if gaps:
             logging.warning(
-                "--random-weights cannot honour %s's discrete_state=True: the "
-                "synthetic tokenizer ignores state, so the served metadata will "
-                "say discrete_state=False. Use a checkpoint to preview the real "
-                "contract.",
+                "--random-weights cannot honour %s: %s. The wire keys and view count "
+                "are real; the action semantics are not. Use a checkpoint to preview "
+                "the full contract.",
                 preset.name,
+                "; ".join(gaps),
             )
         logging.info(
             "serving checkpoint-free %s random-weights engine (views=%d, H=%d, T=%d) "
@@ -271,7 +283,7 @@ def main() -> None:
             num_views=num_views,
             image_size=args.image_size,
             action_horizon=action_horizon,
-            action_dim=(args.action_dim or 32),
+            action_dim=model_dim,
             num_flow_steps=args.num_flow_steps,
             max_token_len=args.max_token_len,
             calibration=calibration,
@@ -282,11 +294,11 @@ def main() -> None:
         policy = Pi05Policy.from_random(
             handle,
             token_count=args.token_count,
-            action_dim=(args.action_dim or None),
+            action_dim=(trim_dim or None),
             seed=args.seed,
             image_keys=image_keys[:num_views],
             state_key=state_key,
-            metadata={**metadata, "robot": preset.name},
+            metadata={**metadata, "robot": preset.name, "robot_steps": False},
         )
     else:
         logging.info(
@@ -319,8 +331,10 @@ def main() -> None:
     # Clients read the served wire contract off this metadata rather than assuming
     # one: a key mismatch is silent on the wire but visible here.
     logging.info(
-        "serving robot=%s H=%d x D=%d image_keys=%s state=%s discrete_state=%s",
+        "serving robot=%s robot_steps=%s H=%d x D=%d image_keys=%s state=%s "
+        "discrete_state=%s",
         policy.metadata.get("robot", preset.name),
+        policy.metadata.get("robot_steps"),
         policy.metadata["action_horizon"],
         policy.metadata["action_dim"],
         policy.metadata["image_keys"],

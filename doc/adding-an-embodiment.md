@@ -77,7 +77,7 @@ connect-time metadata. Read one of them **before** concluding anything about
 accuracy:
 
 ```
-INFO serving robot=unitree_g1 H=50 x D=32
+INFO serving robot=unitree_g1 robot_steps=True H=50 x D=32
      image_keys=['images/cam_high', 'images/cam_left_wrist', 'images/cam_right_wrist']
      state=state discrete_state=False
 ```
@@ -89,14 +89,17 @@ from openpi_client import websocket_client_policy as wcp
 c = wcp.WebsocketClientPolicy(host="127.0.0.1", port=8000)
 meta = c.get_server_metadata()
 assert meta["robot"] == "unitree_g1"
+assert meta["robot_steps"] is True      # this robot's arithmetic is actually wired
 assert meta["image_keys"] == [...]      # the keys you are actually sending
 assert meta["discrete_state"] is True   # a joint-space robot needs this on
 ```
 
-Published keys: `robot`, `robot_slots`, `model_type`, `image_keys`, `state_key`,
-`prompt_key`, `discrete_state`, `state_normalized`, `action_horizon`,
-`action_dim`, `model_action_dim`, `num_views`, `image_size`, `input_pipeline`,
-`output_pipeline`. A key mismatch is invisible on the wire but obvious here.
+Published keys: `robot`, `robot_steps`, `robot_slots`, `model_type`,
+`image_keys`, `state_key`, `prompt_key`, `discrete_state`, `state_normalized`,
+`action_horizon`, `action_dim`, `model_action_dim`, `num_views`, `image_size`,
+`input_pipeline`, `output_pipeline`. A key mismatch is invisible on the wire but
+obvious here. `robot_steps` is `False` on a server that serves a preset's keys
+without running its builder — see `--random-weights` below.
 
 ### Per-field overrides
 
@@ -275,7 +278,7 @@ suffix — `unitree_g1`.
 
 ### Step 5 — tests
 
-Add to `tests/test_robot_presets.py`. Four things are worth asserting, and they
+Add to `tests/test_robot_presets.py`. Five things are worth asserting, and they
 run on CPU with a mock model — no GPU, no checkpoint:
 
 1. **the preset matches the openpi transform it mirrors** — keys, order, widths,
@@ -286,7 +289,11 @@ run on CPU with a mock model — no GPU, no checkpoint:
 3. **the wrong dialect fails loudly** — a LIBERO-shaped observation against your
    server must raise, naming the served `image_keys`;
 4. **slot order is load-bearing** — reordering `image_keys` reorders the stacked
-   views (`ImageSlotOrderTest` asserts this against the tensor, not the metadata).
+   views (`ImageSlotOrderTest` asserts this against the tensor, not the metadata);
+5. **the contract you publish is the one you serve** — `BuildRobotPolicyTest`
+   asserts the resolved keys and `robot_steps` reach the builder and the metadata,
+   and `SyntheticContractTest` asserts a checkpoint-free server names what it
+   cannot honour instead of passing for the real embodiment.
 
 ```bash
 python3 tests/test_robot_presets.py          # no GPU needed
@@ -318,9 +325,13 @@ constant. A hard-coded expected shape tests your memory of the checkpoint rather
 than the server.
 
 For a transport-only check with no weights on disk, `--random-weights --robot
-<preset>` serves the preset's key layout on synthetic weights. Its actions are
-numerically meaningless, and it cannot honour `discrete_state=True` (the
-synthetic tokenizer never reads state) — it warns at startup when you ask it to.
+<preset>` serves the preset's key layout and view count on synthetic weights.
+That is all it serves: the actions are numerically meaningless, and the preset's
+`builder` never runs, so none of its robot pre/post steps is wired. It publishes
+`robot_steps=false` and warns once at startup naming every gap — `discrete_state`
+(the synthetic tokenizer never reads state) and, for a robot-step preset, the
+skipped factory and the action width that came out of the model instead of out of
+the encode step.
 
 ## Gotchas we hit
 
@@ -342,10 +353,12 @@ synthetic tokenizer never reads state) — it warns at startup when you ask it t
 6. **A preset's `num_views` must equal the checkpoint's**, unless you pass
    `--num-views` to load fewer. `Pi05Policy.default_pipelines` rejects a mismatch
    and names the fix in the message.
-7. **`--random-weights` cannot preview a `discrete_state=True` contract.** Its
-   synthetic tokenizer ignores state, so the published metadata says
-   `discrete_state=False` — truthful about that server, misleading as a preview.
-   It warns; use a checkpoint for a real contract check.
+7. **`--random-weights` previews the wire layer only.** Its synthetic tokenizer
+   ignores state, so the published metadata says `discrete_state=False`, and it
+   never runs `preset.builder`, so no robot pre/post step is wired and the action
+   width is the model's rather than the encode step's. Truthful about that server,
+   misleading as a preview — hence `robot_steps=false` in the metadata and a
+   startup warning per gap. Use a checkpoint for a real contract check.
 8. **Metadata is the contract; assert it from the client.** Every silent failure
    in this area is visible in the connect-time metadata one line before it
    becomes an "accuracy problem."
