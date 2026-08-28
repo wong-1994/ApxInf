@@ -12,7 +12,10 @@ Design (mirrors the PRD's "narrow interface, thick module" goal):
   loaded SentencePiece model) is shared by shallow copy, not rebuilt.
 * :class:`Pipeline` chains named steps left-to-right, threading one value
   through, and supports whole-step replacement and per-step parameter override
-  while leaving the other steps untouched.
+  while leaving the other steps untouched. It also composes: ``prepend`` /
+  ``append`` wrap a chain from outside without naming anything inside it, which
+  is how one layer (a robot adapter) wraps another's chain (a model's pre/post
+  steps) without depending on its internals.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ import abc
 import copy
 from typing import Any, Iterable, Sequence, Tuple, Union
 
-__all__ = ["ProcessorStep", "Pipeline"]
+__all__ = ["ProcessorStep", "Pipeline", "StepSpec"]
 
 
 class ProcessorStep(abc.ABC):
@@ -136,6 +139,31 @@ class Pipeline:
             if step_name == name:
                 return i
         raise KeyError(f"Pipeline has no step named {name!r}; have {self.names}")
+
+    # --- composition: wrap a chain without knowing its steps -----------------
+    #
+    # ``prepend``/``append`` are the only editing verbs that do not name an
+    # existing step. That distinction is load-bearing: an *outer* layer (a robot
+    # adapter wrapping a model's pre/post chain) has an **ordering** requirement
+    # — "run before everything the model does" — not a *naming* one. Expressed
+    # with ``insert_before("tokenize", ...)`` it would have to know that the
+    # chain contains a step called ``tokenize``, which is the model's private
+    # business and changes when the model does. These two verbs let the outer
+    # layer state the ordering directly and stay ignorant of the inner names.
+
+    def prepend(self, *specs: StepSpec) -> "Pipeline":
+        """Return a new pipeline running ``specs``, in order, before every current step.
+
+        Names must not collide with the existing ones (``Pipeline.__init__``
+        rejects duplicates), so a wrapper cannot silently shadow an inner step.
+        """
+        return Pipeline([self._normalize(spec) for spec in specs] + list(self._steps))
+
+    def append(self, *specs: StepSpec) -> "Pipeline":
+        """Return a new pipeline running ``specs``, in order, after every current step."""
+        return Pipeline(list(self._steps) + [self._normalize(spec) for spec in specs])
+
+    # --- editing: address one existing step by name --------------------------
 
     def replace(self, name: str, step: ProcessorStep) -> "Pipeline":
         """Return a new pipeline with the whole step ``name`` swapped out."""

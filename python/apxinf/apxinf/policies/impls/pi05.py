@@ -12,7 +12,11 @@ between its input and output transforms.
 This makes the whole pre/post chain reorderable, insertable, and replaceable
 through the ordinary ``Pipeline`` machinery — a custom high-performance resize or
 tokenizer drops in with ``input_pipeline.replace(...)`` / ``insert_after(...)``
-without forking the framework.
+without forking the framework. Those verbs address steps *by name*, so they are
+for callers who know this chain. A caller who only needs to run steps **around**
+it — a robot adapter — uses :meth:`Pi05Policy.with_adapter`
+(:class:`~apxinf.policies.base.ComposablePolicy`) instead and stays ignorant of
+what the chain contains.
 
 Domain contract: the model returns a **normalized-domain** action; this policy
 returns the **unnormalized-domain** chunk. The intermediate normalized action is
@@ -57,6 +61,7 @@ from ...processors import (
     Trim,
     Unnormalizer,
 )
+from ...processors.base import StepSpec
 from ...processors.transforms import (
     ACTIONS,
     NOISE,
@@ -111,7 +116,30 @@ class Pi05Policy:
         self.discrete_state = bool(getattr(tokenizer, "discrete_state", False))
         state_normalized = getattr(tokenize, "state_normalizer", None) is not None
 
+        # Kept apart from the derived half so ``with_adapter`` can carry the
+        # caller's description forward while the rewired policy recomputes what
+        # it actually serves.
+        self._extra_metadata = dict(metadata) if metadata else {}
         self.metadata = {
+            **self._derived_metadata(model, input_pipeline, output_pipeline, state_normalized),
+            **self._extra_metadata,
+        }
+
+    def _derived_metadata(
+        self,
+        model: BareModel,
+        input_pipeline: Pipeline,
+        output_pipeline: Pipeline,
+        state_normalized: bool,
+    ) -> dict:
+        """The part of ``metadata`` this policy computes from its own wiring.
+
+        Split out because :meth:`with_adapter` inherits the caller-supplied half
+        of ``metadata`` but must let the rewired policy recompute this half —
+        carrying the old ``action_dim`` or pipeline names forward would publish a
+        wire contract the new policy does not serve.
+        """
+        return {
             "model_type": "pi05",
             "action_horizon": model.action_horizon,
             "action_dim": self.action_dim_out,
@@ -127,7 +155,6 @@ class Pi05Policy:
             "state_normalized": state_normalized,
             "input_pipeline": input_pipeline.names,
             "output_pipeline": output_pipeline.names,
-            **(dict(metadata) if metadata else {}),
         }
 
     # --- construction ------------------------------------------------------
@@ -208,6 +235,7 @@ class Pi05Policy:
         autotune: bool = False,
         tokenizer_path=None,
         norm_key: str = "actions",
+        unnormalizer: Optional[Unnormalizer] = None,
         action_dim: Optional[int] = None,
         action_horizon: Optional[int] = None,
         num_flow_steps: Optional[int] = None,
@@ -233,7 +261,13 @@ class Pi05Policy:
         ``state_norm_key``) — only this method knows ``model_dir``.
 
         ``action_dim`` trims the unnormalizer to the task's action width (e.g. 7
-        for LIBERO); ``None`` keeps the full vector. ``action_horizon`` overrides
+        for LIBERO); ``None`` keeps the full vector. ``unnormalizer`` supplies the
+        quantile map directly instead of reading ``norm_stats`` from disk — for a
+        shape/plumbing run on a stand-in checkpoint whose statistics belong to a
+        different robot (pass a full-width identity), where reading the file would
+        silently apply the wrong scale. It is mutually exclusive with
+        ``action_dim``, since an injected map already fixes the width.
+        ``action_horizon`` overrides
         the checkpoint's chunk length: ``None`` runs the native ``config.json``
         value, an explicit value outranks it (the horizon is a sequence length,
         not a weight dimension, so the same weights run at any horizon the config
@@ -259,6 +293,14 @@ class Pi05Policy:
         :meth:`__init__` (or mutate ``policy.input_pipeline`` after construction).
         """
         model_dir = Path(model_dir)
+        if unnormalizer is not None and action_dim is not None and int(action_dim) != unnormalizer.width:
+            # Both name the deployable width; an injected map already fixes it, so
+            # a disagreeing action_dim would silently lose to the injection.
+            raise ValueError(
+                f"Pi05Policy.from_pretrained: action_dim={action_dim} conflicts with the "
+                f"supplied unnormalizer's width {unnormalizer.width}; the injected map "
+                "already sets the deployable width, so pass only one"
+            )
         if model is None:
             import apxinf_py  # lazy: processor-only users never import the binding
 
@@ -326,7 +368,11 @@ class Pi05Policy:
             max_token_len=model.max_token_len if hasattr(model, "max_token_len") else 200,
             discrete_state=discrete_state,
         )
-        unnormalizer = Unnormalizer.from_norm_stats(model_dir, key=norm_key, dims=action_dim)
+        unnormalizer = (
+            unnormalizer
+            if unnormalizer is not None
+            else Unnormalizer.from_norm_stats(model_dir, key=norm_key, dims=action_dim)
+        )
         state_normalizer = (
             Normalizer.from_norm_stats(model_dir, key=state_norm_key) if discrete_state else None
         )
@@ -419,6 +465,48 @@ class Pi05Policy:
             state_key=state_key,
             action_dim=width,
             metadata={"weights": "synthetic", **(dict(metadata) if metadata else {})},
+        )
+
+    # --- composition -------------------------------------------------------
+
+    def with_adapter(
+        self,
+        *,
+        before: Sequence[StepSpec] = (),
+        after: Sequence[StepSpec] = (),
+        action_dim: Optional[int] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> "Pi05Policy":
+        """Return a copy running ``before`` ahead of, and ``after`` behind, this chain.
+
+        Implements :class:`~apxinf.policies.base.ComposablePolicy`. This is how a
+        robot adapter wires its body-specific steps without importing this class
+        or naming any step inside it: ``before`` lands ahead of ``image_stack``
+        (so it sees the raw client observation and can rewrite it before anything
+        model-specific reads it) and ``after`` lands behind ``unnormalize`` (so it
+        sees deployable-domain actions). That nesting is openpi's
+        ``data_transforms`` outside ``model_transforms``, and it is the whole of
+        what a robot needs from a model.
+
+        ``after`` steps receive the post-input observation alongside the actions
+        (see :meth:`infer`), so a delta→absolute step reads the same decoded
+        state the ``before`` steps produced.
+
+        ``action_dim`` declares the deployable width the appended steps leave
+        behind — pass it whenever ``after`` changes the width, since the derived
+        value would otherwise report this policy's pre-adapter width. The model
+        handle is **shared**, not reloaded: this is a rewiring, not a second load,
+        so only one of the two policies should be ``close()``d.
+        """
+        return type(self)(
+            self.model,
+            input_pipeline=self.input_pipeline.prepend(*before),
+            output_pipeline=self.output_pipeline.append(*after),
+            image_keys=self.image_keys,
+            prompt_key=self.prompt_key,
+            state_key=self.state_key,
+            action_dim=self.action_dim_out if action_dim is None else int(action_dim),
+            metadata={**self._extra_metadata, **(dict(metadata) if metadata else {})},
         )
 
     # --- inference ---------------------------------------------------------

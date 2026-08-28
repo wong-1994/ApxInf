@@ -21,7 +21,9 @@ camera rename + CHW->HWC       ``image_keys`` config + ``ParseImage`` (already
 
 These steps are model-agnostic — they reference no policy symbols and vary only
 with the G1 body. The :func:`~apxinf.robots.unitree_g1.build_unitree_g1_policy`
-adapter assembles them with a :class:`~apxinf.policies.impls.pi05.Pi05Policy`.
+adapter wraps them around whichever policy the checkpoint turns out to be, using
+:meth:`~apxinf.policies.base.ComposablePolicy.with_adapter`; it names no model
+class either.
 
 .. note::
    The joint-flip mask and gripper transforms in the integrator's file are

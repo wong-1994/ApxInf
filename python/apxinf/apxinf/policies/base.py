@@ -11,6 +11,9 @@ points other layers code against:
   ``GrootPolicy``). Downstream consumers (the websocket server, the
   :class:`~apxinf.policies.auto.AutoPolicy` registry, a lerobot adaptor) code
   against this, never a concrete class.
+* :class:`ComposablePolicy` — the narrow extra capability a policy needs before
+  an *outer* layer (a robot adapter) can wrap steps around its chain. Optional:
+  a policy is a perfectly good :class:`Policy` without it.
 
 It exists to pin these contracts *now*, before a second model lands, so the
 layout is set for whoever adds one. They intentionally stay tiny: extract richer
@@ -27,11 +30,11 @@ anything beyond the two guaranteed ones.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Protocol, runtime_checkable
+from typing import Any, Dict, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 
-__all__ = ["Policy", "BareModel"]
+__all__ = ["Policy", "BareModel", "ComposablePolicy"]
 
 
 @runtime_checkable
@@ -89,4 +92,48 @@ class Policy(Protocol):
 
     def close(self) -> None:
         """Release any underlying model resources."""
+        ...
+
+
+@runtime_checkable
+class ComposablePolicy(Protocol):
+    """A :class:`Policy` an outer layer can wrap without knowing its internals.
+
+    This is the seam between the **robot** layer and the **model** layer. A robot
+    adapter (``apxinf.robots.unitree_g1``) has to run its own steps around the
+    model's — decode the wire state before anything model-specific reads it, turn
+    the model's delta actions into absolute joint targets after unnormalization.
+    That is an *ordering* requirement and nothing more: outside, in both
+    directions, exactly the way openpi's ``data_transforms`` sit outside its
+    ``model_transforms``.
+
+    Without this method the only way to express it is to reach into the concrete
+    policy — import ``Pi05Policy``, address its steps by name
+    (``insert_before("tokenize", ...)``), and rebuild it. That makes every robot
+    adapter depend on one model class and on that class's private step names.
+    :meth:`with_adapter` states the ordering instead, so the robot layer imports
+    no model and the model layer knows about no robot.
+
+    Only this one method is promoted, and only because real code calls it. The
+    rest of the composition surface (``input_pipeline``, ``output_pipeline``,
+    ``model``) stays private to the concrete class until a second model shows
+    what is genuinely shared.
+    """
+
+    def with_adapter(
+        self,
+        *,
+        before: Sequence[Any] = (),
+        after: Sequence[Any] = (),
+        action_dim: Optional[int] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> "Policy":
+        """Return a policy running ``before`` ahead of, and ``after`` behind, its own chain.
+
+        Each entry is a ``(name, step)`` pair (a
+        :data:`~apxinf.processors.base.StepSpec`). ``action_dim`` declares the
+        deployable width the wrapped chain now emits, since an appended step may
+        change it; ``metadata`` is merged over the inherited description. The
+        returned policy shares the underlying model handle — do not close both.
+        """
         ...

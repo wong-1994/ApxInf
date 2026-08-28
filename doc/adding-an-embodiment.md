@@ -204,36 +204,54 @@ returns `data` unchanged when there is no state, so state-off serving degrades t
 ### Step 3 — the adapter
 
 `python/apxinf/apxinf/robots/<robot>.py`. One factory that loads the checkpoint
-through the generic `Pi05Policy.from_pretrained` and then splices the robot steps
-into the default pipelines:
+through `AutoPolicy` — so `config.json` decides which model it is, not this file
+— and then wraps the robot steps *around* whatever chain that policy has:
 
 ```python
-def build_<robot>_policy(model_dir, *, state_key=..., image_keys=..., **kwargs):
-    base = Pi05Policy.from_pretrained(
+from ..policies.auto import AutoPolicy
+from ..policies.base import ComposablePolicy, Policy
+
+def build_<robot>_policy(model_dir, *, state_key=..., image_keys=..., **load_kwargs):
+    base = AutoPolicy.from_pretrained(
         model_dir,
         image_keys=tuple(image_keys),
         action_dim=None,      # keep full model width; the encode step truncates
         state_key=state_key,
-        **kwargs,
+        **load_kwargs,
     )
-    input_pipeline = base.input_pipeline.insert_before(
-        "tokenize", ("<robot>_decode_state", <Robot>DecodeState(state_key))
+    if not isinstance(base, ComposablePolicy):
+        raise TypeError(f"{type(base).__name__} has no with_adapter(); ...")
+    return base.with_adapter(
+        before=[("<robot>_decode_state", <Robot>DecodeState(state_key))],
+        after=[("<robot>_absolute", <Robot>AbsoluteActions(state_key)),
+               ("<robot>_encode",   <Robot>EncodeActions())],
+        action_dim=ROBOT_DIM,             # the width the encode step leaves behind
+        metadata={"robot": "<robot>"},
     )
-    output_pipeline = Pipeline([
-        ("unnormalize", base.output_pipeline["unnormalize"]),
-        ("<robot>_absolute", <Robot>AbsoluteActions(state_key)),
-        ("<robot>_encode", <Robot>EncodeActions()),
-    ])
-    return Pi05Policy(base.model, input_pipeline=..., output_pipeline=..., ...)
 ```
+
+The adapter names **no model class and no step inside the model's chain**. That
+is deliberate: a robot's requirement is an *ordering* — its steps run outside the
+model's, in both directions — not a claim about what those steps are called.
+`Pipeline.prepend`/`append` are the only editing verbs that express ordering
+without a name, and `with_adapter`
+([`ComposablePolicy`](../python/apxinf/apxinf/policies/base.py)) is how a policy
+exposes them. Reaching for `insert_before("tokenize", ...)` instead would make
+your robot depend on one model's private vocabulary, and on that model class by
+import.
 
 Two orderings matter and are easy to get wrong:
 
-* the decode-state step goes **before** `tokenize`, so discretized state (when
-  on) and the delta→absolute output step both see the decoded state;
+* the decode-state step goes **before** the model's whole input chain, so
+  discretized state (when on) and the delta→absolute output step both see the
+  decoded state;
 * unnormalize runs at **full model width**, before any truncation, so
-  delta→absolute sees the whole action. Pass `action_dim=None` into
-  `from_pretrained` and let the encode step truncate.
+  delta→absolute sees the whole action. Pass `action_dim=None` into the loader
+  and let the encode step truncate.
+
+Declare `action_dim=` only for the width a step you appended actually produces.
+Without the truncating step there is nothing to claim — inherit the model's own
+width instead of advertising one nothing emits.
 
 ### Step 4 — register the preset
 
