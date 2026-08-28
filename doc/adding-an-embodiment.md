@@ -41,7 +41,7 @@ things and they never need to be equal.
 | | what it is | where it lives | on the wire? |
 |---|---|---|---|
 | **view slots** | `base_0_rgb`, `left_wrist_0_rgb`, `right_wrist_0_rgb` | `VIEW_SLOTS` in `policies/base.py` | never — the *order* is baked into the weights |
-| **wire keys** | `observation/image`, `images/cam_high`, … | a preset's `slots` | yes — this is what the client sends |
+| **wire keys** | `observation/image`, `images/cam_high`, … | a preset's `Convention` | yes — this is what the client sends |
 | **training feature names** | LeRobot `config.json` `input_features` | the checkpoint | no |
 
 A preset pairs each view slot with the wire key that fills it. `image_keys` is
@@ -268,28 +268,55 @@ width instead of advertising one nothing emits.
 One entry in `python/apxinf/apxinf/robots/presets.py`. This is the whole
 registration step — OpenPI's `training/config.py` equivalent.
 
+A preset is two halves, because the arm and the key convention vary
+independently. An `Embodiment` is the **body**: camera count, deployable action
+width, which pre/post steps its actions need. It survives a change of dataset. A
+`Convention` is a **dataset's recording dialect**: the wire keys and the state
+routing that follows from how the data was recorded. It survives a change of
+robot.
+
 ```python
+MY_ARM = Embodiment(
+    name="myarm",
+    num_cameras=2,
+    action_dim=7,               # None keeps full width when an encode step truncates
+    builder=build_my_robot_policy,   # omit for the stock policy
+    builder_kwargs={},          # constants the builder always receives
+)
+
+MY_DATASET_KEYS = Convention(
+    name="mydataset",
+    image_keys=("observation/image", "observation/wrist_image"),  # in view-slot order
+    state_key="observation/state",
+    discrete_state=False,       # False *drops* state entirely — not "keeps it raw"
+)
+
 MY_ROBOT = RobotPreset(
     name="myarm_mydataset",
-    slots=(
-        ("base_0_rgb", "observation/image"),
-        ("left_wrist_0_rgb", "observation/wrist_image"),
-    ),
-    state_key="observation/state",
-    action_dim=7,               # None keeps full width when an encode step truncates
-    discrete_state=False,       # False *drops* state entirely — not "keeps it raw"
-    builder=build_my_robot_policy,   # omit for the stock policy
+    embodiment=MY_ARM,
+    convention=MY_DATASET_KEYS,
     summary="MyArm, MyDataset keys: 2 cameras, 7-dim action",
-    builder_kwargs={},          # constants the builder always receives
 )
 
 ROBOT_PRESETS = {p.name: p for p in (FRANKA_LIBERO, UNITREE_G1, MY_ROBOT)}
 ```
 
-`__post_init__` rejects a `slots` tuple that is not an in-order prefix of
-`VIEW_SLOTS`, and rejects duplicate wire keys. A checkpoint fills view slots from
-0 up, so there is no way to spell "wrist camera only" other than putting it in
-slot 0.
+Serving the same arm under a second dataset's keys is then one more `Convention`
+and one more pairing — no builder edit, no duplicated action width.
+
+Only the *pairing* is deployable, so `--robot` stays a single flag over
+`ROBOT_PRESETS` rather than becoming `--robot` + `--convention`. Separate flags
+would let an operator spell a combination nobody ever recorded, and a body served
+under a convention it was not recorded on is exactly the silent mismatch this
+mechanism exists to prevent.
+
+Validation runs when the module loads. `Convention.__post_init__` rejects
+duplicate wire keys and more keys than there are view slots;
+`Embodiment.__post_init__` rejects a camera count outside `1..len(VIEW_SLOTS)`;
+`RobotPreset.__post_init__` rejects a convention whose camera count disagrees
+with the body's. Slot names are *derived* from `image_keys` in order, so "base +
+right wrist" is not expressible at all — a checkpoint fills view slots from 0 up,
+and the only way to spell "wrist camera only" is to put it in slot 0.
 
 Add an entry to `ROBOT_ALIASES` if a deployment already says something else in
 its launch scripts; a rename should not break a running system.
@@ -303,6 +330,10 @@ a preset is named for the arm **and** the dataset convention whose keys it
 implements: `franka_libero`, not `libero` (a benchmark, not a robot) and not
 `franka` (ambiguous). A single-embodiment robot that owns its convention needs no
 suffix — `unitree_g1`.
+
+The `Embodiment`/`Convention` split is that naming rule made structural: the two
+halves of the name are the two halves of the preset, and `franka_droid` would
+reuse `FRANKA` rather than restating its width and builder.
 
 ### Step 5 — tests
 

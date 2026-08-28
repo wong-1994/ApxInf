@@ -65,6 +65,8 @@ from apxinf.robots import unitree_g1 as robot_adapter  # noqa: E402
 from apxinf.robots.presets import (  # noqa: E402
     ROBOT_PRESETS,
     VIEW_SLOTS,
+    Convention,
+    Embodiment,
     RobotPreset,
     available_robots,
     build_robot_policy,
@@ -158,24 +160,56 @@ class RobotPresetTest(unittest.TestCase):
         # Full model width; UnitreeG1EncodeActions does the 32->16 truncation.
         self.assertIsNone(preset.action_dim)
 
-    def test_slots_must_be_a_prefix_of_the_model_view_slots(self) -> None:
-        # A checkpoint fills view slots from 0 up, so declaring "base + right
-        # wrist" is not expressible and must be rejected at table-definition
-        # time rather than mis-binding a camera at inference time.
-        with self.assertRaises(ValueError):
-            RobotPreset(
-                name="bad",
-                slots=(("base_0_rgb", "a"), ("right_wrist_0_rgb", "b")),
-                state_key="state",
-            )
+    def test_slots_are_derived_in_view_slot_order(self) -> None:
+        # A checkpoint fills view slots from 0 up, so "base + right wrist" is not
+        # expressible. The old table let you *write* the pairs and validated the
+        # order; deriving them removes the failure mode instead of checking it.
+        convention = Convention(
+            name="two_cam", image_keys=("a", "b"), state_key="state"
+        )
+        self.assertEqual(convention.slots, (("base_0_rgb", "a"), ("left_wrist_0_rgb", "b")))
 
     def test_duplicate_camera_keys_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
-            RobotPreset(
+            Convention(name="bad", image_keys=("a", "a"), state_key="state")
+
+    def test_more_cameras_than_view_slots_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            Convention(
                 name="bad",
-                slots=(("base_0_rgb", "a"), ("left_wrist_0_rgb", "a")),
+                image_keys=tuple(f"cam{i}" for i in range(len(VIEW_SLOTS) + 1)),
                 state_key="state",
             )
+
+    def test_a_convention_cannot_be_paired_with_the_wrong_body(self) -> None:
+        # The one check only the pairing can make: a 3-camera dialect against a
+        # 2-camera body would stack the wrong number of views, and nothing
+        # downstream distinguishes that from a checkpoint mismatch.
+        with self.assertRaises(ValueError) as caught:
+            RobotPreset(
+                name="mismatched",
+                embodiment=Embodiment(name="two_cam_body", num_cameras=2),
+                convention=Convention(
+                    name="three_cam", image_keys=("a", "b", "c"), state_key="state"
+                ),
+            )
+        message = str(caught.exception)
+        self.assertIn("three_cam", message)
+        self.assertIn("two_cam_body", message)
+
+    def test_the_two_halves_vary_independently(self) -> None:
+        # The reason for the split: a second key convention on the same body is a
+        # new Convention, not a new body. Re-pairing must need no builder edit.
+        franka = get_robot_preset("franka_libero").embodiment
+        droid_like = Convention(
+            name="droid_like",
+            image_keys=("observation/exterior_image_1_left", "observation/wrist_image_left"),
+            state_key="observation/joint_position",
+        )
+        repaired = RobotPreset(name="franka_droid_like", embodiment=franka, convention=droid_like)
+        self.assertEqual(repaired.image_keys, droid_like.image_keys)
+        self.assertEqual(repaired.action_dim, 7)
+        self.assertIs(repaired.builder, get_robot_preset("franka_libero").builder)
 
     def test_unknown_robot_names_the_known_ones(self) -> None:
         with self.assertRaises(KeyError) as caught:
@@ -227,10 +261,13 @@ class SyntheticContractTest(unittest.TestCase):
         # the synthetic server serves the right one and must not claim otherwise.
         preset = RobotPreset(
             name="stub",
-            slots=(("base_0_rgb", "cam"),),
-            state_key="state",
-            action_dim=7,
-            builder=lambda model_dir, **kwargs: None,
+            embodiment=Embodiment(
+                name="stub_body",
+                num_cameras=1,
+                action_dim=7,
+                builder=lambda model_dir, **kwargs: None,
+            ),
+            convention=Convention(name="stub_keys", image_keys=("cam",), state_key="state"),
         )
         gaps = preset.synthetic_gaps(discrete_state=False, served_action_dim=7)
         self.assertEqual(len(gaps), 1)
@@ -248,12 +285,19 @@ class BuildRobotPolicyTest(unittest.TestCase):
         seen: dict = {}
         preset = RobotPreset(
             name="stub_robot",
-            slots=(("base_0_rgb", "cam/high"), ("left_wrist_0_rgb", "cam/wrist")),
-            state_key="joints",
-            action_dim=None,
-            discrete_state=True,
-            builder=lambda model_dir, **kwargs: seen.update(kwargs, model_dir=model_dir),
-            builder_kwargs={"use_delta_joint_actions": True},
+            embodiment=Embodiment(
+                name="stub_body",
+                num_cameras=2,
+                action_dim=None,
+                builder=lambda model_dir, **kwargs: seen.update(kwargs, model_dir=model_dir),
+                builder_kwargs={"use_delta_joint_actions": True},
+            ),
+            convention=Convention(
+                name="stub_keys",
+                image_keys=("cam/high", "cam/wrist"),
+                state_key="joints",
+                discrete_state=True,
+            ),
         )
         self._register(preset)
 
@@ -281,10 +325,17 @@ class BuildRobotPolicyTest(unittest.TestCase):
         seen: dict = {}
         preset = RobotPreset(
             name="stub_generic",
-            slots=(("base_0_rgb", "observation/image"),),
-            state_key="observation/state",
-            action_dim=7,
-            builder=lambda model_dir, **kwargs: seen.update(kwargs),
+            embodiment=Embodiment(
+                name="stub_body",
+                num_cameras=1,
+                action_dim=7,
+                builder=lambda model_dir, **kwargs: seen.update(kwargs),
+            ),
+            convention=Convention(
+                name="stub_keys",
+                image_keys=("observation/image",),
+                state_key="observation/state",
+            ),
         )
         self._register(preset)
 
