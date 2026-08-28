@@ -77,6 +77,21 @@ client = websocket_client_policy.WebsocketClientPolicy("127.0.0.1", 8000)
 actions = client.infer(observation)["actions"]
 ```
 
+From a separate environment containing LIBERO and `openpi-client`, run one
+client-side accuracy smoke episode against that server:
+
+```bash
+python -m evaluation.libero.client \
+  --host 127.0.0.1 --port 8000 --precision bf16 \
+  --suite libero_10 --tasks 0 --trials-per-task 1 \
+  --results-jsonl out/libero-smoke.jsonl \
+  --summary-json out/libero-smoke.summary.json
+```
+
+The inference host does not need LIBERO installed. See
+[LIBERO evaluation](#libero-evaluation) for environment setup and the full
+10-task protocol.
+
 ## Performance
 
 Two views, 224x224 NHWC `uint8`, 10 flow steps, `H=10`, batch 1. Latency is
@@ -436,9 +451,10 @@ python -m evaluation.benchmarks.pi05 \
 - `--warmup` / `--samples` set the sampling protocol (default 10 and 30);
   `--out` writes the report as JSON.
 
-Any registered model type works: `AutoPolicy` dispatches on the checkpoint's
-`config.json`, so the same command benchmarks the next model without a flag
-change.
+This benchmark is PI0.5-specific: its layer seams, synthetic shapes, tactics,
+prompts, and L2 policy construction all target `Pi05Policy`. Other model
+families should provide their own module under `evaluation/benchmarks/` while
+sharing only model-neutral reporting helpers.
 
 
 ## NVIDIA build environment
