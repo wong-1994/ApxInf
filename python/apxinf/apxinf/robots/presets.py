@@ -120,6 +120,50 @@ class RobotPreset:
         """Cameras this preset sends; must equal the checkpoint's ``num_views``."""
         return len(self.slots)
 
+    @property
+    def has_robot_steps(self) -> bool:
+        """Whether this preset wires robot-specific pre/post steps.
+
+        ``False`` for a preset the generic builder serves, whose entire contract
+        is its wire keys and action width. A caller that *cannot* run
+        :attr:`builder` — the checkpoint-free synthetic path — uses this to say
+        what it dropped rather than publishing the preset name unqualified.
+        """
+        return self.builder is not _build_generic
+
+    def synthetic_gaps(
+        self, *, discrete_state: bool, served_action_dim: int
+    ) -> Tuple[str, ...]:
+        """What a checkpoint-free (random-weights) server cannot honour here.
+
+        The synthetic path reproduces this preset's wire keys and view count
+        exactly and nothing else: its tokenizer emits a fixed token stream and
+        never reads state, and :attr:`builder` never runs. Each returned string
+        names one gap, for a startup warning — a synthetic server publishing this
+        preset's name unqualified would be the silent embodiment mismatch
+        ``--robot`` exists to prevent.
+        """
+        gaps = []
+        if discrete_state:
+            gaps.append(
+                "discrete_state=True — the synthetic tokenizer ignores state, so the "
+                "served metadata says discrete_state=False"
+            )
+        if self.has_robot_steps:
+            gap = (
+                f"its robot pre/post steps — {self.builder.__name__} never runs, so no "
+                "state decode, delta->absolute or action re-encode is wired"
+            )
+            if self.action_dim is None:
+                # action_dim=None means an output step owns the truncation (G1's
+                # 32->16 encode). Without that step the full model vector ships.
+                gap += (
+                    f"; the served action_dim is the model's full {served_action_dim}, "
+                    "not the width that skipped step would emit"
+                )
+            gaps.append(gap)
+        return tuple(gaps)
+
     def describe(self) -> str:
         """Human-readable slot→wire-key mapping, for ``--help`` and startup logs."""
         rendered = ", ".join(f"{slot}={key}" for slot, key in self.slots)
@@ -204,8 +248,11 @@ def build_robot_policy(
     stack without editing the preset (and without touching the client).
 
     The resulting wire contract is published in the policy ``metadata``
-    (``robot`` / ``image_keys`` / ``state_key`` / ``discrete_state``), which the
-    server pushes on connect, so a client can assert it rather than guess.
+    (``robot`` / ``robot_steps`` / ``image_keys`` / ``state_key`` /
+    ``discrete_state``), which the server pushes on connect, so a client can
+    assert it rather than guess. ``robot_steps`` says whether this robot's
+    pre/post steps are actually wired, so a server that serves the preset's keys
+    without its arithmetic cannot pass for the real thing.
     """
     preset = get_robot_preset(robot)
     keys = tuple(image_keys) if image_keys is not None else preset.image_keys
@@ -221,6 +268,7 @@ def build_robot_policy(
         action_dim=width,
         metadata={
             "robot": preset.name,
+            "robot_steps": preset.has_robot_steps,
             "robot_slots": [list(pair) for pair in zip(VIEW_SLOTS, keys)],
             **(dict(metadata) if metadata else {}),
         },

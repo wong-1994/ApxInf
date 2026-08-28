@@ -9,7 +9,10 @@ Three groups:
 * :class:`KeyResolutionTest` — ``lookup_key`` / ``has_key`` / ``set_key``, the
   flat-vs-nested wire layouts (``"observation/image"`` vs
   ``obs["images"]["cam_high"]``).
-* :class:`RobotPresetTest` — the preset table's invariants and overrides.
+* :class:`RobotPresetTest` / :class:`SyntheticContractTest` /
+  :class:`BuildRobotPolicyTest` — the preset table's invariants, its overrides,
+  and the contract it publishes (including what a checkpoint-free server must
+  admit it cannot honour).
 * :class:`UnitreeG1ServingTest` — an **unmodified openpi G1 observation** driven
   through the real websocket transport into a G1-wired policy, asserting camera
   →slot binding, state routing, and the delta→absolute / 32→16 output chain.
@@ -56,6 +59,7 @@ from apxinf.robots.presets import (  # noqa: E402
     VIEW_SLOTS,
     RobotPreset,
     available_robots,
+    build_robot_policy,
     get_robot_preset,
 )
 from apxinf.serving import WebsocketPolicyServer  # noqa: E402
@@ -169,6 +173,122 @@ class RobotPresetTest(unittest.TestCase):
             get_robot_preset("g1")
         for name in available_robots(include_aliases=True):
             self.assertIn(name, str(caught.exception))
+
+
+class SyntheticContractTest(unittest.TestCase):
+    """A checkpoint-free server may serve a preset's keys, not its arithmetic.
+
+    ``--random-weights --robot unitree_g1`` runs ``Pi05Policy.from_random``, which
+    never calls ``preset.builder``: the wire keys and view count are real, the
+    action semantics are absent. Publishing the preset name unqualified would be
+    the silent embodiment mismatch ``--robot`` exists to prevent, so every gap is
+    named at startup and ``robot_steps`` goes on the wire.
+    """
+
+    def test_only_a_builder_preset_reports_robot_steps(self) -> None:
+        self.assertFalse(get_robot_preset("franka_libero").has_robot_steps)
+        self.assertTrue(get_robot_preset("unitree_g1").has_robot_steps)
+
+    def test_a_generic_preset_that_drops_state_has_nothing_to_report(self) -> None:
+        preset = get_robot_preset("franka_libero")
+        self.assertEqual(
+            preset.synthetic_gaps(discrete_state=False, served_action_dim=7), ()
+        )
+
+    def test_dropped_state_is_reported_even_for_a_generic_preset(self) -> None:
+        # --discrete-state on franka_libero: the synthetic tokenizer ignores it.
+        preset = get_robot_preset("franka_libero")
+        gaps = preset.synthetic_gaps(discrete_state=True, served_action_dim=7)
+        self.assertEqual(len(gaps), 1)
+        self.assertIn("discrete_state", gaps[0])
+
+    def test_g1_reports_both_its_state_and_its_skipped_steps(self) -> None:
+        preset = get_robot_preset("unitree_g1")
+        gaps = preset.synthetic_gaps(discrete_state=True, served_action_dim=MODEL_DIM)
+        self.assertEqual(len(gaps), 2)
+        joined = " ".join(gaps)
+        self.assertIn("discrete_state", joined)
+        # The gap must name the factory that was skipped and the concrete symptom:
+        # a 32-wide action where the real server truncates to 16.
+        self.assertIn("build_unitree_g1_policy", joined)
+        self.assertIn(str(MODEL_DIM), joined)
+
+    def test_a_preset_whose_builder_owns_no_truncation_omits_the_width_gap(self) -> None:
+        # action_dim set means the width is the preset's, not a skipped step's, so
+        # the synthetic server serves the right one and must not claim otherwise.
+        preset = RobotPreset(
+            name="stub",
+            slots=(("base_0_rgb", "cam"),),
+            state_key="state",
+            action_dim=7,
+            builder=lambda model_dir, **kwargs: None,
+        )
+        gaps = preset.synthetic_gaps(discrete_state=False, served_action_dim=7)
+        self.assertEqual(len(gaps), 1)
+        self.assertNotIn("action_dim", gaps[0])
+
+
+class BuildRobotPolicyTest(unittest.TestCase):
+    """``build_robot_policy`` resolves overrides and publishes the contract."""
+
+    def _register(self, preset: RobotPreset) -> None:
+        ROBOT_PRESETS[preset.name] = preset
+        self.addCleanup(ROBOT_PRESETS.pop, preset.name, None)
+
+    def test_preset_defaults_and_builder_kwargs_reach_the_builder(self) -> None:
+        seen: dict = {}
+        preset = RobotPreset(
+            name="stub_robot",
+            slots=(("base_0_rgb", "cam/high"), ("left_wrist_0_rgb", "cam/wrist")),
+            state_key="joints",
+            action_dim=None,
+            discrete_state=True,
+            builder=lambda model_dir, **kwargs: seen.update(kwargs, model_dir=model_dir),
+            builder_kwargs={"use_delta_joint_actions": True},
+        )
+        self._register(preset)
+
+        build_robot_policy("stub_robot", "/nowhere", metadata={"precision": "bf16"})
+
+        self.assertEqual(seen["model_dir"], "/nowhere")
+        self.assertEqual(seen["image_keys"], ("cam/high", "cam/wrist"))
+        self.assertEqual(seen["state_key"], "joints")
+        self.assertIsNone(seen["action_dim"])
+        self.assertTrue(seen["discrete_state"])
+        self.assertTrue(seen["use_delta_joint_actions"])
+
+        published = seen["metadata"]
+        self.assertEqual(published["robot"], "stub_robot")
+        # A robot-step preset loaded from a checkpoint gets its arithmetic, so the
+        # flag the synthetic path clears is set here.
+        self.assertTrue(published["robot_steps"])
+        self.assertEqual(
+            published["robot_slots"],
+            [["base_0_rgb", "cam/high"], ["left_wrist_0_rgb", "cam/wrist"]],
+        )
+        self.assertEqual(published["precision"], "bf16")
+
+    def test_overrides_replace_only_the_named_fields(self) -> None:
+        seen: dict = {}
+        preset = RobotPreset(
+            name="stub_generic",
+            slots=(("base_0_rgb", "observation/image"),),
+            state_key="observation/state",
+            action_dim=7,
+            builder=lambda model_dir, **kwargs: seen.update(kwargs),
+        )
+        self._register(preset)
+
+        build_robot_policy(
+            "stub_generic", "/nowhere", image_keys=["rgb/front"], state_key="q"
+        )
+
+        self.assertEqual(seen["image_keys"], ("rgb/front",))
+        self.assertEqual(seen["state_key"], "q")
+        self.assertEqual(seen["action_dim"], 7)
+        # robot_slots reports the *served* keys against the slots they fill, so an
+        # override stays reviewable instead of hiding behind the preset name.
+        self.assertEqual(seen["metadata"]["robot_slots"], [["base_0_rgb", "rgb/front"]])
 
 
 class MockModel:
