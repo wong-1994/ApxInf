@@ -281,7 +281,10 @@ def _run_precision_isolated(**options: Any) -> dict[str, Any]:
 def _git_revision() -> str:
     try:
         return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=_REPO_ROOT, text=True
+            ["git", "rev-parse", "HEAD"],
+            cwd=_REPO_ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
     except (OSError, subprocess.SubprocessError):
         return "unknown"
@@ -307,6 +310,10 @@ def parse_args(argv=None):
     parser.add_argument("--input", required=True, action="append", type=pathlib.Path)
     parser.add_argument("--out", required=True, type=pathlib.Path)
     parser.add_argument("--max-relative-l2", required=True, type=float)
+    parser.add_argument(
+        "--validator-revision",
+        help="validator source commit/version (required outside a Git checkout)",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--image-key", action="append", default=[])
     parser.add_argument("--prompt-key", default="prompt")
@@ -333,6 +340,8 @@ def _validate_args(args) -> None:
         raise ValueError("--max-relative-l2 must be finite and non-negative")
     if args.seed < 0 or args.warmup < 0 or args.samples < 1:
         raise ValueError("seed/warmup must be non-negative and samples must be positive")
+    if args.validator_revision is not None and not args.validator_revision.strip():
+        raise ValueError("--validator-revision must not be empty")
 
 
 def main(argv=None) -> int:
@@ -381,7 +390,8 @@ def main(argv=None) -> int:
 
     report = {
         "schema": SCHEMA,
-        "source_revision": manifests[0].get("source_revision") or _git_revision(),
+        "calibration_source_revision": manifests[0].get("source_revision", "unknown"),
+        "validator_source_revision": args.validator_revision or _git_revision(),
         "environment": {
             "host": platform.node(),
             "platform": platform.platform(),

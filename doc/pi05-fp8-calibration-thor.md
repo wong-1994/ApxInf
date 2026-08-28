@@ -16,6 +16,8 @@ and tactic selection remains a separate artifact and workflow.
 - Python extension: CPython 3.10 wheel built with maturin 1.15.0
 - Calibration implementation revision:
   `4d38f1f1c6d909d635aa22b81dca032d2b0028f9`
+- Validator revision: `5ace7ce` (the follow-up review commit changes only
+  provenance fields and documentation)
 - Checkpoint: `/home/wwxq/Projects/models/pi05_libero_base`
 - Data: 16 deterministic records drawn across 14 tasks from the first-party
   LeRobot LIBERO v3 dataset (273,465 frames, 40 tasks). Each public Observation
@@ -32,7 +34,13 @@ cargo build --workspace --release --features cuda
 ```
 
 The clean release build auto-detected SM110/CUTLASS SM110a and completed in
-19m05s. The native CPython 3.10 wheel then built and passed an import smoke test.
+19m05s. The native CPython 3.10 wheel then built and passed an import smoke test:
+
+```bash
+maturin build --release --features cuda --auditwheel skip \
+  -m crates/apxinf-py/Cargo.toml --interpreter .venv/bin/python
+pip install --no-deps target/wheels/apxinf_py-0.1.0-cp310-cp310-linux_aarch64.whl
+```
 
 ## Reproduction
 
@@ -59,9 +67,9 @@ Their canonical content is also identical after excluding the explicitly
 permitted `device` field. The profile uses E4M3FN, `absmax`, margin `1.1`, and
 `max(amax*margin/448,1e-8)`.
 
-Validation used two repeated profiles, the same 16 observations, explicit
-sample-indexed noise, and a relative-L2 acceptance threshold fixed at `0.20`
-before results were observed:
+Accuracy validation used two repeated profiles, the same 16 observations,
+explicit sample-indexed noise, and a relative-L2 acceptance threshold fixed at
+`0.20` before results were observed:
 
 ```bash
 python scripts/validate_pi05_calibration.py \
@@ -70,8 +78,9 @@ python scripts/validate_pi05_calibration.py \
   --profile evidence/calibration-text-run-2.json \
   "${inputs[@]}" \
   --action-dim 7 --action-horizon 50 --seed 0 \
-  --max-relative-l2 0.20 --warmup 10 --samples 30 \
-  --out evidence/thor-validation.json
+  --max-relative-l2 0.20 --warmup 1 --samples 1 \
+  --validator-revision 5ace7ce \
+  --out evidence/thor-validation-text-only-loaded.json
 ```
 
 ## Coverage, reproducibility, and accuracy
@@ -122,6 +131,22 @@ prompt, explicit noise, H=10, 10 warmups, 30 measured calls, and the model
 subspan of `Pi05Policy.infer`. Returning host action arrays includes the
 synchronizing device-to-host copy. The collector is disabled for both inference
 runs, and no other CUDA build or GPU process was active.
+
+The exact performance command used the same profiles and a latency-only
+Observation whose images came from `sample-000.npz` and whose prompt was the
+README T=10 string `put both moka pots on the stove`:
+
+```bash
+python scripts/validate_pi05_calibration.py \
+  --model-dir /home/wwxq/Projects/models/pi05_libero_base \
+  --profile evidence/calibration-text-run-1.json \
+  --profile evidence/calibration-text-run-2.json \
+  --input evidence/latency-t10.npz \
+  --action-dim 7 --action-horizon 10 --seed 0 \
+  --max-relative-l2 0.20 --warmup 10 --samples 30 \
+  --validator-revision 5ace7ce \
+  --out evidence/thor-h10-t10-regression-text-only.json
+```
 
 | Precision | Min | P50 | P95 | Max | Mean | Stddev |
 |---|---:|---:|---:|---:|---:|---:|

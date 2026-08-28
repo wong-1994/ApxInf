@@ -320,7 +320,7 @@ python3 scripts/calibrate_pi05.py \
   --model-dir "$APXINF_MODEL_DIR" \
   --input /path/to/calibration-sample-000.npz \
   --input /path/to/calibration-sample-001.npz \
-  --output "${APXINF_MODEL_DIR}/calibration.json" --margin 2.35
+  --output "${APXINF_MODEL_DIR}/calibration.json" --margin 1.1
 ```
 
 Use the same policy-shaping flags as deployment for non-default checkpoints,

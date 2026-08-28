@@ -65,6 +65,27 @@ class ValidatePi05CalibrationTest(unittest.TestCase):
             )
         )
 
+    def test_validator_revision_can_be_supplied_outside_git(self):
+        args = validate_pi05_calibration.parse_args(
+            [
+                "--model-dir",
+                "/model",
+                "--profile",
+                "/profile-1",
+                "--profile",
+                "/profile-2",
+                "--input",
+                "/sample",
+                "--out",
+                "/report",
+                "--max-relative-l2",
+                "0.2",
+                "--validator-revision",
+                "release-1.2.3",
+            ]
+        )
+        self.assertEqual(args.validator_revision, "release-1.2.3")
+
     def test_load_observation_keeps_only_public_business_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "sample.npz"
