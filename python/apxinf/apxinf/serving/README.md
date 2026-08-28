@@ -247,14 +247,24 @@ Port **placeholder calibration** faithfully as a hook (in G1 the flip mask is al
 Default pi05 pipelines: input `[image_stack, tokenize]`, output
 `[trim, unnormalize]`. Noise is generated inside the runtime unless the caller
 passes it explicitly; a custom host sampler can still be inserted as a pipeline
-step. `Pipeline` offers
-`insert_before/insert_after/replace/override/remove/reorder` (each returns a new
-pipeline). The factory does three things: load full-width → insert decode on the
-input → rewrite the output pipeline:
+step.
+
+`Pipeline` has two families of editing verbs, and picking the wrong one is what
+couples a robot to a model. `insert_before/insert_after/replace/override/remove/
+reorder` address a step **by name**, so they are for a caller who owns that
+chain. A robot adapter does not: its requirement is only "run outside the model's
+steps, in both directions". That is `prepend`/`append`, the two verbs that name
+nothing inside — and a policy exposes them as
+[`ComposablePolicy.with_adapter`](../policies/base.py). Every verb returns a new
+pipeline; none mutate.
+
+So the factory does two things: load full-width through `AutoPolicy`, then wrap.
+It names no model class, so a G1 checkpoint of a different architecture serves
+through the same file unchanged:
 
 ```python
-from ..policies.impls.pi05 import Pi05Policy
-from ..processors import Pipeline
+from ..policies.auto import AutoPolicy
+from ..policies.base import ComposablePolicy
 from ..processors.robots.my_robot import (
     MyRobotDecodeState, MyRobotAbsoluteActions, MyRobotEncodeActions,
     ROBOT_CAMERAS, ROBOT_DIM,
@@ -262,31 +272,29 @@ from ..processors.robots.my_robot import (
 
 def build_my_robot_policy(model_dir, *, use_delta_joint_actions=True, adapt_to_pi=True,
                           state_key="observation/state", image_keys=ROBOT_CAMERAS, **kw):
-    base = Pi05Policy.from_pretrained(
+    base = AutoPolicy.from_pretrained(
         model_dir,
         image_keys=tuple(image_keys),
         action_dim=None,        # keep full 32 dims; the encode step trims to ROBOT_DIM
         state_key=state_key,
         **kw,
     )
-    input_pipeline = base.input_pipeline
-    if adapt_to_pi:
-        input_pipeline = input_pipeline.insert_before(
-            "tokenize", ("decode_state", MyRobotDecodeState(state_key)))
+    if not isinstance(base, ComposablePolicy):
+        raise TypeError(f"{type(base).__name__} has no with_adapter(); ...")
 
-    output_steps = [("unnormalize", base.output_pipeline["unnormalize"])]   # full width
+    before = [("decode_state", MyRobotDecodeState(state_key))] if adapt_to_pi else []
+    after = []
     if use_delta_joint_actions:
-        output_steps.append(("absolute", MyRobotAbsoluteActions(state_key)))
+        after.append(("absolute", MyRobotAbsoluteActions(state_key)))
     if adapt_to_pi:
-        output_steps.append(("encode", MyRobotEncodeActions()))
+        after.append(("encode", MyRobotEncodeActions()))
 
-    return Pi05Policy(
-        base.model,
-        input_pipeline=input_pipeline,
-        output_pipeline=Pipeline(output_steps),
-        image_keys=tuple(image_keys),
-        state_key=state_key,
-        action_dim=ROBOT_DIM,
+    return base.with_adapter(
+        before=before,
+        after=after,
+        # Only the width a step you appended actually produces. Without `encode`
+        # there is nothing to claim: inherit the model's own width (None).
+        action_dim=ROBOT_DIM if adapt_to_pi else None,
         metadata={"robot": "my_robot"},
     )
 ```
@@ -294,9 +302,12 @@ def build_my_robot_policy(model_dir, *, use_delta_joint_actions=True, adapt_to_p
 Resulting pipelines:
 
 ```
-input : [image_stack, decode_state, tokenize]
-output: [unnormalize, absolute, encode]   # normalized[H,32] -> actions[H,ROBOT_DIM]
+input : [decode_state, image_stack, tokenize]
+output: [trim, unnormalize, absolute, encode]   # normalized[H,32] -> actions[H,ROBOT_DIM]
 ```
+
+`trim` is the model's own step at full width (a no-op when `norm_stats` is as
+wide as the model), so `absolute` still sees the whole action.
 
 ### 5.5 One general framework hook (built in, nothing to change)
 

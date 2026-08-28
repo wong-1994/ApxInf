@@ -16,9 +16,11 @@ Three layers, kept deliberately decoupled:
   policy by ``config.json`` model type; :class:`~apxinf.policies.base.Policy` is
   the structural contract they all satisfy.
 * **robots** — the assembly layer (:mod:`apxinf.robots`). A ``build_*`` factory
-  binds one robot to a model policy by wiring its
-  :mod:`apxinf.processors.robots` steps into the policy pipelines. Depends
-  downward on both ``policies`` and ``processors``; neither depends back.
+  binds one robot to a model policy by wrapping its
+  :mod:`apxinf.processors.robots` steps *around* the policy's own chain, through
+  :class:`~apxinf.policies.base.ComposablePolicy`. It names no model class, so the
+  dependency is on a capability rather than on ``Pi05Policy``; ``policies`` and
+  ``processors`` never depend back.
 * **bindings** — :class:`Model` re-exports the ``apxinf_py`` PyO3 handle (L1
   bare-model inference; an internal L0 patches path exists but is private). It is
   the single public surface; you never import ``apxinf_py`` directly.
@@ -34,7 +36,7 @@ policy's ``from_pretrained`` pull in the ``apxinf_py`` binding.
 from __future__ import annotations
 
 from . import processors
-from .policies import AutoPolicy, Pi05Policy, Policy
+from .policies import AutoPolicy, ComposablePolicy, Pi05Policy, Policy
 from .robots import (
     ROBOT_PRESETS,
     RobotPreset,
@@ -58,6 +60,7 @@ __all__ = [
     "processors",
     # policy contract (outward); BareModel (inward) lives in apxinf.policies
     "Policy",
+    "ComposablePolicy",
     # L2 policies
     "Pi05Policy",
     "AutoPolicy",

@@ -4,7 +4,8 @@ This package owns everything policy-related, mirroring how :mod:`apxinf.processo
 owns its own steps and :class:`~apxinf.processors.base.ProcessorStep`. It is split
 into a **stable** outer layer and a **volatile** inner one:
 
-* :mod:`~apxinf.policies.base` — the :class:`Policy` / :class:`BareModel` contracts.
+* :mod:`~apxinf.policies.base` — the :class:`Policy` / :class:`BareModel` contracts,
+  plus :class:`ComposablePolicy`, the opt-in seam a robot adapter wraps.
 * :mod:`~apxinf.policies.registry` — the ``model_type -> policy class`` registry.
 * :mod:`~apxinf.policies.auto` — :class:`AutoPolicy`, dispatch by ``config.json`` type.
 * :mod:`~apxinf.policies.impls` — the concrete per-model policies (``pi05``, ...),
@@ -24,7 +25,7 @@ inside ``from_pretrained`` — so importing the package stays offline-friendly.
 from __future__ import annotations
 
 from .auto import AutoPolicy
-from .base import BareModel, Policy
+from .base import BareModel, ComposablePolicy, Policy
 from .registry import available_policies, get_policy, register_policy
 
 # Concrete model policies (importing registers them under their model_type).
@@ -33,6 +34,7 @@ from .impls import Pi05Policy
 __all__ = [
     "Policy",
     "BareModel",
+    "ComposablePolicy",
     "AutoPolicy",
     "register_policy",
     "get_policy",

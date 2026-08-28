@@ -4,7 +4,7 @@ Covers the layer that decides *which keys a client must send*, which is where a
 deployment silently degrades rather than fails: a checkpoint served under the
 wrong embodiment still returns well-shaped actions.
 
-Three groups:
+Four groups:
 
 * :class:`KeyResolutionTest` — ``lookup_key`` / ``has_key`` / ``set_key``, the
   flat-vs-nested wire layouts (``"observation/image"`` vs
@@ -13,6 +13,9 @@ Three groups:
   :class:`BuildRobotPolicyTest` — the preset table's invariants, its overrides,
   and the contract it publishes (including what a checkpoint-free server must
   admit it cannot honour).
+* :class:`PipelineCompositionTest` / :class:`PolicyCompositionTest` /
+  :class:`UnitreeG1AdapterTest` — the robot/model seam: a robot's steps wrap a
+  model's chain from outside, without either layer naming the other.
 * :class:`UnitreeG1ServingTest` — an **unmodified openpi G1 observation** driven
   through the real websocket transport into a G1-wired policy, asserting camera
   →slot binding, state routing, and the delta→absolute / 32→16 output chain.
@@ -23,11 +26,14 @@ Runs offline against a mock model; no CUDA, no checkpoint.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import pathlib
 import sys
 import threading
+import types
 import unittest
+from unittest import mock
 
 import numpy as np
 from openpi_client import websocket_client_policy
@@ -39,7 +45,8 @@ os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 os.environ["no_proxy"] = "127.0.0.1,localhost"
 
 from apxinf import Pi05Policy  # noqa: E402
-from apxinf.processors import Pipeline, PromptTokenizer, Unnormalizer  # noqa: E402
+from apxinf.policies.base import ComposablePolicy  # noqa: E402
+from apxinf.processors import Pipeline, ProcessorStep, PromptTokenizer, Unnormalizer  # noqa: E402
 from apxinf.processors.robots.unitree_g1 import (  # noqa: E402
     G1_CAMERAS,
     G1_ROBOT_DIM,
@@ -49,11 +56,11 @@ from apxinf.processors.robots.unitree_g1 import (  # noqa: E402
     UnitreeG1EncodeActions,
 )
 from apxinf.processors.transforms import (  # noqa: E402
-    Unnormalize,
     has_key,
     lookup_key,
     set_key,
 )
+from apxinf.robots import unitree_g1 as robot_adapter  # noqa: E402
 from apxinf.robots.presets import (  # noqa: E402
     ROBOT_PRESETS,
     VIEW_SLOTS,
@@ -62,6 +69,7 @@ from apxinf.robots.presets import (  # noqa: E402
     build_robot_policy,
     get_robot_preset,
 )
+from apxinf.robots.unitree_g1 import build_unitree_g1_policy  # noqa: E402
 from apxinf.serving import WebsocketPolicyServer  # noqa: E402
 from apxinf.serving.websocket import health_check  # noqa: E402
 
@@ -291,6 +299,47 @@ class BuildRobotPolicyTest(unittest.TestCase):
         self.assertEqual(seen["metadata"]["robot_slots"], [["base_0_rgb", "rgb/front"]])
 
 
+class _Tag(ProcessorStep):
+    """Trivial step: append its own label to the flowing list."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    def __call__(self, value):
+        return list(value) + [self.label]
+
+
+class PipelineCompositionTest(unittest.TestCase):
+    """``prepend``/``append``: the only editing verbs that name no inner step.
+
+    Every other verb (``insert_before``, ``replace``, ...) needs a step name, so
+    an *outer* layer using them has to know the inner chain's private vocabulary.
+    A robot adapter's requirement is only "run outside the model's steps", and
+    these two say exactly that.
+    """
+
+    def _chain(self) -> Pipeline:
+        return Pipeline([("a", _Tag("a")), ("b", _Tag("b"))])
+
+    def test_wrapping_runs_outside_the_existing_steps_in_order(self) -> None:
+        chain = self._chain().prepend(("pre1", _Tag("pre1")), ("pre2", _Tag("pre2")))
+        chain = chain.append(("post1", _Tag("post1")), ("post2", _Tag("post2")))
+        self.assertEqual(chain([]), ["pre1", "pre2", "a", "b", "post1", "post2"])
+
+    def test_the_original_pipeline_is_untouched(self) -> None:
+        original = self._chain()
+        original.prepend(("pre", _Tag("pre")))
+        original.append(("post", _Tag("post")))
+        self.assertEqual(original.names, ["a", "b"])
+
+    def test_a_colliding_name_is_rejected_rather_than_shadowing(self) -> None:
+        # A wrapper that silently replaced an inner step would be the worst
+        # possible failure: the model's chain quietly loses a step.
+        with self.assertRaises(ValueError) as caught:
+            self._chain().prepend(("b", _Tag("b2")))
+        self.assertIn("'b'", str(caught.exception))
+
+
 class MockModel:
     """In-process ``BareModel`` stand-in returning a constant normalized action."""
 
@@ -326,9 +375,9 @@ class RecordingTokenizer(PromptTokenizer):
 def build_g1_mock_policy() -> Pi05Policy:
     """A G1-wired policy over a mock model: the real pipelines, no checkpoint.
 
-    Mirrors ``build_unitree_g1_policy`` but injects the model and an identity
-    unnormalizer, so the assertions isolate the adapter's arithmetic from
-    checkpoint norm_stats.
+    Takes the same route ``build_unitree_g1_policy`` does — a stock policy, then
+    ``with_adapter`` — but injects the model and an identity unnormalizer, so the
+    assertions isolate the adapter's arithmetic from checkpoint norm_stats.
     """
     model = MockModel(num_views=len(G1_CAMERAS))
     tokenizer = RecordingTokenizer()
@@ -342,27 +391,212 @@ def build_g1_mock_policy() -> Pi05Policy:
         image_keys=G1_CAMERAS,
         state_key=G1_STATE_KEY,
     )
-    input_pipeline = input_pipeline.insert_before(
-        "tokenize", ("g1_decode_state", UnitreeG1DecodeState(G1_STATE_KEY))
-    )
-    output_pipeline = Pipeline(
-        [
-            ("unnormalize", Unnormalize(identity)),
-            ("g1_absolute", UnitreeG1AbsoluteActions(G1_STATE_KEY)),
-            ("g1_encode", UnitreeG1EncodeActions()),
-        ]
-    )
-    policy = Pi05Policy(
+    base = Pi05Policy(
         model,
         input_pipeline=input_pipeline,
         output_pipeline=output_pipeline,
         image_keys=G1_CAMERAS,
         state_key=G1_STATE_KEY,
+        metadata={"protocol": "openpi.websocket_policy"},
+    )
+    policy = base.with_adapter(
+        before=[("g1_decode_state", UnitreeG1DecodeState(G1_STATE_KEY))],
+        after=[
+            ("g1_absolute", UnitreeG1AbsoluteActions(G1_STATE_KEY)),
+            ("g1_encode", UnitreeG1EncodeActions()),
+        ],
         action_dim=G1_ROBOT_DIM,
-        metadata={"robot": "unitree_g1", "protocol": "openpi.websocket_policy"},
+        metadata={"robot": "unitree_g1"},
     )
     policy.tokenizer = tokenizer
     return policy
+
+
+def _identity_unnormalizer() -> Unnormalizer:
+    return Unnormalizer(
+        q01=[-1.0] * MODEL_DIM, q99=[1.0] * MODEL_DIM, dims=MODEL_DIM, eps=0.0
+    )
+
+
+class PolicyCompositionTest(unittest.TestCase):
+    """``Pi05Policy.with_adapter``: the seam a robot adapter wraps.
+
+    Its contract is nesting — ``before`` outside the model's whole input chain,
+    ``after`` outside its whole output chain — plus republishing what the wrapped
+    policy actually serves. Getting the second part wrong is the failure this
+    layer exists to prevent: a policy advertising an ``action_dim`` its steps do
+    not emit degrades silently on the wire.
+    """
+
+    def _base(self) -> Pi05Policy:
+        model = MockModel(num_views=len(G1_CAMERAS))
+        input_pipeline, output_pipeline = Pi05Policy.default_pipelines(
+            model,
+            tokenizer=RecordingTokenizer(),
+            unnormalizer=_identity_unnormalizer(),
+            image_keys=G1_CAMERAS,
+            state_key=G1_STATE_KEY,
+        )
+        return Pi05Policy(
+            model,
+            input_pipeline=input_pipeline,
+            output_pipeline=output_pipeline,
+            image_keys=G1_CAMERAS,
+            state_key=G1_STATE_KEY,
+            metadata={"protocol": "openpi.websocket_policy"},
+        )
+
+    def test_steps_land_outside_the_model_chain_in_both_directions(self) -> None:
+        base = self._base()
+        wrapped = base.with_adapter(
+            before=[("g1_decode_state", UnitreeG1DecodeState(G1_STATE_KEY))],
+            after=[("g1_encode", UnitreeG1EncodeActions())],
+            action_dim=G1_ROBOT_DIM,
+        )
+        self.assertEqual(wrapped.input_pipeline.names[0], "g1_decode_state")
+        self.assertEqual(wrapped.output_pipeline.names[-1], "g1_encode")
+        # The model's own steps keep their order and their names; the wrapper
+        # never had to learn what they are.
+        self.assertEqual(wrapped.input_pipeline.names[1:], base.input_pipeline.names)
+        self.assertEqual(wrapped.output_pipeline.names[:-1], base.output_pipeline.names)
+
+    def test_the_original_policy_is_not_mutated(self) -> None:
+        base = self._base()
+        base.with_adapter(
+            after=[("g1_encode", UnitreeG1EncodeActions())], action_dim=G1_ROBOT_DIM
+        )
+        self.assertNotIn("g1_encode", base.output_pipeline.names)
+        self.assertEqual(base.action_dim, MODEL_DIM)
+
+    def test_the_published_contract_describes_the_wrapped_chain(self) -> None:
+        wrapped = self._base().with_adapter(
+            after=[("g1_encode", UnitreeG1EncodeActions())],
+            action_dim=G1_ROBOT_DIM,
+            metadata={"robot": "unitree_g1"},
+        )
+        # The derived half is recomputed: inheriting the pre-adapter action_dim
+        # would publish a width no step in this chain produces.
+        self.assertEqual(wrapped.metadata["action_dim"], G1_ROBOT_DIM)
+        self.assertIn("g1_encode", wrapped.metadata["output_pipeline"])
+        # The caller's half is carried forward and extended.
+        self.assertEqual(wrapped.metadata["protocol"], "openpi.websocket_policy")
+        self.assertEqual(wrapped.metadata["robot"], "unitree_g1")
+
+    def test_an_unchanged_width_is_inherited(self) -> None:
+        # An appended step that does not narrow the action needs no declaration.
+        wrapped = self._base().with_adapter(
+            after=[("g1_absolute", UnitreeG1AbsoluteActions(G1_STATE_KEY))]
+        )
+        self.assertEqual(wrapped.action_dim, MODEL_DIM)
+
+    def test_the_model_handle_is_shared_not_reloaded(self) -> None:
+        # Rewiring, not a second load: two handles on one GPU allocation would
+        # double the checkpoint's memory and make close() order matter.
+        base = self._base()
+        self.assertIs(base.with_adapter().model, base.model)
+
+    def test_a_wrapper_cannot_shadow_a_step_it_does_not_own(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self._base().with_adapter(
+                before=[("tokenize", UnitreeG1DecodeState(G1_STATE_KEY))]
+            )
+        self.assertIn("tokenize", str(caught.exception))
+
+    def test_pi05_satisfies_the_composable_contract(self) -> None:
+        self.assertIsInstance(self._base(), ComposablePolicy)
+
+
+class _StubComposable:
+    """Minimal ``ComposablePolicy``: records what an adapter wrapped it with."""
+
+    def __init__(self) -> None:
+        self.wrapped: dict = {}
+
+    def with_adapter(self, *, before=(), after=(), action_dim=None, metadata=None):
+        self.wrapped = {
+            "before": [name for name, _ in before],
+            "after": [name for name, _ in after],
+            "action_dim": action_dim,
+            "metadata": dict(metadata or {}),
+        }
+        return self
+
+
+class UnitreeG1AdapterTest(unittest.TestCase):
+    """The G1 builder wraps a policy it never names, and hands load flags on.
+
+    These run against a stub loader, so they assert the *adapter's* behaviour
+    without a checkpoint: which steps it wraps, on which side, what width it
+    claims, and — the bug this split removes — that every keyword it forwards is
+    one the real loading path accepts.
+    """
+
+    def _patched_loader(self, captured: dict, policy):
+        def load(model_dir, *, model_type=None, **kwargs):
+            # Mirror AutoPolicy's real split: it consumes model_type itself and
+            # forwards the rest to a concrete from_pretrained that has **no**
+            # **kwargs. Binding against that signature reproduces the TypeError
+            # serving would raise, which is why this stub is not a bare Mock.
+            inspect.signature(Pi05Policy.from_pretrained).bind(model_dir, **kwargs)
+            captured.update(kwargs, model_dir=model_dir, model_type=model_type)
+            return policy
+
+        return mock.patch.object(
+            robot_adapter, "AutoPolicy", types.SimpleNamespace(from_pretrained=load)
+        )
+
+    def test_server_load_flags_reach_the_concrete_loader(self) -> None:
+        # --model-type travels server -> build_robot_policy -> this builder. It
+        # is AutoPolicy's argument, not the concrete policy's, so a builder that
+        # forwards it blindly raises TypeError the moment anyone serves a G1
+        # checkpoint. Only binding the real signature catches that.
+        captured: dict = {}
+        with self._patched_loader(captured, _StubComposable()):
+            build_robot_policy(
+                "unitree_g1", "/nowhere", model_type="pi05", precision="bf16"
+            )
+        self.assertEqual(captured["model_type"], "pi05")
+        self.assertEqual(captured["precision"], "bf16")
+        self.assertEqual(captured["state_key"], G1_STATE_KEY)
+        # Loaded at full model width: delta->absolute must see the whole action
+        # before g1_encode truncates it to 16.
+        self.assertIsNone(captured["action_dim"])
+
+    def test_the_g1_steps_wrap_the_model_chain_from_outside(self) -> None:
+        stub = _StubComposable()
+        with self._patched_loader({}, stub):
+            build_robot_policy("unitree_g1", "/nowhere")
+        self.assertEqual(stub.wrapped["before"], ["g1_decode_state"])
+        self.assertEqual(stub.wrapped["after"], ["g1_absolute", "g1_encode"])
+        self.assertEqual(stub.wrapped["action_dim"], G1_ROBOT_DIM)
+        self.assertEqual(stub.wrapped["metadata"]["robot"], "unitree_g1")
+
+    def test_without_the_truncating_step_no_width_is_claimed(self) -> None:
+        # adapt_to_pi=False drops g1_encode, so nothing narrows the action to 16.
+        # Advertising 16 regardless would publish a width no step produces.
+        stub = _StubComposable()
+        with self._patched_loader({}, stub):
+            build_unitree_g1_policy("/nowhere", adapt_to_pi=False)
+        self.assertEqual(stub.wrapped["before"], [])
+        self.assertEqual(stub.wrapped["after"], ["g1_absolute"])
+        self.assertIsNone(stub.wrapped["action_dim"])
+
+    def test_a_policy_that_cannot_be_wrapped_is_named_in_the_error(self) -> None:
+        class Unwrappable:
+            pass
+
+        with self._patched_loader({}, Unwrappable()):
+            with self.assertRaises(TypeError) as caught:
+                build_unitree_g1_policy("/nowhere")
+        message = str(caught.exception)
+        self.assertIn("Unwrappable", message)
+        self.assertIn("with_adapter", message)
+
+    def test_the_adapter_names_no_model_class(self) -> None:
+        # The whole point of the split: this module knows a body, not a model.
+        # A concrete policy reappearing here is the regression to catch.
+        source = pathlib.Path(robot_adapter.__file__).read_text()
+        self.assertNotIn("Pi05Policy", source)
 
 
 class RunningServer:

@@ -30,7 +30,6 @@ if _APXINF_PKG.is_dir() and str(_APXINF_PKG) not in sys.path:
 
 from apxinf import build_unitree_g1_policy  # noqa: E402
 from apxinf.processors import Unnormalizer  # noqa: E402
-from apxinf.processors.transforms import Unnormalize  # noqa: E402
 from apxinf.robots.unitree_g1 import G1_CAMERAS, G1_STATE_KEY  # noqa: E402
 
 
@@ -47,20 +46,17 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Full-model-width identity unnormalizer: [50,32] passes through unchanged so
-    # the 32->16 robot truncation and delta->absolute run on the raw model output.
-    identity = None  # built after we know the model width
-
-    # Build once to learn the model width, then rebuild with a matching identity.
-    # (Cheap: model load dominates; we load a single time by peeking metadata.)
+    # Load the handle first so the identity unnormalizer can be built at the
+    # model's own width: [50,32] then passes through unchanged, so delta->absolute
+    # and the 32->16 robot truncation run on the raw model output.
     import apxinf_py
 
     model = apxinf_py.Model.load(
         "pi05", str(args.model_dir / "model.safetensors"), device=args.device, precision=args.precision
     )
     width = model.action_dim
-    identity = Unnormalize(
-        Unnormalizer(mean=np.zeros(width, np.float32), std=np.ones(width, np.float32), mode="mean_std")
+    identity = Unnormalizer(
+        mean=np.zeros(width, np.float32), std=np.ones(width, np.float32), mode="mean_std"
     )
 
     policy = build_unitree_g1_policy(
@@ -69,7 +65,7 @@ def main():
         use_delta_joint_actions=True,
         adapt_to_pi=True,
         state_key=G1_STATE_KEY,
-        unnormalizer=identity,
+        unnormalizer=identity,  # injected into the model's own unnormalize step
         precision=args.precision,
         device=args.device,
         metadata={"config": "pi05_UnitreeG1_groundwire", "note": "stand-in ckpt, shape-only"},
