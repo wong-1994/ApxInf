@@ -54,10 +54,13 @@ background material.
    end-to-end values do not turn host round trips into deliverable performance
    debt.
 6. Create `crates/apxinf-model/src/<model>/`. Start with a self-contained
-   implementation. Inspect and copy a close model when useful, but do not import
-   or modify another model-family directory for the new architecture. Defer
-   shared extraction to a separate review after repeated maintained
-   implementations prove the seam. Run
+   implementation. Treat every sibling model-family directory as private:
+   inspect and copy a close model when useful, but never import from it or
+   modify it to expose reusable symbols. Until a pre-existing, separately
+   reviewed model-neutral module owns the needed API, duplicate the required
+   code locally, including large blocks. A model port must not create an ad hoc
+   shared module as a shortcut. Defer shared extraction to a separate review
+   after repeated maintained implementations prove the seam. Run
    `scripts/check_model_family_boundaries.sh` before review.
 7. Integrate through the appropriate maintained contract: `LlmTrait` for
    LLM/VLM or `VlaRuntime` plus the Python policy layer for VLA.

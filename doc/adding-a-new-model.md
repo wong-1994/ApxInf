@@ -31,7 +31,10 @@ provenance when copying and rename model-specific concepts immediately.
 Model-family directories are private architecture modules. Follow the
 [dependency matrix](model-layer-architecture.md#per-model-isolation): inspect
 and copy from a close implementation when useful, but keep the new product code
-independent of other families. Run
+independent of other families. In the absence of a pre-existing, separately
+reviewed shared module, copy the required implementation into the new model—even
+when that means substantial duplication. Do not use the port itself to make a
+sibling model reusable or to introduce an ad hoc common directory. Run
 `scripts/check_model_family_boundaries.sh` before review.
 
 ## Choose the runtime contract

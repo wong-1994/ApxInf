@@ -305,7 +305,8 @@ A port is complete only when:
 - the public deployment path has been exercised;
 - unsupported targets fail clearly;
 - the new model neither imports nor modifies another model-family directory
-  without a separately reviewed shared-seam design;
+  and uses only pre-existing, separately reviewed shared model modules; absent
+  such a module, required code is duplicated inside the new model;
 - optimization opportunities, host escapes, static-buffer/KV reuse, and CUDA
   Graph eligibility have been audited;
 - applicable existing optimized paths have been attempted and remaining

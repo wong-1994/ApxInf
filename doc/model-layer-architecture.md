@@ -77,9 +77,10 @@ library. During an initial port, dependencies follow this matrix:
 |---|---|
 | `<new_model>` → `apxinf-core` contracts | yes |
 | `<new_model>` → safe `apxinf-cuda` kernel interfaces | yes |
-| `<new_model>` → explicitly shared top-level model modules | yes |
+| `<new_model>` → pre-existing, separately reviewed shared top-level model modules | yes |
 | `<new_model>` → another model-family directory | no |
-| another model-family directory changed to accommodate `<new_model>` | no by default; requires a separate shared-seam design and review |
+| another model-family directory changed to accommodate `<new_model>` | no |
+| shared module introduced inside the model-port change | no; extract it in a separate prerequisite review |
 
 Use another maintained executor as evidence for layer ordering, fusion choices,
 workspace lifetimes, and safe CUDA calls. Copy the architecture-specific code
@@ -88,10 +89,18 @@ runtime means reusing those proven patterns and model-neutral interfaces; it
 does not mean importing the other family's config, weights, model, executor,
 backend seam, cache, or graph modules.
 
+When no reviewed shared owner exists, local duplication is the correct default,
+even for a large implementation and even when the copied types appear generic.
+Names such as `LinearWeights`, `Fp8Weights`, `Backend`, or `Runtime` do not make
+a symbol model-neutral while it is owned by a model-family directory. Never
+make a sibling symbol public merely to reuse it from the new model.
+
 Extract a shared architecture module only after both model implementations are
 maintained, independently tested, and demonstrate the same stable semantics and
-lifecycle. Make that extraction a separately reviewable design change. A new
-port alone is not evidence for moving code out of either family.
+lifecycle. Make that extraction a separately reviewable prerequisite change,
+then let the model port depend on the reviewed module. A new port alone is not
+evidence for moving code out of either family, and shared extraction must not be
+hidden inside the port diff.
 
 The directory's `backend.rs` is the only CUDA-facing seam when concrete device
 facilities are required. Other files import through that seam. This keeps
@@ -156,8 +165,8 @@ behavior, the commonality is not stable enough.
 
 - The new architecture has its own directory.
 - The product diff neither imports nor modifies another model-family directory
-  for the new architecture. Any exception points to an explicitly shared module
-  and a separately approved extraction design.
+  for the new architecture. Any reused model-layer symbol is owned by a
+  pre-existing shared module whose extraction was reviewed separately.
 - No backend crate imports model types or model-family concepts.
 - Model code reaches CUDA through its declared seam.
 - Weight transformations occur at load time where possible.
