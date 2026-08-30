@@ -23,10 +23,9 @@ use super::bf16_executor::{
 };
 use super::{
     multimodal_position_ids, sinusoidal_time_embedding, solver_times, DeviceVisionGeometry,
-    VisionGeometry, WallossActivationScales, WallossConfig, WallossDynamicFp8Weights,
-    WallossFp8Weights, WallossWeights,
+    StaticFp8Calibration, VisionGeometry, WallossActivationScales, WallossConfig,
+    WallossDynamicFp8Weights, WallossFp8Weights, WallossWeights,
 };
-use crate::vla::StaticFp8Calibration;
 
 const DEFAULT_GRIDS: [[usize; 3]; 2] = [[1, 18, 18], [1, 18, 18]];
 const BF16_WORKSPACE_BYTES: usize = 12 * 1024 * 1024 * 1024;

@@ -2,10 +2,9 @@
 
 use apxinf_core::{Backend, Error, Result, Tensor};
 
-use crate::vla::{DynamicFp8LinearWeights, Fp8LinearWeights, LinearWeights, StaticFp8Calibration};
-
 use super::weights::bf16_to_device;
 use super::{
+    DynamicFp8LinearWeights, Fp8LinearWeights, LinearWeights, StaticFp8Calibration,
     WallossActionWeights, WallossLayerWeights, WallossVisionBlockWeights, WallossVisionWeights,
     WallossWeights,
 };

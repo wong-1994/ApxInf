@@ -3,9 +3,7 @@
 use apxinf_core::{Backend, DType, Error, Result, Tensor};
 
 use super::backend::{kernels, Context, DeviceBuffer, RuntimeBackend};
-use crate::vla::device_weights::concat_host_2d;
-
-use super::LinearWeights;
+use super::{device_weights::concat_host_2d, LinearWeights};
 use kernels::gemm::{w8a8, W8A8Layout, W8A8ScaleMode, W8A8WeightView};
 
 pub struct Int8LinearWeights {

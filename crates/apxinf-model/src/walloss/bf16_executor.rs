@@ -14,8 +14,8 @@ use super::{
 #[derive(Clone, Copy)]
 pub(super) enum MatrixRef<'a> {
     Bf16(&'a Tensor),
-    Fp8(&'a crate::vla::Fp8LinearWeights, f32),
-    DynamicFp8(&'a crate::vla::DynamicFp8LinearWeights),
+    Fp8(&'a super::Fp8LinearWeights, f32),
+    DynamicFp8(&'a super::DynamicFp8LinearWeights),
 }
 
 pub(super) trait TransformerWeights {
@@ -126,7 +126,7 @@ fn linear(context: &Context, input: &Tensor, weights: MatrixRef<'_>) -> Result<T
 fn dynamic_linear(
     context: &Context,
     input: &Tensor,
-    weight: &crate::vla::DynamicFp8LinearWeights,
+    weight: &super::DynamicFp8LinearWeights,
 ) -> Result<Tensor> {
     let input_shape = input.shape().dims();
     if input_shape.len() != 2 || input_shape[1] != weight.input_features {
@@ -147,7 +147,7 @@ fn dynamic_linear(
 fn dynamic_linear_prequantized(
     context: &Context,
     activation: &kernels::quantization::DynamicFp8Tensor,
-    weight: &crate::vla::DynamicFp8LinearWeights,
+    weight: &super::DynamicFp8LinearWeights,
     keep_padded_output: bool,
 ) -> Result<Tensor> {
     let activation_shape = activation.values.shape().dims();

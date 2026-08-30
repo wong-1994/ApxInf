@@ -7,6 +7,13 @@ use apxinf_core::{Backend, DType, Error, Result, Tensor};
 
 use super::WallossConfig;
 
+#[derive(Debug)]
+pub struct LinearWeights {
+    /// Physical `[input, output]` matrix consumed by row-major GEMMs.
+    pub weight: Tensor,
+    pub bias: Option<Tensor>,
+}
+
 pub struct WallossWeights {
     pub token_embedding: Tensor,
     pub language_layers: Vec<WallossLayerWeights>,

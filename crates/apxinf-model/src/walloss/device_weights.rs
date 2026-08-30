@@ -3,7 +3,7 @@
 use apxinf_core::{Backend, DType, Error, Result, Tensor};
 
 #[cfg(feature = "cuda")]
-use crate::accelerator::cuda::{kernels, RuntimeBackend};
+use super::backend::{kernels, RuntimeBackend};
 
 use super::{encode_e4m3, quantize_e4m3_absmax, LinearWeights, E4M3_MAX};
 
@@ -113,7 +113,6 @@ impl DynamicFp8LinearWeights {
         })
     }
 }
-
 fn align_16(value: usize) -> usize {
     value.div_ceil(16) * 16
 }
@@ -404,15 +403,6 @@ fn fp16_host_and_amax(tensor: &Tensor) -> Result<(Tensor, f32)> {
     ))
 }
 
-pub fn fp16_to_device(tensor: &Tensor, backend: &dyn Backend) -> Result<Tensor> {
-    let values = tensor.to_f32_vec()?;
-    let values = values
-        .iter()
-        .map(|value| half::f16::from_f32(*value))
-        .collect::<Vec<_>>();
-    backend.to_device(&Tensor::from_f16(tensor.shape().dims().to_vec(), &values)?)
-}
-
 pub(crate) fn concat_host_2d(tensors: &[&Tensor]) -> Result<Tensor> {
     let first = tensors
         .first()
@@ -511,7 +501,8 @@ mod tests {
             .enumerate()
         {
             for input in 0..2 {
-                let decoded = crate::vla::decode_e4m3(values[output * 16 + input]) * scales[output];
+                let decoded = crate::walloss::decode_e4m3(values[output * 16 + input])
+                    * scales[output];
                 assert!((decoded - expected[input]).abs() < expected[input].abs() * 0.05);
                 assert_eq!(values_kn[input * 16 + output], values[output * 16 + input]);
             }

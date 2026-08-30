@@ -4,23 +4,6 @@ use std::collections::BTreeMap;
 
 use apxinf_core::{Error, Result, RngKey, Tensor};
 
-pub(crate) mod device_weights;
-mod fp8;
-
-pub use device_weights::{fp16_to_device, DynamicFp8LinearWeights, Fp8LinearWeights};
-pub use fp8::{
-    decode_e4m3, dequantize_e4m3, encode_e4m3, quantize_e4m3, quantize_e4m3_absmax, Fp8Tensor,
-    StaticFp8Calibration, E4M3_MAX,
-};
-
-/// Host linear projection in the physical `[input, output]` layout consumed
-/// by ApxInf row-major GEMMs.
-#[derive(Debug)]
-pub struct LinearWeights {
-    pub weight: Tensor,
-    pub bias: Option<Tensor>,
-}
-
 /// Memory layout for an RGB `u8` observation batch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ImageLayout {

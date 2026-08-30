@@ -3,7 +3,7 @@
 use apxinf_core::{Error, Result, Tensor};
 
 use super::backend::{kernels, Context};
-use crate::vla::Fp8LinearWeights;
+use super::Fp8LinearWeights;
 
 pub fn linear_bf16(
     context: &Context,

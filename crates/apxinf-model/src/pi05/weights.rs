@@ -8,14 +8,19 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use apxinf_core::{DType, Error, Result, Tensor};
 use half::bf16;
-
-use crate::vla::LinearWeights;
+use apxinf_core::{DType, Error, Result, Tensor};
 
 use super::{GemmaVariantConfig, Pi05Config};
 
 const ROOT: &str = "paligemma_with_expert";
+
+#[derive(Debug)]
+pub struct LinearWeights {
+    /// Physical `[in, out]` matrix used by row-major GEMM.
+    pub weight: Tensor,
+    pub bias: Option<Tensor>,
+}
 
 #[derive(Debug)]
 pub struct LayerNormWeights {
