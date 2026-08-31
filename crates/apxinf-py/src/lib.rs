@@ -10,10 +10,10 @@
 //!   vision→patches runs inside the Rust CUDA graph.
 //!
 //! **L0** [`Model::infer_patches`] (caller supplies pre-computed `patches`,
-//! equivalent to a Rust `Observation(Patches)`) is implemented but **not part of
-//! the public API**: it is exposed to Python only under the private
-//! `_infer_patches` name for L0/L1 consistency tests, and may change or be
-//! removed without notice.
+//! equivalent to a Rust `Observation(Patches)`) is exposed under the private
+//! `_infer_patches` name. It is the model-policy bridge for families such as
+//! WallOSS whose preprocessing stays in Python, and remains outside the public
+//! end-user API.
 //!
 //! Both return the **normalized-domain** action as a `float32` numpy array of
 //! shape `[action_horizon, action_dim]`. Inference accepts optional exact
@@ -22,9 +22,9 @@
 //! `*_seeded` variants remain available for explicitly keyed replay. No processor
 //! lives here.
 //!
-//! The pi05 runtime is only registered on CUDA devices, so real inference
+//! The VLA runtimes are only registered on CUDA devices, so real inference
 //! requires the `cuda` feature and a CUDA machine; without it the module still
-//! imports and reports shape contracts, but `load` errors for pi05.
+//! imports and reports shape contracts, but model loading errors.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -40,10 +40,17 @@ use pyo3::prelude::*;
 
 use apxinf_core::{Device, RngKey, Shape, Tensor};
 use apxinf_model::pi05::Pi05CalibrationPlan;
+use apxinf_model::walloss::WallossConfig;
 use apxinf_model::{
     AutoModel, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation, Pi05Config,
     SyntheticWeights, VisionObservation, VlaRequest,
 };
+
+#[derive(Clone)]
+enum BindingConfig {
+    Pi05(Pi05Config),
+    Walloss(WallossConfig),
+}
 
 /// Map any Rust error into a Python `RuntimeError`.
 fn runtime_err<E: std::fmt::Display>(error: E) -> PyErr {
@@ -111,7 +118,7 @@ fn load_config(checkpoint: &Path) -> PyResult<Pi05Config> {
     }
 }
 
-/// A loaded pi05 model handle. Holds the runtime plus the resolved config used
+/// A loaded VLA model handle. Holds the runtime plus the resolved config used
 /// for shape-contract queries and input validation.
 ///
 /// The pi05 runtime uses `Rc`/`RefCell` internally and is therefore not `Send`;
@@ -119,19 +126,56 @@ fn load_config(checkpoint: &Path) -> PyResult<Pi05Config> {
 #[pyclass(unsendable)]
 pub struct Model {
     model: LoadedModel,
-    config: Pi05Config,
+    config: BindingConfig,
     device: Device,
     sampling_seed: Cell<u64>,
     sampling_draw: Cell<u64>,
 }
 
 impl Model {
+    fn pi05_config(&self, method: &str) -> PyResult<&Pi05Config> {
+        match &self.config {
+            BindingConfig::Pi05(config) => Ok(config),
+            BindingConfig::Walloss(_) => Err(PyValueError::new_err(format!(
+                "apxinf_py.{method}: WallOSS accepts preprocessed patches, not RGB"
+            ))),
+        }
+    }
+
     fn patch_rows(&self) -> usize {
-        self.config.num_views * self.config.patches_per_view()
+        match &self.config {
+            BindingConfig::Pi05(config) => config.num_views * config.patches_per_view(),
+            // The current WallOSS runtime deliberately fixes the serving grid
+            // to two 18x18 camera views at load time.
+            BindingConfig::Walloss(_) => 2 * 18 * 18,
+        }
     }
 
     fn patch_width(&self) -> usize {
-        3 * self.config.patch_size * self.config.patch_size
+        match &self.config {
+            BindingConfig::Pi05(config) => 3 * config.patch_size * config.patch_size,
+            BindingConfig::Walloss(config) => {
+                3 * config.vision.temporal_patch_size
+                    * config.vision.patch_size
+                    * config.vision.patch_size
+            }
+        }
+    }
+
+    fn action_shape(&self) -> [usize; 2] {
+        match &self.config {
+            BindingConfig::Pi05(config) => [config.action_horizon, config.action_dim],
+            BindingConfig::Walloss(config) => {
+                [config.action.action_horizon, config.action.action_dim]
+            }
+        }
+    }
+
+    fn max_token_len_value(&self) -> usize {
+        match &self.config {
+            BindingConfig::Pi05(config) => config.max_token_len,
+            BindingConfig::Walloss(config) => config.text.max_position_embeddings,
+        }
     }
 
     fn validate_tokens(&self, token_ids: &[u32]) -> PyResult<()> {
@@ -140,11 +184,12 @@ impl Model {
                 "apxinf_py.infer: token_ids must be non-empty",
             ));
         }
-        if token_ids.len() > self.config.max_token_len {
+        let max_token_len = self.max_token_len_value();
+        if token_ids.len() > max_token_len {
             return Err(PyValueError::new_err(format!(
                 "apxinf_py.infer: token_ids length {} exceeds max_token_len {}",
                 token_ids.len(),
-                self.config.max_token_len
+                max_token_len
             )));
         }
         Ok(())
@@ -153,7 +198,7 @@ impl Model {
     /// Validate `noise` shape and build a CPU f32 tensor. The runtime normalizes
     /// f32 CPU tensors to its input dtype, so numpy f32 is accepted directly.
     fn noise_tensor(&self, noise: PyReadonlyArray2<'_, f32>) -> PyResult<Tensor> {
-        let expected = [self.config.action_horizon, self.config.action_dim];
+        let expected = self.action_shape();
         let shape = noise.shape();
         if shape.len() != 2 || shape[0] != expected[0] || shape[1] != expected[1] {
             return Err(PyValueError::new_err(format!(
@@ -167,13 +212,27 @@ impl Model {
         Tensor::from_f32(Shape::new(vec![expected[0], expected[1]]), data).map_err(runtime_err)
     }
 
+    fn action_mask_tensor(&self, mask: PyReadonlyArray2<'_, f32>) -> PyResult<Tensor> {
+        let expected = self.action_shape();
+        let shape = mask.shape();
+        if shape != expected {
+            return Err(PyValueError::new_err(format!(
+                "apxinf_py.infer: action_mask expected shape {:?}, got {:?}",
+                expected, shape
+            )));
+        }
+        let data = mask.as_slice().map_err(|_| {
+            PyValueError::new_err("apxinf_py.infer: action_mask must be C-contiguous float32")
+        })?;
+        Tensor::from_f32(Shape::new(expected.to_vec()), data).map_err(runtime_err)
+    }
+
     fn action_array<'py>(
         &self,
         py: Python<'py>,
         flat: Vec<f32>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let horizon = self.config.action_horizon;
-        let dim = self.config.action_dim;
+        let [horizon, dim] = self.action_shape();
         if flat.len() != horizon * dim {
             return Err(PyRuntimeError::new_err(format!(
                 "apxinf_py.infer: model returned {} values, expected {} ({}x{})",
@@ -230,7 +289,7 @@ impl Model {
 
 #[pymethods]
 impl Model {
-    /// Load a pi05 checkpoint through the unified `AutoModel` frontend.
+    /// Load a VLA checkpoint through the unified `AutoModel` frontend.
     ///
     /// * `model` — model name, e.g. `"pi05"`.
     /// * `path` — checkpoint directory or index file.
@@ -271,6 +330,40 @@ impl Model {
         sampling_seed: u64,
     ) -> PyResult<Self> {
         let device = parse_device(device)?;
+        let is_walloss = matches!(
+            model.to_ascii_lowercase().as_str(),
+            "walloss" | "wall-oss" | "wall_oss_05"
+        );
+        if is_walloss {
+            if action_horizon.is_some() || num_views.is_some() {
+                return Err(PyValueError::new_err(
+                    "apxinf_py.load: WallOSS action_horizon/num_views are fixed by the runtime",
+                ));
+            }
+            let root = if path.is_dir() {
+                path.as_path()
+            } else {
+                path.parent().unwrap_or_else(|| Path::new("."))
+            };
+            let config =
+                WallossConfig::from_json_file(&root.join("config.json")).map_err(runtime_err)?;
+            let options = LoadOptions {
+                model_name: Some("walloss".to_owned()),
+                precision: parse_precision(precision)?,
+                calibration_path: calibration,
+                tuning_path: tactics,
+                ..LoadOptions::default()
+            };
+            let loaded = AutoModel::load_model(device, &path, &options).map_err(runtime_err)?;
+            return Ok(Self {
+                model: loaded,
+                config: BindingConfig::Walloss(config),
+                device,
+                sampling_seed: Cell::new(sampling_seed),
+                sampling_draw: Cell::new(0),
+            });
+        }
+
         let mut config = load_config(&path)?;
         // Only hand the loader an explicit config when the caller actually
         // overrode something; otherwise it reads `config.json` itself, exactly
@@ -317,7 +410,7 @@ impl Model {
         let loaded = AutoModel::load_model(device, &path, &options).map_err(runtime_err)?;
         Ok(Self {
             model: loaded,
-            config,
+            config: BindingConfig::Pi05(config),
             device,
             sampling_seed: Cell::new(sampling_seed),
             sampling_draw: Cell::new(0),
@@ -417,7 +510,7 @@ impl Model {
         let loaded = AutoModel::load_model(device, Path::new(""), &options).map_err(runtime_err)?;
         Ok(Self {
             model: loaded,
-            config,
+            config: BindingConfig::Pi05(config),
             device,
             sampling_seed: Cell::new(sampling_seed),
             sampling_draw: Cell::new(0),
@@ -434,13 +527,14 @@ impl Model {
     ///   uses the model's internal device-side sampling stream.
     ///
     /// Returns the normalized-domain action, `float32` `[action_horizon, action_dim]`.
-    #[pyo3(name = "_infer_patches", signature = (patches, token_ids, noise=None))]
+    #[pyo3(name = "_infer_patches", signature = (patches, token_ids, noise=None, action_mask=None))]
     fn infer_patches<'py>(
         &self,
         py: Python<'py>,
         patches: PyReadonlyArray2<'py, f32>,
         token_ids: PyReadonlyArray1<'py, u32>,
         noise: Option<PyReadonlyArray2<'py, f32>>,
+        action_mask: Option<PyReadonlyArray2<'py, f32>>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
         let expected = [self.patch_rows(), self.patch_width()];
         let shape = patches.shape();
@@ -470,7 +564,9 @@ impl Model {
             vision: VisionObservation::Patches(patch_tensor),
             token_ids: tokens,
             state: None,
-            action_mask: None,
+            action_mask: action_mask
+                .map(|value| self.action_mask_tensor(value))
+                .transpose()?,
         };
         match noise {
             Some(noise) => {
@@ -546,9 +642,9 @@ impl Model {
         token_ids: PyReadonlyArray1<'py, u32>,
         noise: Option<PyReadonlyArray2<'py, f32>>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let config = self.pi05_config("infer_rgb")?;
         let layout = parse_layout(layout)?;
-        let expected_bytes =
-            self.config.num_views * self.config.image_size * self.config.image_size * 3;
+        let expected_bytes = config.num_views * config.image_size * config.image_size * 3;
         let bytes = rgb_u8
             .as_slice()
             .map_err(|_| {
@@ -559,9 +655,9 @@ impl Model {
             return Err(PyValueError::new_err(format!(
                 "apxinf_py.infer_rgb: rgb_u8 expected {} bytes ({} views x {}x{}x3), got {}",
                 expected_bytes,
-                self.config.num_views,
-                self.config.image_size,
-                self.config.image_size,
+                config.num_views,
+                config.image_size,
+                config.image_size,
                 bytes.len()
             )));
         }
@@ -649,9 +745,9 @@ impl Model {
         sequence: u64,
         draw: u64,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let config = self.pi05_config("infer_rgb_seeded")?;
         let layout = parse_layout(layout)?;
-        let expected_bytes =
-            self.config.num_views * self.config.image_size * self.config.image_size * 3;
+        let expected_bytes = config.num_views * config.image_size * config.image_size * 3;
         let bytes = rgb_u8
             .as_slice()
             .map_err(|_| {
@@ -664,9 +760,9 @@ impl Model {
             return Err(PyValueError::new_err(format!(
                 "apxinf_py.infer_rgb_seeded: rgb_u8 expected {} bytes ({} views x {}x{}x3), got {}",
                 expected_bytes,
-                self.config.num_views,
-                self.config.image_size,
-                self.config.image_size,
+                config.num_views,
+                config.image_size,
+                config.image_size,
                 bytes.len()
             )));
         }
@@ -709,12 +805,12 @@ impl Model {
 
     #[getter]
     fn action_dim(&self) -> usize {
-        self.config.action_dim
+        self.action_shape()[1]
     }
 
     #[getter]
     fn action_horizon(&self) -> usize {
-        self.config.action_horizon
+        self.action_shape()[0]
     }
 
     #[getter]
@@ -729,40 +825,47 @@ impl Model {
 
     #[getter]
     fn num_views(&self) -> usize {
-        self.config.num_views
+        match &self.config {
+            BindingConfig::Pi05(config) => config.num_views,
+            BindingConfig::Walloss(_) => 2,
+        }
     }
 
     #[getter]
     fn image_size(&self) -> usize {
-        self.config.image_size
+        match &self.config {
+            BindingConfig::Pi05(config) => config.image_size,
+            BindingConfig::Walloss(config) => 18 * config.vision.patch_size,
+        }
     }
 
     #[getter]
     fn patch_size(&self) -> usize {
-        self.config.patch_size
+        match &self.config {
+            BindingConfig::Pi05(config) => config.patch_size,
+            BindingConfig::Walloss(config) => config.vision.patch_size,
+        }
     }
 
     #[getter]
     fn patches_per_view(&self) -> usize {
-        self.config.patches_per_view()
+        self.patch_rows() / self.num_views()
     }
 
     #[getter]
     fn max_token_len(&self) -> usize {
-        self.config.max_token_len
+        self.max_token_len_value()
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "Model(device={}, action=[{}, {}], flow_steps={}, flow_start={}, views={}, image={}, patch={})",
+            "Model(device={}, action=[{}, {}], views={}, image={}, patch={})",
             self.device(),
-            self.config.action_horizon,
-            self.config.action_dim,
-            self.config.num_flow_steps,
-            self.config.flow_start_time,
-            self.config.num_views,
-            self.config.image_size,
-            self.config.patch_size,
+            self.action_horizon(),
+            self.action_dim(),
+            self.num_views(),
+            self.image_size(),
+            self.patch_size(),
         )
     }
 }

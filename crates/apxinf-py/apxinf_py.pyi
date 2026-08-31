@@ -8,7 +8,7 @@ import numpy.typing as npt
 __version__: str
 
 class Model:
-    """A loaded pi05 model handle exposing L0/L1 bare-model inference."""
+    """A loaded VLA model handle exposing its bare-model inference contract."""
 
     @staticmethod
     def load(
@@ -35,13 +35,14 @@ class Model:
         """
         ...
 
-    def infer_patches(
+    def _infer_patches(
         self,
         patches: npt.NDArray[np.float32],
         token_ids: npt.NDArray[np.uint32],
-        noise: npt.NDArray[np.float32],
+        noise: npt.NDArray[np.float32] | None = ...,
+        action_mask: npt.NDArray[np.float32] | None = ...,
     ) -> npt.NDArray[np.float32]:
-        """L0: infer from pre-computed patches. Returns normalized-domain action."""
+        """Private L0 path used by model-specific policies and parity tests."""
         ...
 
     def infer_rgb(
