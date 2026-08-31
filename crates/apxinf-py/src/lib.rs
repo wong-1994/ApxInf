@@ -273,6 +273,15 @@ impl Model {
     /// * `autotune` — tune missing exact GEMM keys from the first real request.
     /// * `sampling_seed` — seed for the implicit device-side noise stream used
     ///   when inference is called without `noise`.
+    /// * `config_json` — the architecture, as a `config.json`-shaped string,
+    ///   for a checkpoint that has no `config.json`. An openpi PyTorch export
+    ///   never carries one: its constants live in `metadata.pt`, which the
+    ///   Python side reads (`apxinf.checkpoints`) and passes through here.
+    ///   Without it such a checkpoint silently loaded at `Pi05Config::default()`,
+    ///   so a chunk length or view count that differed from the default was
+    ///   wrong with no error anywhere. `None` keeps the old behaviour: read
+    ///   `config.json` from the checkpoint directory, else fall back to the
+    ///   default.
     /// * `action_horizon` — override the checkpoint's chunk length. `None`
     ///   (default) runs the native `config.json` value; an explicit value wins
     ///   over it. The horizon is a sequence length, not a weight dimension, so
@@ -287,7 +296,7 @@ impl Model {
     /// tokens per step. Nothing weight-shaped depends on the count; it only sizes
     /// the prefix, so this is a load-time constant, not a per-request one.
     #[staticmethod]
-    #[pyo3(signature = (model, path, device="cuda:0", precision="auto", calibration=None, tactics=None, autotune=false, action_horizon=None, num_views=None, num_flow_steps=None, flow_start_time=None, sampling_seed=0))]
+    #[pyo3(signature = (model, path, device="cuda:0", precision="auto", calibration=None, tactics=None, autotune=false, config_json=None, action_horizon=None, num_views=None, num_flow_steps=None, flow_start_time=None, sampling_seed=0))]
     fn load(
         model: &str,
         path: PathBuf,
@@ -296,6 +305,7 @@ impl Model {
         calibration: Option<PathBuf>,
         tactics: Option<PathBuf>,
         autotune: bool,
+        config_json: Option<&str>,
         action_horizon: Option<usize>,
         num_views: Option<usize>,
         num_flow_steps: Option<usize>,
@@ -303,16 +313,20 @@ impl Model {
         sampling_seed: u64,
     ) -> PyResult<Self> {
         let device = parse_device(device)?;
-        // These are PI0.5 deployment overrides. When absent, the binding does
-        // not inspect a concrete model config at all; AutoModel and the selected
-        // loader own detection and parsing. A non-PI0.5 loader rejects the
-        // explicit config below rather than being detected here by name.
-        let config = if action_horizon.is_some()
+        // These are PI0.5 deployment overrides. Unless one is present (including
+        // an architecture recovered from OpenPI metadata.pt), the binding does
+        // not inspect a concrete model config at all: AutoModel and the selected
+        // loader own detection and parsing, which keeps non-PI0.5 loaders viable.
+        let needs_pi05_config = config_json.is_some()
+            || action_horizon.is_some()
             || num_views.is_some()
             || num_flow_steps.is_some()
-            || flow_start_time.is_some()
-        {
-            let mut config = load_config(&path)?;
+            || flow_start_time.is_some();
+        let config = if needs_pi05_config {
+            let mut config = match config_json {
+                Some(raw) => Pi05Config::from_json_str(raw).map_err(runtime_err)?,
+                None => load_config(&path)?,
+            };
             if let Some(horizon) = action_horizon {
                 config.action_horizon = horizon;
             }
