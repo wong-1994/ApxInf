@@ -310,7 +310,7 @@ representative Observations:
 ```bash
 python3 scripts/calibrate_pi05.py \
   --model-dir <path-to-model> \
-  --manifest /path/to/observations.jsonl
+  --manifest <path-to-observations.jsonl>
 ```
 
 For the PI0.5 LIBERO checkpoint, generate one directly from the LeRobot LIBERO
