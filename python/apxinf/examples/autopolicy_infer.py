@@ -2,9 +2,9 @@
 """Minimal ``AutoPolicy`` example: dispatch a checkpoint by its config type.
 
 Shows the *generic* entry point — ``AutoPolicy`` reads ``config.json``'s model
-type and constructs the matching registered policy (``Pi05Policy`` today) without
-your code naming the class. Use this when the model type is data-driven; use
-``pi05policy_infer.py`` when you want model-specific knobs.
+type and constructs the matching registered policy without your code naming the
+class. Use this when the model type is data-driven; use a concrete policy example
+when you want model-specific knobs.
 
 Requires the ``apxinf_py`` CUDA binding (``maturin develop`` of crates/apxinf-py)
 and a checkpoint directory whose ``config.json`` names a registered model type.
@@ -27,8 +27,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-dir", required=True, type=pathlib.Path)
     parser.add_argument("--precision", choices=("auto", "fp8", "bf16", "int8"), default="bf16")
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--action-dim", type=int, default=7, help="0 keeps the full vector")
+    parser.add_argument(
+        "--action-dim",
+        type=int,
+        default=0,
+        help="deployable action width; 0 keeps the checkpoint's full vector",
+    )
     return parser.parse_args()
+
+
+def synthetic_observation_for(policy, *, prompt: str = "pick up the block"):
+    """Build a smoke input using only the public :class:`Policy` contract."""
+    try:
+        image_keys = policy.metadata["image_keys"]
+    except (AttributeError, KeyError) as error:
+        raise ValueError("policy metadata must declare image_keys") from error
+    if (
+        not isinstance(image_keys, (list, tuple))
+        or not image_keys
+        or not all(isinstance(key, str) and key for key in image_keys)
+    ):
+        raise ValueError(f"policy metadata image_keys must be non-empty strings, got {image_keys!r}")
+    return synthetic_observation(
+        image_keys=tuple(image_keys),
+        state_dim=policy.action_dim,
+        prompt=prompt,
+    )
 
 
 def main() -> None:
@@ -44,7 +68,7 @@ def main() -> None:
     try:
         print("dispatched model_type:", policy.metadata.get("model_type"))
 
-        observation = synthetic_observation(image_keys=policy.image_keys)
+        observation = synthetic_observation_for(policy)
         result = policy.infer(observation)
 
         actions = result["actions"]
