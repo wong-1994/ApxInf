@@ -23,13 +23,13 @@ Make sure you have ApxInf built and installed, see [Build ApxInf](#build-apxinf)
 Benchmarking PI-0.5 with randomly generated weights.
 
 ```bash
-python -m evaluation.benchmarks.pi05 --random-weights --precision bf16 --layer l1 \
+python -m evaluation.benchmarks.pi05 --random-weights --precision bf16 --interface model \
   --views 2 --token-count 10 --action-horizon 10 --num-flow-steps 10 \
   --warmup 10 --samples 100
 ```
 
 ```bash
-python -m evaluation.benchmarks.pi05 --random-weights --precision fp8 --layer l1 \
+python -m evaluation.benchmarks.pi05 --random-weights --precision fp8 --interface model \
   --views 2 --token-count 10 --action-horizon 10 --num-flow-steps 10
 ```
 
@@ -175,7 +175,7 @@ Confirm the binding imports and reaches the GPU:
 ```bash
 python -c 'import apxinf_py; print(apxinf_py.__version__)'
 python -m evaluation.benchmarks.pi05 \
-  --random-weights --precision bf16 --layer l1 --samples 5
+  --random-weights --precision bf16 --interface model --samples 5
 ```
 
 Needs a Linux host with an NVIDIA driver and a CUDA toolkit plus a stable Rust
@@ -432,12 +432,12 @@ can be attributed to the engine, the processors, or the transport.
 
 ```bash
 python -m evaluation.benchmarks.pi05 \
-  --model-dir <path-to-model> --precision bf16 --layer l1,l2
+  --model-dir <path-to-model> --precision bf16 --interface model,policy
 ```
 
-- `--layer` selects any subset of `l0` (engine floor), `l1` (RGB/PyO3 path),
-  `l2` (full policy), and `l3` (websocket round trip). L3 attaches to a running
-  server and needs no local weights.
+- `--interface` selects any subset of `model` (`Model.infer_rgb`), `policy`
+  (`Pi05Policy.infer`), and `websocket` (round trip). The websocket interface
+  attaches to a running server and needs no local weights.
 - `--model-dir` runs a real checkpoint at its native horizon; `--random-weights`
   runs the engine with no checkpoint on disk, and the shape knobs (`--views`,
   `--image-size`, `--action-horizon`, `--num-flow-steps`, `--token-count`)
@@ -449,12 +449,6 @@ python -m evaluation.benchmarks.pi05 \
   comparable to a synthetic run.
 - `--warmup` / `--samples` set the sampling protocol (default 10 and 30);
   `--out` writes the report as JSON.
-
-This benchmark is PI0.5-specific: its layer seams, synthetic shapes, tactics,
-prompts, and L2 policy construction all target `Pi05Policy`. Other model
-families should provide their own module under `evaluation/benchmarks/` while
-sharing only model-neutral reporting helpers.
-
 
 ## NVIDIA build environment
 

@@ -1,12 +1,7 @@
 # Evaluation
 
-Repository-local accuracy and performance evaluation tooling lives here. It is
-not installed as part of the `apxinf` Python package.
-
-Use this directory for reproducible evaluations that define a workload, collect
-comparable metrics, and usually have their own datasets, simulators, fixtures,
-or optional dependencies. Keep one-off debugging, conversion, and profiling
-helpers in `scripts/`.
+Accuracy and performance evaluation tools for source checkouts. Run these
+commands from the repository root.
 
 ## LIBERO accuracy
 
@@ -52,15 +47,11 @@ python -m evaluation.libero.eval \
 
 ## Performance benchmarks
 
-Stable benchmarks that produce comparable latency, throughput, memory, or
-kernel metrics belong under `evaluation/benchmarks/`. Ad-hoc profiler launchers
-and result-inspection helpers remain under `scripts/`.
-
-Run the layered PI0.5 benchmark with:
+Run the PI0.5 benchmark with:
 
 ```bash
 python -m evaluation.benchmarks.pi05 \
   --model-dir /path/to/checkpoint \
   --precision bf16 \
-  --layer l1,l2
+  --interface model,policy
 ```

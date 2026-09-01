@@ -45,16 +45,6 @@ python scripts/pi05_openpi_websocket_server.py \
     --host 0.0.0.0 --port 8000
 ```
 
-This is currently a repository launcher, not an installed console command:
-`python/apxinf/pyproject.toml` does not publish a `[project.scripts]` entry, so
-commands such as `apxinf-serve` are not available today. Keeping this thin
-launcher in `scripts/` is appropriate for repository development and deployment
-experiments. If serving becomes a supported installed product interface, move
-the argument parsing and policy construction under the `apxinf` package, expose
-an `apxinf serve` (or `apxinf-serve`) entry point, and retain this file only as a
-compatibility wrapper. The reusable server implementation already lives in
-`apxinf.serving`; it should not move back into a script.
-
 - `--robot` is the one flag that decides **which keys the client must send**. It
   is openpi's `serve_policy.py --policy.config <TrainConfig>` equivalent: the
   embodiment is fixed at startup and the client cannot negotiate it. A checkpoint
@@ -153,9 +143,7 @@ python -m evaluation.libero.client \
 
 ### Form B — split: client on an x86 sim box, server remote
 
-Decouple via websocket: keep the fragile sim stack on a machine that already runs
-LIBERO, and let the engine host be inference-only — the production-shaped call
-pattern (robot/sim on one end, engine on the other).
+Run the simulator on a separate machine and connect it to the inference server:
 
 ```bash
 # server host: start with --host 0.0.0.0 (see §2)
