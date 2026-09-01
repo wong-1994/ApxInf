@@ -307,36 +307,34 @@ policy = AutoPolicy.from_pretrained(
 The calibration is per-tensor activation scales from a calibration sweep and
 decides accuracy; `uniform:SCALE` is a flat stand-in for latency work only.
 
-Generate one with ApxInf's native BF16 eager collector. Each input is an NPZ
-containing the same business Observation fields used for inference: configured
-camera keys such as `observation/image`, a string `prompt`, and (when enabled)
-`observation/state`. Image resizing, view stacking, state normalization,
-tokenization, and deterministic calibration noise all run through the normal
-`Pi05Policy` preprocessing path; callers never build `rgb`, `token_ids`, or
-`noise` tensors.
+Generate one directly from a representative LeRobot dataset. ApxInf selects a
+deterministic task-balanced subset (one sample per task by default), adapts each
+record to the normal business Observation, and runs the native BF16 collector
+through `Pi05Policy` preprocessing:
 
 ```bash
 python3 scripts/calibrate_pi05.py \
   --model-dir "$APXINF_MODEL_DIR" \
-  --input /path/to/calibration-sample-000.npz \
-  --input /path/to/calibration-sample-001.npz \
-  --output "${APXINF_MODEL_DIR}/calibration.json" --margin 1.1
+  --dataset organization/deployment-dataset \
+  --dataset-root /optional/local/dataset/root
 ```
 
-Use the same policy-shaping flags as deployment for non-default checkpoints,
-including repeated `--image-key`, `--num-views`, `--prompt-key`, `--state-key`,
-`--discrete-state`, `--state-norm-key`, `--tokenizer-path`, and
-`--action-horizon`. Released installations without Git metadata must also pass
-`--source-revision` so provenance never degrades to an unknown value.
+`--samples N` overrides the balanced sample count and
+`--output PATH` overrides the default `<model-dir>/calibration.json`. For an
+offline or exactly replayable run, use `--input-dir DIR` with Observation NPZs;
+repeated `--input FILE` remains supported for existing automation. NPZs contain
+the same camera, prompt, and optional state fields used by inference, never
+preprocessed `rgb`, `token_ids`, or `noise` tensors.
 
 The output is a self-describing, checkpoint-bound profile whose logical site set
 must exactly match the FP8 execution plan before inference can start. Existing
 outputs are protected unless `--force` is passed. For a smoke-only bootstrap,
-replace the `--input` flags with `--zero-fixture`; the manifest labels that
+replace the dataset with `--zero-fixture`; the manifest labels that
 profile synthetic and non-production so it cannot be mistaken for representative
-calibration. Calibration and tactic tuning remain separate workflows.
+calibration. Calibration and tactic tuning remain separate operations.
 
-Validate two independent runs on the deployment GPU before shipping a profile:
+Maintainers can run the stricter reproducibility, BF16/FP8 accuracy, and timing
+release gate with two independently generated profiles:
 
 ```bash
 python3 scripts/validate_pi05_calibration.py \
@@ -349,22 +347,10 @@ python3 scripts/validate_pi05_calibration.py \
   --out /path/to/thor-validation.json
 ```
 
-The validator loads BF16 and FP8 in separate processes because CUDA tactic
-stores are process-global. It requires equivalent manifests (ignoring only the
-declared `device` metadata), exact required/observed/generated site coverage,
-and an FP8 runtime load before comparing aligned explicit-noise business
-actions. The JSON contains raw actions and latency samples as well as aggregates.
-
-The Thor validation in [PI0.5 FP8 calibration on Thor](doc/pi05-fp8-calibration-thor.md)
-supports `absmax`, margin `1.1`, and the deterministic
-`numpy-pcg64-seed-sequence-v1` policy for its stated LIBERO fixture. Sixteen
-task-stratified observations are the validated lower bound, **not** a universal
-sample-count default: 8→16 samples still increased 103 of 256 site maxima.
-Production datasets must represent the deployed task, camera, and prompt
-distributions (plus state when state injection is enabled) and should be enlarged
-until per-site statistics and held-out business-output accuracy stabilize. Set
-the accuracy threshold from the product contract; `0.20` relative L2 is the
-explicit gate used by that Thor run.
+See [PI0.5 FP8 calibration on Thor](doc/pi05-fp8-calibration-thor.md) and the
+[LIBERO-10 sample sweep](doc/pi05-fp8-calibration-libero10.md) for the evidence
+behind the current `absmax`, margin `1.1`, and accuracy-gate choices. Sample
+count and acceptance thresholds remain deployment-specific.
 
 ### INT8
 

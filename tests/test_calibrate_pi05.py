@@ -11,7 +11,194 @@ from scripts import calibrate_pi05
 
 
 class CalibratePi05Test(unittest.TestCase):
-    def test_unified_workflow_maps_observation_to_manifest(self):
+    def test_task_stratified_indices_cover_tasks_before_repeating(self):
+        indices = calibrate_pi05.task_stratified_indices(
+            [0, 0, 0, 1, 1, 2], sample_count=5, seed=7
+        )
+
+        self.assertEqual(len(indices), 5)
+        selected_tasks = [
+            [0, 0, 0, 1, 1, 2][index]
+            for index in indices
+        ]
+        self.assertEqual(set(selected_tasks[:3]), {0, 1, 2})
+        self.assertLessEqual(max(selected_tasks.count(task) for task in set(selected_tasks)), 2)
+
+    def test_dataset_mode_loads_lerobot_records_without_npz_export(self):
+        class MetadataColumn:
+            def __init__(self):
+                self.values = [0, 0, 1, 1]
+
+            def __getitem__(self, name):
+                if name != "task_index":
+                    raise KeyError(name)
+                return self.values
+
+        class Dataset:
+            repo_id = "company/libero"
+            revision = "v3.0"
+            hf_dataset = MetadataColumn()
+
+            def __len__(self):
+                return 4
+
+            def __getitem__(self, index):
+                return {
+                    "observation.images.base_0_rgb": np.full(
+                        (3, 4, 3), index, dtype=np.uint8
+                    ),
+                    "observation.images.left_wrist_0_rgb": np.full(
+                        (3, 4, 3), index + 10, dtype=np.uint8
+                    ),
+                    "observation.state": np.arange(8, dtype=np.float32),
+                    "task": f"task {index // 2}",
+                }
+
+        class Policy:
+            image_keys = ("observation/image", "observation/wrist_image")
+
+        args = calibrate_pi05.parse_args(
+            [
+                "--model-dir",
+                "/model",
+                "--dataset",
+                "company/libero",
+                "--samples",
+                "2",
+            ]
+        )
+        with mock.patch.object(
+            calibrate_pi05, "_open_lerobot_dataset", return_value=Dataset()
+        ):
+            observations, identity = calibrate_pi05.resolve_observations(args, Policy())
+
+        self.assertEqual(len(observations), 2)
+        self.assertEqual({observation["prompt"] for observation in observations}, {"task 0", "task 1"})
+        self.assertTrue(identity.startswith("sha256:"))
+        self.assertEqual(
+            set(observations[0]),
+            {
+                "observation/image",
+                "observation/wrist_image",
+                "observation/state",
+                "prompt",
+            },
+        )
+
+    def test_dataset_without_task_metadata_requires_explicit_sample_count(self):
+        class Dataset:
+            def __len__(self):
+                return 4
+
+        class Policy:
+            image_keys = ("observation/image",)
+
+        args = calibrate_pi05.parse_args(
+            ["--model-dir", "/model", "--dataset", "company/unlabeled"]
+        )
+        with mock.patch.object(
+            calibrate_pi05, "_open_lerobot_dataset", return_value=Dataset()
+        ):
+            with self.assertRaisesRegex(ValueError, "no task_index.*--samples"):
+                calibrate_pi05.resolve_observations(args, Policy())
+
+    def test_input_directory_expands_npz_files_in_stable_order(self):
+        class Policy:
+            image_keys = ("observation/image",)
+            prompt_key = "prompt"
+            state_key = "observation/state"
+            discrete_state = False
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for name, prompt in (("sample-010.npz", "ten"), ("sample-002.npz", "two")):
+                np.savez(
+                    root / name,
+                    **{
+                        "observation/image": np.zeros((2, 2, 3), np.uint8),
+                        "prompt": np.asarray(prompt),
+                    },
+                )
+            args = calibrate_pi05.parse_args(
+                ["--model-dir", directory, "--input-dir", directory]
+            )
+            observations, identity = calibrate_pi05.resolve_observations(args, Policy())
+
+        self.assertEqual([item["prompt"] for item in observations], ["two", "ten"])
+        self.assertTrue(identity.startswith("sha256:"))
+
+    def test_calibration_job_consumes_dataset_source_end_to_end(self):
+        class Dataset:
+            hf_dataset = {"task_index": [0, 1]}
+
+            def __len__(self):
+                return 2
+
+            def __getitem__(self, index):
+                return {
+                    "observation.images.base": np.full(
+                        (2, 2, 3), index, dtype=np.uint8
+                    ),
+                    "task": f"task {index}",
+                }
+
+        class Model:
+            image_size = 2
+            action_horizon = 2
+            action_dim = 3
+
+        class Policy:
+            model = Model()
+            image_keys = ("observation/image",)
+            prompt_key = "prompt"
+            state_key = "observation/state"
+            discrete_state = False
+
+            def calibration_plan(self):
+                return CalibrationPlan.runtime_validated_sites(
+                    model_family="pi05",
+                    sites=("vision.patch_input",),
+                    schema=calibrate_pi05.SCHEMA,
+                    seed_algorithm="numpy-pcg64-seed-sequence-v1",
+                )
+
+            def collect_calibration(self, observation, context):
+                return {"vision.patch_input": float(context.sample_index + 1)}
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "model.safetensors").write_bytes(b"weights")
+            output = root / "profile.json"
+            args = calibrate_pi05.parse_args(
+                [
+                    "--model-dir",
+                    str(root),
+                    "--dataset",
+                    "company/libero",
+                    "--output",
+                    str(output),
+                    "--source-revision",
+                    "test-revision",
+                ]
+            )
+            with mock.patch.object(
+                calibrate_pi05, "_open_lerobot_dataset", return_value=Dataset()
+            ):
+                result = calibrate_pi05.Pi05CalibrationJob(
+                    args, policy_factory=lambda *_args, **_kwargs: Policy()
+                ).run()
+
+            document = json.loads(output.read_text())
+
+        self.assertEqual(result.output, output)
+        self.assertEqual(document["calibration_data"]["sample_count"], 2)
+        self.assertTrue(document["calibration_data"]["identity"].startswith("sha256:"))
+        self.assertEqual(document["scales"]["vision.patch_input"]["amax"], 2.0)
+
+    def test_calibration_job_maps_observation_to_manifest(self):
         import apxinf
 
         class Model:
