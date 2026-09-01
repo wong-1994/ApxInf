@@ -285,12 +285,14 @@ policy = AutoPolicy.from_pretrained("<path-to-model>", precision="bf16")
 Thor only, where it is the fastest path. Orin has no FP8 Tensor Cores and is not
 supported.
 
-FP8 needs per-tensor activation scales. A `calibration.json` in the checkpoint
-directory is picked up automatically:
+FP8 needs per-tensor activation scales. Pass the calibration generated for the
+deployment data explicitly; when omitted, ApxInf falls back to
+`<path-to-model>/calibration.json`:
 
 ```bash
 python scripts/pi05_openpi_websocket_server.py \
   --model-dir <path-to-model> --robot franka_libero --precision fp8 \
+  --calibration <path-to-calibration.json> \
   --port 8000
 ```
 
@@ -298,6 +300,7 @@ python scripts/pi05_openpi_websocket_server.py \
 policy = AutoPolicy.from_pretrained(
     "<path-to-model>",
     precision="fp8",
+    calibration="<path-to-calibration.json>",
 )
 ```
 
