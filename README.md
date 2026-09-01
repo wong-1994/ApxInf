@@ -309,7 +309,7 @@ representative Observations:
 
 ```bash
 python3 scripts/calibrate_pi05.py \
-  --model-dir "$APXINF_MODEL_DIR" \
+  --model-dir <path-to-model> \
   --manifest /path/to/observations.jsonl
 ```
 
@@ -320,7 +320,7 @@ dataset:
 pip install lerobot
 
 python3 scripts/calibrate_pi05.py \
-  --model-dir "$APXINF_MODEL_DIR" \
+  --model-dir <path-to-model> \
   --dataset lerobot/libero
 ```
 
