@@ -345,7 +345,7 @@ impl Model {
             } else {
                 path.parent().unwrap_or_else(|| Path::new("."))
             };
-            let config =
+            let mut config =
                 WallossConfig::from_json_file(&root.join("config.json")).map_err(runtime_err)?;
             let options = LoadOptions {
                 model_name: Some("walloss".to_owned()),
@@ -355,6 +355,10 @@ impl Model {
                 ..LoadOptions::default()
             };
             let loaded = AutoModel::load_model(device, &path, &options).map_err(runtime_err)?;
+            let [action_horizon, action_dim] = loaded.vla().map_err(runtime_err)?.action_shape();
+            config.action.action_horizon = action_horizon;
+            config.action.action_dim = action_dim;
+            config.action.proprio_dim = action_dim;
             return Ok(Self {
                 model: loaded,
                 config: BindingConfig::Walloss(config),

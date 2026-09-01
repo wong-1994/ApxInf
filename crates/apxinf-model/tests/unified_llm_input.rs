@@ -77,6 +77,10 @@ fn load_generation_config_test_model(
 struct DummyVlaModel;
 
 impl VlaRuntime for DummyVlaModel {
+    fn action_shape(&self) -> [usize; 2] {
+        [1, 1]
+    }
+
     fn infer(&self, _request: &VlaRequest<'_>) -> Result<Action> {
         unreachable!("generation-config routing test does not run VLA inference")
     }

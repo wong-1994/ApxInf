@@ -668,6 +668,13 @@ impl WallossBf16Runtime {
 }
 
 impl VlaRuntime for WallossBf16Runtime {
+    fn action_shape(&self) -> [usize; 2] {
+        [
+            self.config.action.action_horizon,
+            self.config.action.action_dim,
+        ]
+    }
+
     fn infer(&self, request: &VlaRequest<'_>) -> Result<Action> {
         let spec = request.observation.inference_spec();
         let prepared = {

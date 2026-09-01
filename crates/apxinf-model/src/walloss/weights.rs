@@ -93,6 +93,14 @@ impl WallossWeights {
         }
         // Added control tokens make the tensor shape authoritative.
         config.text.vocab_size = embedding_shape[0];
+        // Published WallOSS checkpoints do not consistently serialize the
+        // native action width in config.json. The output projection is the
+        // architecture boundary: [action_dim, action_hidden_size]. Validate
+        // the paired action+DoF input projection and make those weight shapes
+        // authoritative before any action buffers are allocated.
+        let action_dim = checkpoint_action_dim(&tensors, config.action.hidden_size)?;
+        config.action.action_dim = action_dim;
+        config.action.proprio_dim = action_dim;
 
         let q_width = config.text.num_attention_heads * config.text.head_dim;
         let kv_width = config.text.num_kv_heads * config.text.head_dim;
@@ -393,6 +401,39 @@ fn load_action(
     })
 }
 
+fn checkpoint_action_dim(
+    tensors: &HashMap<String, Tensor>,
+    action_hidden_size: usize,
+) -> Result<usize> {
+    let output = tensors
+        .get("action_preprocessor.action_proj_back.weight")
+        .ok_or_else(|| {
+            Error::Other(
+                "walloss checkpoint: missing action_preprocessor.action_proj_back.weight".into(),
+            )
+        })?;
+    expect_rank(output, 2, "velocity projection")?;
+    let output_shape = output.shape().dims();
+    let action_dim = output_shape[0];
+    if action_dim == 0 || output_shape[1] != action_hidden_size {
+        return Err(Error::Other(format!(
+            "walloss checkpoint: velocity projection has shape {output_shape:?}, expected [action_dim, {action_hidden_size}]"
+        )));
+    }
+
+    let input = tensors
+        .get("action_preprocessor.w1.weight")
+        .ok_or_else(|| {
+            Error::Other("walloss checkpoint: missing action_preprocessor.w1.weight".into())
+        })?;
+    expect_shape(
+        input,
+        &[action_hidden_size, 2 * action_dim],
+        "noisy action projection",
+    )?;
+    Ok(action_dim)
+}
+
 fn take(tensors: &mut HashMap<String, Tensor>, name: &str) -> Result<Tensor> {
     tensors
         .remove(name)
@@ -529,5 +570,45 @@ fn to_bf16(tensor: &Tensor) -> Result<Tensor> {
         dtype => Err(Error::Other(format!(
             "walloss checkpoint: cannot convert {dtype} action weight to BF16"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn action_tensors(action_dim: usize, hidden_size: usize) -> HashMap<String, Tensor> {
+        HashMap::from([
+            (
+                "action_preprocessor.action_proj_back.weight".to_owned(),
+                Tensor::zeros((action_dim, hidden_size), DType::BF16),
+            ),
+            (
+                "action_preprocessor.w1.weight".to_owned(),
+                Tensor::zeros((hidden_size, 2 * action_dim), DType::BF16),
+            ),
+        ])
+    }
+
+    #[test]
+    fn derives_native_action_width_from_checkpoint_projections() {
+        assert_eq!(
+            checkpoint_action_dim(&action_tensors(7, 1024), 1024).unwrap(),
+            7
+        );
+        assert_eq!(
+            checkpoint_action_dim(&action_tensors(26, 1024), 1024).unwrap(),
+            26
+        );
+    }
+
+    #[test]
+    fn rejects_inconsistent_action_and_mask_projection_width() {
+        let mut tensors = action_tensors(7, 1024);
+        tensors.insert(
+            "action_preprocessor.w1.weight".to_owned(),
+            Tensor::zeros((1024, 15), DType::BF16),
+        );
+        assert!(checkpoint_action_dim(&tensors, 1024).is_err());
     }
 }

@@ -661,6 +661,10 @@ impl Pi05VlaRuntime {
 }
 
 impl VlaRuntime for Pi05VlaRuntime {
+    fn action_shape(&self) -> [usize; 2] {
+        [self.config.action_horizon, self.config.action_dim]
+    }
+
     fn infer(&self, request: &VlaRequest<'_>) -> Result<Action> {
         let observation = request.observation;
         observation.validate()?;

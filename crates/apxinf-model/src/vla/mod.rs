@@ -144,6 +144,9 @@ pub trait PreparedInference {
 /// The boxed return keeps this trait object-safe so `LoadedModel::Vla` can
 /// directly hold heterogeneous model runtimes.
 pub trait VlaRuntime {
+    /// Native action tensor shape produced by this loaded checkpoint.
+    fn action_shape(&self) -> [usize; 2];
+
     fn infer(&self, request: &VlaRequest<'_>) -> Result<Action>;
     fn prepare(&self, spec: &InferenceSpec) -> Result<Box<dyn PreparedInference>>;
 
