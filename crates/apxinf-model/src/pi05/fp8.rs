@@ -265,7 +265,10 @@ impl StaticFp8Calibration {
         let mut warnings = Vec::new();
         if profile.model.checkpoint != checkpoint {
             warnings.push(format!(
-                "π0.5 FP8 calibration checkpoint identity mismatch: profile={}, runtime={}; continuing with the supplied profile",
+                concat!(
+                    "π0.5 FP8 calibration checkpoint identity mismatch: ",
+                    "profile={}, runtime={}; continuing with the supplied profile"
+                ),
                 profile.model.checkpoint, checkpoint
             ));
         }
