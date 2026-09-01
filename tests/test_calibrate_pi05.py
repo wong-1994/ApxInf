@@ -232,17 +232,27 @@ class CalibratePi05Test(unittest.TestCase):
             )
             with mock.patch.object(
                 pi05_calibration_data, "_open_lerobot_dataset", return_value=Dataset()
-            ):
+            ), mock.patch.object(calibrate_pi05, "_progress") as progress:
                 result = calibrate_pi05.run_from_args(
                     args, policy_factory=lambda *_args, **_kwargs: Policy()
                 )
 
             document = json.loads(output.read_text())
+            progress_messages = [call.args[0] for call in progress.call_args_list]
 
         self.assertEqual(result.output, output)
         self.assertEqual(document["calibration_data"]["sample_count"], 2)
         self.assertTrue(document["calibration_data"]["identity"].startswith("sha256:"))
         self.assertEqual(document["scales"]["vision.patch_input"]["amax"], 2.0)
+        self.assertIn(
+            "Hashing the checkpoint for profile identity (this reads all weight files)...",
+            progress_messages,
+        )
+        self.assertIn(
+            "Running eager BF16 calibration over 2 observation(s)...",
+            progress_messages,
+        )
+        self.assertEqual(progress_messages[-1], "Calibration profile written.")
 
     def test_calibration_job_accepts_observation_iterable_without_source_adapter(self):
         class Policy:

@@ -13,6 +13,7 @@ import pathlib
 import platform
 import subprocess
 import sys
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -23,6 +24,10 @@ if _APXINF_PKG.is_dir() and str(_APXINF_PKG) not in sys.path:
     sys.path.insert(0, str(_APXINF_PKG))
 
 SCHEMA = "apxinf.pi05.fp8-calibration.v1"
+
+
+def _progress(message: str) -> None:
+    print(f"[calibration] {message}", file=sys.stderr, flush=True)
 
 if __package__:
     from .pi05_calibration_data import (
@@ -359,11 +364,20 @@ class CalibrationJobResult:
 class Pi05CalibrationJob:
     """Turn model-native Observations into one PI0.5 calibration profile."""
 
-    def __init__(self, args, *, policy, output: pathlib.Path, checkpoint: pathlib.Path):
+    def __init__(
+        self,
+        args,
+        *,
+        policy,
+        output: pathlib.Path,
+        checkpoint: pathlib.Path,
+        progress: Optional[Callable[[str], None]] = None,
+    ):
         self.args = args
         self.policy = policy
         self.output = output
         self.checkpoint = checkpoint
+        self.progress = progress or (lambda _message: None)
 
     def run(
         self,
@@ -375,6 +389,7 @@ class Pi05CalibrationJob:
         args = self.args
         from apxinf.calibration import CalibrationRunner
 
+        self.progress("Resolving the FP8 calibration execution plan...")
         plan = self.policy.calibration_plan()
         if bootstrap:
             plan = replace(
@@ -384,10 +399,16 @@ class Pi05CalibrationJob:
                     "action.input": 5.0 / args.margin,
                 },
             )
+        self.progress(
+            "Hashing the checkpoint for profile identity "
+            "(this reads all weight files)..."
+        )
+        checkpoint = checkpoint_identity(self.checkpoint)
+        self.progress("Checkpoint identity complete.")
         runner = CalibrationRunner(
             self.policy,
             plan,
-            checkpoint=checkpoint_identity(self.checkpoint),
+            checkpoint=checkpoint,
             data_identity=data_identity,
             source_revision=source_revision(args.source_revision),
             device={"requested": args.device, "host": platform.platform()},
@@ -395,11 +416,17 @@ class Pi05CalibrationJob:
             seed=args.seed,
             bootstrap=bootstrap,
         )
+        sample_count = len(observations) if isinstance(observations, Sequence) else None
+        count = f" over {sample_count} observation(s)" if sample_count is not None else ""
+        self.progress(f"Running eager BF16 calibration{count}...")
         document = runner.run(observations)
+        self.progress("Calibration sweep complete.")
 
         if document is None:
             return CalibrationJobResult(document=None, output=None)
+        self.progress(f"Writing calibration profile to {self.output}...")
         write_profile(self.output, document, force=args.force)
+        self.progress("Calibration profile written.")
         return CalibrationJobResult(document=document, output=self.output)
 
 
@@ -431,14 +458,19 @@ def _load_policy(args, checkpoint: pathlib.Path, policy_factory=None):
 def run_from_args(args, *, policy_factory=None) -> CalibrationJobResult:
     """CLI adapter: resolve one storage source, then cross the job seam."""
     output, checkpoint = validate_args(args)
+    _progress(f"Loading the BF16 model from {checkpoint}...")
     policy = _load_policy(args, checkpoint, policy_factory)
+    _progress("BF16 model loaded.")
     try:
+        _progress("Loading calibration observations...")
         observations, inferred_identity = resolve_observations(args, policy)
+        _progress(f"Loaded {len(observations)} observation(s).")
         return Pi05CalibrationJob(
             args,
             policy=policy,
             output=output,
             checkpoint=checkpoint,
+            progress=_progress,
         ).run(
             observations,
             data_identity=args.data_id or inferred_identity,
