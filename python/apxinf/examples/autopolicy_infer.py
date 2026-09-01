@@ -3,13 +3,13 @@
 
 Shows the *generic* entry point — ``AutoPolicy`` reads ``config.json``'s model
 type and constructs the matching registered policy without your code naming the
-class. Use this when the model type is data-driven; use a concrete policy example
-when you want model-specific knobs.
+class. Model-specific constructor options can be passed as one JSON object.
 
 Requires the ``apxinf_py`` CUDA binding (``maturin develop`` of crates/apxinf-py)
 and a checkpoint directory whose ``config.json`` names a registered model type.
 
-    python examples/autopolicy_infer.py --model-dir /path/to/checkpoint
+    python examples/autopolicy_infer.py --model-dir /path/to/checkpoint \
+        --policy-options '{"norm_key":"x2_normal"}'
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 
-from _common import synthetic_observation  # noqa: E402 (path shim in _common)
+from _common import json_object, policy_kwargs, synthetic_observation  # noqa: E402
 
 from apxinf import AutoPolicy
 
@@ -32,6 +32,13 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="deployable action width; 0 keeps the checkpoint's full vector",
+    )
+    parser.add_argument(
+        "--policy-options",
+        type=json_object,
+        default={},
+        metavar="JSON",
+        help="extra concrete-policy options as a JSON object",
     )
     return parser.parse_args()
 
@@ -59,12 +66,13 @@ def main() -> None:
     args = parse_args()
 
     # Generic construction: model type comes from config.json, not from code.
-    policy = AutoPolicy.from_pretrained(
-        args.model_dir,
+    options = policy_kwargs(
+        args.policy_options,
         device=args.device,
         precision=args.precision,
-        action_dim=(args.action_dim or None),
+        action_dim=args.action_dim,
     )
+    policy = AutoPolicy.from_pretrained(args.model_dir, **options)
     try:
         print("dispatched model_type:", policy.metadata.get("model_type"))
 

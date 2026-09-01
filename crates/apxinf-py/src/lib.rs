@@ -133,7 +133,7 @@ pub struct Model {
 }
 
 impl Model {
-    fn pi05_config(&self, method: &str) -> PyResult<&Pi05Config> {
+    fn require_pi05_rgb_config(&self, method: &str) -> PyResult<&Pi05Config> {
         match &self.config {
             BindingConfig::Pi05(config) => Ok(config),
             BindingConfig::Walloss(_) => Err(PyValueError::new_err(format!(
@@ -642,7 +642,7 @@ impl Model {
         token_ids: PyReadonlyArray1<'py, u32>,
         noise: Option<PyReadonlyArray2<'py, f32>>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let config = self.pi05_config("infer_rgb")?;
+        let config = self.require_pi05_rgb_config("infer_rgb")?;
         let layout = parse_layout(layout)?;
         let expected_bytes = config.num_views * config.image_size * config.image_size * 3;
         let bytes = rgb_u8
@@ -745,7 +745,7 @@ impl Model {
         sequence: u64,
         draw: u64,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let config = self.pi05_config("infer_rgb_seeded")?;
+        let config = self.require_pi05_rgb_config("infer_rgb_seeded")?;
         let layout = parse_layout(layout)?;
         let expected_bytes = config.num_views * config.image_size * config.image_size * 3;
         let bytes = rgb_u8

@@ -51,9 +51,42 @@ def test_autopolicy_example_rejects_missing_or_invalid_image_contract(image_keys
         example.synthetic_observation_for(BadPolicy())
 
 
-def test_walloss_example_requires_exactly_two_camera_entries():
-    example = _load_example("walloss_policy_infer")
+def test_common_policy_options_accept_a_json_object():
+    common = _load_example("_common")
 
-    assert example._csv("front,wrist") == ("front", "wrist")
-    with pytest.raises(argparse.ArgumentTypeError, match="exactly two"):
-        example._csv("front")
+    assert common.json_object('{"norm_key":"x2_normal","image_keys":["front","wrist"]}') == {
+        "norm_key": "x2_normal",
+        "image_keys": ["front", "wrist"],
+    }
+
+
+def test_common_policy_options_keep_model_knobs_and_protect_generic_flags():
+    common = _load_example("_common")
+
+    options = common.policy_kwargs(
+        {
+            "norm_key": "x2_normal",
+            "device": "wrong",
+            "metadata": {"deployment": "lab", "protocol": "wrong"},
+        },
+        device="cuda:1",
+        precision="fp8",
+        action_dim=7,
+        metadata={"protocol": "openpi.websocket_policy"},
+    )
+
+    assert options == {
+        "norm_key": "x2_normal",
+        "device": "cuda:1",
+        "precision": "fp8",
+        "action_dim": 7,
+        "metadata": {"deployment": "lab", "protocol": "openpi.websocket_policy"},
+    }
+
+
+@pytest.mark.parametrize("value", ["[]", '"walloss"', "not-json"])
+def test_common_policy_options_reject_non_objects(value):
+    common = _load_example("_common")
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        common.json_object(value)

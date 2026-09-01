@@ -381,9 +381,9 @@ pip install 'apxinf[walloss,serving]'
 The in-process Python API accepts the same observation dict as the server:
 
 ```python
-from apxinf import WallossPolicy
+from apxinf import AutoPolicy
 
-policy = WallossPolicy.from_pretrained(
+policy = AutoPolicy.from_pretrained(
     "/path/to/wall-oss-0.5", norm_key="x2_normal", action_dim=7,
 )
 result = policy.infer({
@@ -398,12 +398,15 @@ actions = result["actions"]  # float32 [10, 7]
 To expose the same policy over WebSocket:
 
 ```bash
-python python/apxinf/examples/walloss_openpi_websocket_server.py \
-  --model-dir /path/to/wall-oss-0.5 --norm-key x2_normal --action-dim 7
+python python/apxinf/examples/openpi_server.py \
+  --model-dir /path/to/wall-oss-0.5 \
+  --action-dim 7 \
+  --policy-options '{"norm_key":"x2_normal"}'
 ```
 
-Pass `--tactics /path/to/tactics.json` to override a checkpoint-local tuning
-database, for example after generating tactics for a newer kernel build.
+Add `"tactics":"/path/to/tactics.json"` to `--policy-options` to override a
+checkpoint-local tuning database, for example after generating tactics for a
+newer kernel build.
 
 Requests contain `observation/image`, `observation/wrist_image`,
 `observation/state`, and `prompt`. Images are RGB `uint8`; the policy owns the
