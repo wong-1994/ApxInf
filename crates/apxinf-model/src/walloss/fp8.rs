@@ -18,7 +18,6 @@ pub struct Fp8Tensor {
     pub values: Tensor,
     /// Dequantization multiplier: `real = fp8(values) * scale`.
     pub scale: f32,
-    pub amax: f32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -74,14 +73,6 @@ impl StaticFp8Calibration {
             .copied()
             .ok_or_else(|| Error::Other(format!("missing static FP8 activation scale `{name}`")))
     }
-
-    pub fn len(&self) -> usize {
-        self.scales.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.scales.is_empty()
-    }
 }
 
 /// Quantize a CPU F32/F16/BF16 tensor using a static per-tensor scale.
@@ -92,7 +83,6 @@ pub fn quantize_e4m3(tensor: &Tensor, scale: f32) -> Result<Fp8Tensor> {
         )));
     }
     let source = tensor.to_f32_vec()?;
-    let amax = source.iter().fold(0.0f32, |m, value| m.max(value.abs()));
     let inverse_scale = scale.recip();
     let bytes = source
         .iter()
@@ -101,7 +91,6 @@ pub fn quantize_e4m3(tensor: &Tensor, scale: f32) -> Result<Fp8Tensor> {
     Ok(Fp8Tensor {
         values: Tensor::from_f8_e4m3(tensor.shape().dims().to_vec(), &bytes)?,
         scale,
-        amax,
     })
 }
 
@@ -112,17 +101,6 @@ pub fn quantize_e4m3_absmax(tensor: &Tensor) -> Result<Fp8Tensor> {
     // All-zero matrices use scale 1 so their representation remains valid.
     let scale = if amax == 0.0 { 1.0 } else { amax / E4M3_MAX };
     quantize_e4m3(tensor, scale)
-}
-
-/// Decode on CPU for tests, cache inspection, and correctness diagnostics.
-pub fn dequantize_e4m3(tensor: &Fp8Tensor) -> Result<Tensor> {
-    let values = tensor
-        .values
-        .as_f8_e4m3()?
-        .iter()
-        .map(|byte| decode_e4m3(*byte) * tensor.scale)
-        .collect::<Vec<_>>();
-    Tensor::from_f32(tensor.values.shape().dims().to_vec(), &values)
 }
 
 /// CUDA-compatible saturating finite E4M3 encoding, round-to-nearest-even.
@@ -159,6 +137,7 @@ pub fn encode_e4m3(value: f32) -> u8 {
     sign | ((exponent_bits as u8) << 3) | mantissa as u8
 }
 
+#[cfg(test)]
 pub fn decode_e4m3(byte: u8) -> f32 {
     let sign = if byte & 0x80 == 0 { 1.0 } else { -1.0 };
     let exponent = (byte >> 3) & 0x0f;
@@ -216,9 +195,13 @@ mod tests {
         let quantized = quantize_e4m3_absmax(&source).unwrap();
         assert_eq!(quantized.values.dtype(), DType::F8E4M3);
         assert_eq!(quantized.values.shape(), source.shape());
-        assert_eq!(quantized.amax, 2.0);
-        let output = dequantize_e4m3(&quantized).unwrap();
-        let output = output.as_f32().unwrap();
+        let output = quantized
+            .values
+            .as_f8_e4m3()
+            .unwrap()
+            .iter()
+            .map(|byte| decode_e4m3(*byte) * quantized.scale)
+            .collect::<Vec<_>>();
         assert_eq!(output[0], -2.0);
         assert_eq!(output[3], 2.0);
     }

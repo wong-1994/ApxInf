@@ -28,67 +28,6 @@ pub(super) trait TransformerWeights {
     fn down(&self) -> MatrixRef<'_>;
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct TransformerFp8Parts {
-    pub qkv: bool,
-    pub output: bool,
-    pub mlp: bool,
-}
-
-struct MixedTransformerWeights<'a, B, F> {
-    bf16: &'a B,
-    fp8: &'a F,
-    parts: TransformerFp8Parts,
-}
-
-impl<B: TransformerWeights, F: TransformerWeights> TransformerWeights
-    for MixedTransformerWeights<'_, B, F>
-{
-    fn input_norm(&self) -> &Tensor {
-        self.bf16.input_norm()
-    }
-
-    fn post_attention_norm(&self) -> &Tensor {
-        self.bf16.post_attention_norm()
-    }
-
-    fn qkv(&self) -> MatrixRef<'_> {
-        if self.parts.qkv {
-            self.fp8.qkv()
-        } else {
-            self.bf16.qkv()
-        }
-    }
-
-    fn qkv_bias(&self) -> &Tensor {
-        self.bf16.qkv_bias()
-    }
-
-    fn output(&self) -> MatrixRef<'_> {
-        if self.parts.output {
-            self.fp8.output()
-        } else {
-            self.bf16.output()
-        }
-    }
-
-    fn gate_up(&self) -> MatrixRef<'_> {
-        if self.parts.mlp {
-            self.fp8.gate_up()
-        } else {
-            self.bf16.gate_up()
-        }
-    }
-
-    fn down(&self) -> MatrixRef<'_> {
-        if self.parts.mlp {
-            self.fp8.down()
-        } else {
-            self.bf16.down()
-        }
-    }
-}
-
 pub(super) trait VisionBlockWeights {
     fn input_norm(&self) -> &Tensor;
     fn post_attention_norm(&self) -> &Tensor;
@@ -166,7 +105,7 @@ fn dynamic_linear_prequantized(
         &activation.values,
         &activation.scales,
         weight.as_kernel_view(),
-        weight.bias.as_ref(),
+        None,
     )?;
     if keep_padded_output {
         Ok(output)
@@ -686,75 +625,6 @@ pub(super) fn language_prefix<W: TransformerWeights>(
     let mut values = Vec::with_capacity(weights.len());
     for layer in weights {
         let output = language_layer(context, config, layer, &hidden, position_ids, cache_tokens)?;
-        hidden = output.hidden;
-        keys.push(output.key);
-        values.push(output.value);
-    }
-    Ok(PrefixCache {
-        keys,
-        values,
-        prefix_tokens: tokens,
-        cache_tokens,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn language_prefix_mixed<B: TransformerWeights, F: TransformerWeights>(
-    context: &Context,
-    config: &WallossTextConfig,
-    bf16_weights: &[B],
-    fp8_weights: &[F],
-    fp8_start: usize,
-    fp8_end: usize,
-    fp8_parts: TransformerFp8Parts,
-    token_embedding: &Tensor,
-    token_ids: &DeviceBuffer,
-    vision_tokens: &Tensor,
-    vision_row_map: &DeviceBuffer,
-    position_ids: &DeviceBuffer,
-    tokens: usize,
-    cache_tokens: usize,
-) -> Result<PrefixCache> {
-    if bf16_weights.len() != fp8_weights.len()
-        || fp8_start > fp8_end
-        || fp8_end > bf16_weights.len()
-    {
-        return Err(Error::Other(format!(
-            "walloss mixed language range [{fp8_start}, {fp8_end}) is invalid for depths {} and {}",
-            bf16_weights.len(),
-            fp8_weights.len()
-        )));
-    }
-    let embedded = kernels::embedding::lookup(context, token_embedding, token_ids, tokens)?;
-    let mut hidden =
-        kernels::elementwise::replace_rows_bf16(context, &embedded, vision_tokens, vision_row_map)?;
-    let mut keys = Vec::with_capacity(bf16_weights.len());
-    let mut values = Vec::with_capacity(bf16_weights.len());
-    for index in 0..bf16_weights.len() {
-        let output = if (fp8_start..fp8_end).contains(&index) {
-            let weights = MixedTransformerWeights {
-                bf16: &bf16_weights[index],
-                fp8: &fp8_weights[index],
-                parts: fp8_parts,
-            };
-            language_layer(
-                context,
-                config,
-                &weights,
-                &hidden,
-                position_ids,
-                cache_tokens,
-            )?
-        } else {
-            language_layer(
-                context,
-                config,
-                &bf16_weights[index],
-                &hidden,
-                position_ids,
-                cache_tokens,
-            )?
-        };
         hidden = output.hidden;
         keys.push(output.key);
         values.push(output.value);

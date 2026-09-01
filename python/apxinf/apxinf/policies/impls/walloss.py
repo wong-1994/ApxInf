@@ -7,6 +7,7 @@ contract; no PI0.5 processor or model implementation is imported here.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -77,9 +78,44 @@ def _load_normalizer(path: Path, norm_key: str) -> tuple[np.ndarray, np.ndarray]
     return np.asarray(minimum, np.float32), np.asarray(delta, np.float32)
 
 
+def _checkpoint_state_bins(model_dir: Path) -> int:
+    """Resolve state-token bins from checkpoint metadata, with legacy fallback."""
+    documents = []
+    config_json = model_dir / "config.json"
+    if config_json.is_file():
+        documents.append((config_json, json.loads(config_json.read_text())))
+    config_yaml = None
+    for name in ("config.yml", "config.yaml"):
+        candidate = model_dir / name
+        if candidate.is_file():
+            config_yaml = candidate
+            break
+    if config_yaml is not None:
+        try:
+            import yaml
+        except ImportError as error:  # pragma: no cover - declared by the walloss extra
+            raise ImportError("WallossPolicy requires PyYAML to read config.yml") from error
+        documents.append((config_yaml, yaml.safe_load(config_yaml.read_text()) or {}))
+
+    for path, document in documents:
+        if not isinstance(document, Mapping):
+            raise ValueError(f"{path.name} must contain a mapping")
+        value = document.get("state_bins")
+        data = document.get("data")
+        if value is None and isinstance(data, Mapping):
+            value = data.get("state_bins")
+        if value is not None:
+            bins = int(value)
+            if bins < 2:
+                raise ValueError(f"{path.name} state_bins must be >= 2, got {bins}")
+            return bins
+    return 256
+
+
 class _WallossProcessor:
     def __init__(self, model_dir: Path, *, image_keys: Sequence[str], camera_names: Sequence[str],
-                 action_horizon: int, action_dim: int, norm_key: str):
+                 state_key: str, prompt_key: str, action_horizon: int, action_dim: int,
+                 norm_key: str, state_bins: int):
         try:
             from transformers import AutoImageProcessor, AutoTokenizer
         except ImportError as error:  # pragma: no cover
@@ -87,8 +123,11 @@ class _WallossProcessor:
 
         self.image_keys = tuple(image_keys)
         self.camera_names = tuple(camera_names)
+        self.state_key = str(state_key)
+        self.prompt_key = str(prompt_key)
         self.action_horizon = int(action_horizon)
         self.action_dim = int(action_dim)
+        self.state_bins = int(state_bins)
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
         self.image_processor = AutoImageProcessor.from_pretrained(model_dir, use_fast=False)
         self.tokenizer.add_tokens([_PROPRI, _ACTION])
@@ -105,8 +144,8 @@ class _WallossProcessor:
         normalized = np.clip((state - self.propri_min) / self.propri_delta * 2 - 1, -1, 1)
         # Keep numpy's float64 linspace: this mirrors the training/reference
         # processor exactly at bin boundaries.
-        edges = np.linspace(-1.0, 1.0, 257)[:-1]
-        bins = np.clip(np.digitize(normalized, edges) - 1, 0, 255)
+        edges = np.linspace(-1.0, 1.0, self.state_bins + 1)[:-1]
+        bins = np.clip(np.digitize(normalized, edges) - 1, 0, self.state_bins - 1)
         state_text = " ".join(str(int(value)) for value in bins[active])
         cameras = "".join(
             f" {_CAMERA_LABELS.get(name, name.replace('_', ' '))}: "
@@ -121,7 +160,7 @@ class _WallossProcessor:
         )
 
     def __call__(self, observation: Mapping[str, Any]):
-        raw_state = np.asarray(_lookup(observation, "observation/state"), dtype=np.float32).reshape(-1)
+        raw_state = np.asarray(_lookup(observation, self.state_key), dtype=np.float32).reshape(-1)
         if raw_state.size > self.action_dim:
             raise ValueError(f"state has {raw_state.size} values, maximum is {self.action_dim}")
         state = np.zeros(self.action_dim, dtype=np.float32)
@@ -136,7 +175,7 @@ class _WallossProcessor:
                 raise ValueError(
                     f"agent_pos_mask has {active.size} values, expected {self.action_dim}"
                 )
-        prompt = _lookup(observation, "prompt")
+        prompt = _lookup(observation, self.prompt_key)
         if not isinstance(prompt, str):
             raise TypeError("prompt must be a string")
 
@@ -208,8 +247,10 @@ class WallossPolicy:
             "model_type": "walloss", "action_horizon": model.action_horizon,
             "action_dim": self._action_dim, "model_action_dim": model.action_dim,
             "num_views": model.num_views, "image_keys": list(processor.image_keys),
-            "state_key": "observation/state", "prompt_key": "prompt",
+            "state_key": processor.state_key, "prompt_key": processor.prompt_key,
             "dof_mask_key": "dof_mask",
+            "discrete_state": True,
+            "state_bins": processor.state_bins,
             **(dict(metadata) if metadata else {}),
         }
 
@@ -217,13 +258,25 @@ class WallossPolicy:
     def from_pretrained(cls, model_dir, *, model=None, checkpoint=None, device="cuda:0",
                         precision="auto", calibration=None, tactics=None, norm_key="x2_normal",
                         action_dim=None, image_keys=_DEFAULT_IMAGE_KEYS,
-                        camera_names=("face_view", "right_wrist_view"), seed=0,
+                        camera_names=("face_view", "right_wrist_view"),
+                        state_key="observation/state", prompt_key="prompt",
+                        discrete_state=None, state_bins=None, seed=0,
                         metadata=None, **kwargs):
         if kwargs:
             raise TypeError(f"unsupported WallossPolicy options: {sorted(kwargs)}")
+        if discrete_state is False:
+            raise ValueError(
+                "WallOSS checkpoints require discretized state in the prompt; "
+                "discrete_state=False is unsupported"
+            )
         model_dir = Path(model_dir)
         if len(image_keys) != 2 or len(camera_names) != 2:
             raise ValueError("WallOSS runtime currently requires exactly two camera views")
+        resolved_state_bins = (
+            int(state_bins) if state_bins is not None else _checkpoint_state_bins(model_dir)
+        )
+        if resolved_state_bins < 2:
+            raise ValueError(f"state_bins must be >= 2, got {resolved_state_bins}")
         if model is None:
             import apxinf_py
             ckpt = str(checkpoint) if checkpoint is not None else str(model_dir / "model.safetensors")
@@ -242,7 +295,9 @@ class WallossPolicy:
             )
         processor = _WallossProcessor(
             model_dir, image_keys=image_keys, camera_names=camera_names,
+            state_key=state_key, prompt_key=prompt_key,
             action_horizon=model.action_horizon, action_dim=model.action_dim, norm_key=norm_key,
+            state_bins=resolved_state_bins,
         )
         reset = getattr(model, "reset_sampling", None)
         if callable(reset):

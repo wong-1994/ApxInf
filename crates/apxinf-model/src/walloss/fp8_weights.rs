@@ -4,16 +4,14 @@ use apxinf_core::{Backend, Error, Result, Tensor};
 
 use super::weights::bf16_to_device;
 use super::{
-    DynamicFp8LinearWeights, Fp8LinearWeights, LinearWeights, StaticFp8Calibration,
-    WallossActionWeights, WallossLayerWeights, WallossVisionBlockWeights, WallossVisionWeights,
-    WallossWeights,
+    DynamicFp8LinearWeights, Fp8LinearWeights, StaticFp8Calibration, WallossActionWeights,
+    WallossLayerWeights, WallossVisionBlockWeights, WallossVisionWeights, WallossWeights,
 };
 
 pub struct WallossFp8Weights {
     pub token_embedding: Tensor,
     pub language_layers: Vec<WallossFp8LayerWeights>,
     pub action_layers: Vec<WallossFp8LayerWeights>,
-    pub language_norm: Tensor,
     pub action_norm: Tensor,
     pub vision: WallossFp8VisionWeights,
     pub action: WallossActionWeights,
@@ -23,7 +21,6 @@ pub struct WallossDynamicFp8Weights {
     pub token_embedding: Tensor,
     pub language_layers: Vec<WallossDynamicFp8LayerWeights>,
     pub action_layers: Vec<WallossDynamicFp8LayerWeights>,
-    pub language_norm: Tensor,
     pub action_norm: Tensor,
     pub vision: WallossDynamicFp8VisionWeights,
     pub action: WallossActionWeights,
@@ -201,7 +198,6 @@ impl WallossFp8Weights {
                 .zip(&scales.action_layers)
                 .map(|(layer, scale)| WallossFp8LayerWeights::from_host(layer, backend, *scale))
                 .collect::<Result<_>>()?,
-            language_norm: bf16_to_device(&weights.language_norm, backend)?,
             action_norm: bf16_to_device(&weights.action_norm, backend)?,
             vision: WallossFp8VisionWeights::from_host(&weights.vision, backend, scales)?,
             action: weights.action.to_bf16_device(backend)?,
@@ -223,7 +219,6 @@ impl WallossDynamicFp8Weights {
                 .iter()
                 .map(|layer| WallossDynamicFp8LayerWeights::from_host(layer, backend))
                 .collect::<Result<_>>()?,
-            language_norm: bf16_to_device(&weights.language_norm, backend)?,
             action_norm: bf16_to_device(&weights.action_norm, backend)?,
             vision: WallossDynamicFp8VisionWeights::from_host(&weights.vision, backend)?,
             action: weights.action.to_bf16_device(backend)?,
@@ -356,21 +351,9 @@ impl WallossFp8VisionBlockWeights {
 }
 
 fn fp8_matrix(weight: &Tensor, backend: &dyn Backend) -> Result<Fp8LinearWeights> {
-    Fp8LinearWeights::from_host(
-        &LinearWeights {
-            weight: weight.clone(),
-            bias: None,
-        },
-        backend,
-    )
+    Fp8LinearWeights::from_host(weight, backend)
 }
 
 fn dynamic_fp8_matrix(weight: &Tensor, backend: &dyn Backend) -> Result<DynamicFp8LinearWeights> {
-    DynamicFp8LinearWeights::from_host(
-        &LinearWeights {
-            weight: weight.clone(),
-            bias: None,
-        },
-        backend,
-    )
+    DynamicFp8LinearWeights::from_host(weight, backend)
 }

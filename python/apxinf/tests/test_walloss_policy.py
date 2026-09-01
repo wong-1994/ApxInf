@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
 
 class _FakeModel:
@@ -20,6 +21,9 @@ class _FakeModel:
 
 class _FakeProcessor:
     image_keys = ("observation/image", "observation/wrist_image")
+    state_key = "observation/state"
+    prompt_key = "prompt"
+    state_bins = 256
 
     def __call__(self, observation):
         return (
@@ -102,6 +106,80 @@ def test_autopolicy_detects_walloss_checkpoint_signature(tmp_path, monkeypatch):
     assert kwargs == {"precision": "bf16"}
 
 
+def test_franka_libero_preset_builds_walloss_policy(tmp_path, monkeypatch):
+    from apxinf import build_robot_policy
+    from apxinf.policies.impls import walloss
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen2_5_vl",
+                "experts": [{}, {}],
+                "action_hidden_size": 1024,
+                "noise_scheduler": {},
+            }
+        )
+    )
+    processor = _FakeProcessor()
+    processor.state_key = "observation/state"
+    processor.prompt_key = "prompt"
+    monkeypatch.setattr(
+        walloss,
+        "_load_normalizer",
+        lambda path, norm_key: (
+            np.full(26, -1.0, np.float32),
+            np.full(26, 2.0, np.float32),
+        ),
+    )
+    monkeypatch.setattr(walloss, "_WallossProcessor", lambda *args, **kwargs: processor)
+
+    policy = build_robot_policy(
+        "franka_libero",
+        tmp_path,
+        model=_FakeModel(),
+    )
+
+    assert policy.metadata["robot"] == "franka_libero"
+    assert policy.metadata["image_keys"] == [
+        "observation/image",
+        "observation/wrist_image",
+    ]
+    assert policy.metadata["state_key"] == "observation/state"
+    assert policy.metadata["action_dim"] == 7
+
+
+def test_walloss_rejects_disabling_checkpoint_state_encoding(tmp_path):
+    from apxinf import WallossPolicy
+
+    with pytest.raises(ValueError, match="require discretized state"):
+        WallossPolicy.from_pretrained(
+            tmp_path,
+            model=_FakeModel(),
+            discrete_state=False,
+        )
+
+
+def test_walloss_action_width_uses_checkpoint_unless_user_overrides(tmp_path, monkeypatch):
+    from apxinf import WallossPolicy
+    from apxinf.policies.impls import walloss
+
+    monkeypatch.setattr(walloss, "_WallossProcessor", lambda *args, **kwargs: _FakeProcessor())
+    monkeypatch.setattr(
+        walloss,
+        "_load_normalizer",
+        lambda path, norm_key: (
+            np.full(26, -1.0, np.float32),
+            np.full(26, 2.0, np.float32),
+        ),
+    )
+
+    native = WallossPolicy.from_pretrained(tmp_path, model=_FakeModel())
+    overridden = WallossPolicy.from_pretrained(tmp_path, model=_FakeModel(), action_dim=7)
+
+    assert native.action_dim == 26
+    assert overridden.action_dim == 7
+
+
 def test_policy_calls_patch_contract_and_unnormalizes():
     from apxinf import WallossPolicy
 
@@ -128,14 +206,18 @@ def test_policy_calls_patch_contract_and_unnormalizes():
     assert result["timing"]["total_ms"] >= result["timing"]["model_ms"]
 
 
-def test_processor_builds_fixed_walloss_contract():
+@pytest.mark.parametrize(("state_bins", "midpoint"), [(256, 128), (512, 256)])
+def test_processor_builds_fixed_walloss_contract(state_bins, midpoint):
     from apxinf.policies.impls.walloss import _WallossProcessor
 
     processor = _WallossProcessor.__new__(_WallossProcessor)
     processor.image_keys = ("observation/image", "observation/wrist_image")
     processor.camera_names = ("face_view", "right_wrist_view")
+    processor.state_key = "observation/state"
+    processor.prompt_key = "prompt"
     processor.action_horizon = 10
     processor.action_dim = 26
+    processor.state_bins = state_bins
     processor.tokenizer = _FakeTokenizer()
     processor.image_processor = _FakeImageProcessor()
     processor.image_pad_token_id = 99
@@ -161,4 +243,39 @@ def test_processor_builds_fixed_walloss_contract():
     np.testing.assert_array_equal(mask[:, 7:], 0.0)
     assert "front view" in processor.tokenizer.prompt
     assert "right wrist view" in processor.tokenizer.prompt
-    assert "Proprioception: " + " ".join(["128"] * 7) in processor.tokenizer.prompt
+    assert "Proprioception: " + " ".join([str(midpoint)] * 7) in processor.tokenizer.prompt
+
+
+@pytest.mark.parametrize(("override", "expected"), [(None, 512), (1024, 1024)])
+def test_walloss_state_bins_precedence(tmp_path, monkeypatch, override, expected):
+    from apxinf import WallossPolicy
+    from apxinf.policies.impls import walloss
+
+    (tmp_path / "config.yml").write_text("data:\n  state_bins: 512\n")
+    captured = {}
+
+    def fake_processor(*args, **kwargs):
+        captured.update(kwargs)
+        processor = _FakeProcessor()
+        processor.state_bins = kwargs["state_bins"]
+        return processor
+
+    monkeypatch.setattr(walloss, "_WallossProcessor", fake_processor)
+    monkeypatch.setattr(
+        walloss,
+        "_load_normalizer",
+        lambda path, norm_key: (
+            np.full(26, -1.0, np.float32),
+            np.full(26, 2.0, np.float32),
+        ),
+    )
+
+    policy = WallossPolicy.from_pretrained(
+        tmp_path,
+        model=_FakeModel(),
+        action_dim=7,
+        state_bins=override,
+    )
+
+    assert captured["state_bins"] == expected
+    assert policy.metadata["state_bins"] == expected

@@ -90,3 +90,106 @@ def test_common_policy_options_reject_non_objects(value):
 
     with pytest.raises(argparse.ArgumentTypeError):
         common.json_object(value)
+
+
+def test_websocket_example_uses_named_robot_builder(monkeypatch, tmp_path):
+    pytest.importorskip("websockets")
+    pytest.importorskip("msgpack")
+    example = _load_example("openpi_server")
+    captured = {}
+
+    class FakePolicy:
+        def close(self):
+            captured["closed"] = True
+
+    class FakeServer:
+        def __init__(self, policy, host, port):
+            captured.update(policy=policy, host=host, port=port)
+
+        def serve_forever(self):
+            captured["served"] = True
+
+    def fake_build(robot, model_dir, **kwargs):
+        captured.update(robot=robot, model_dir=model_dir, kwargs=kwargs)
+        return FakePolicy()
+
+    monkeypatch.setattr(
+        example,
+        "parse_args",
+        lambda: argparse.Namespace(
+            model_dir=tmp_path,
+            precision="bf16",
+            device="cuda:0",
+            robot="franka_libero",
+            action_dim=0,
+            policy_options={"norm_key": "libero_all"},
+            host="127.0.0.1",
+            port=8017,
+        ),
+    )
+    monkeypatch.setattr(example, "build_robot_policy", fake_build)
+    monkeypatch.setattr(example, "WebsocketPolicyServer", FakeServer)
+
+    example.main()
+
+    assert captured["robot"] == "franka_libero"
+    assert captured["model_dir"] == tmp_path
+    assert captured["kwargs"] == {
+        "norm_key": "libero_all",
+        "device": "cuda:0",
+        "precision": "bf16",
+        "metadata": {
+            "protocol": "openpi.websocket_policy",
+            "precision": "bf16",
+        },
+    }
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 8017
+    assert captured["served"] is True
+    assert captured["closed"] is True
+
+
+def test_websocket_example_uses_autopolicy_without_robot(monkeypatch, tmp_path):
+    pytest.importorskip("websockets")
+    pytest.importorskip("msgpack")
+    example = _load_example("openpi_server")
+    captured = {}
+
+    class FakePolicy:
+        def close(self):
+            captured["closed"] = True
+
+    class FakeServer:
+        def __init__(self, policy, host, port):
+            captured["policy"] = policy
+
+        def serve_forever(self):
+            captured["served"] = True
+
+    def fake_load(model_dir, **kwargs):
+        captured.update(model_dir=model_dir, kwargs=kwargs)
+        return FakePolicy()
+
+    monkeypatch.setattr(
+        example,
+        "parse_args",
+        lambda: argparse.Namespace(
+            model_dir=tmp_path,
+            precision="bf16",
+            device="cuda:0",
+            robot=None,
+            action_dim=0,
+            policy_options={},
+            host="127.0.0.1",
+            port=8000,
+        ),
+    )
+    monkeypatch.setattr(example.AutoPolicy, "from_pretrained", fake_load)
+    monkeypatch.setattr(example, "WebsocketPolicyServer", FakeServer)
+
+    example.main()
+
+    assert captured["model_dir"] == tmp_path
+    assert "action_dim" not in captured["kwargs"]
+    assert captured["served"] is True
+    assert captured["closed"] is True

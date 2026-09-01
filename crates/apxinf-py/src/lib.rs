@@ -40,17 +40,10 @@ use pyo3::prelude::*;
 
 use apxinf_core::{Device, RngKey, Shape, Tensor};
 use apxinf_model::pi05::Pi05CalibrationPlan;
-use apxinf_model::walloss::WallossConfig;
 use apxinf_model::{
     AutoModel, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation, Pi05Config,
-    SyntheticWeights, VisionObservation, VlaRequest,
+    SyntheticWeights, VisionObservation, VlaContract, VlaRequest,
 };
-
-#[derive(Clone)]
-enum BindingConfig {
-    Pi05(Pi05Config),
-    Walloss(WallossConfig),
-}
 
 /// Map any Rust error into a Python `RuntimeError`.
 fn runtime_err<E: std::fmt::Display>(error: E) -> PyErr {
@@ -126,56 +119,37 @@ fn load_config(checkpoint: &Path) -> PyResult<Pi05Config> {
 #[pyclass(unsendable)]
 pub struct Model {
     model: LoadedModel,
-    config: BindingConfig,
+    contract: VlaContract,
     device: Device,
     sampling_seed: Cell<u64>,
     sampling_draw: Cell<u64>,
 }
 
 impl Model {
-    fn require_pi05_rgb_config(&self, method: &str) -> PyResult<&Pi05Config> {
-        match &self.config {
-            BindingConfig::Pi05(config) => Ok(config),
-            BindingConfig::Walloss(_) => Err(PyValueError::new_err(format!(
-                "apxinf_py.{method}: WallOSS accepts preprocessed patches, not RGB"
-            ))),
+    fn require_rgb_contract(&self, method: &str) -> PyResult<VlaContract> {
+        if self.contract.accepts_rgb_u8 {
+            Ok(self.contract)
+        } else {
+            Err(PyValueError::new_err(format!(
+                "apxinf_py.{method}: loaded model accepts preprocessed patches, not RGB"
+            )))
         }
     }
 
     fn patch_rows(&self) -> usize {
-        match &self.config {
-            BindingConfig::Pi05(config) => config.num_views * config.patches_per_view(),
-            // The current WallOSS runtime deliberately fixes the serving grid
-            // to two 18x18 camera views at load time.
-            BindingConfig::Walloss(_) => 2 * 18 * 18,
-        }
+        self.contract.patch_shape[0]
     }
 
     fn patch_width(&self) -> usize {
-        match &self.config {
-            BindingConfig::Pi05(config) => 3 * config.patch_size * config.patch_size,
-            BindingConfig::Walloss(config) => {
-                3 * config.vision.temporal_patch_size
-                    * config.vision.patch_size
-                    * config.vision.patch_size
-            }
-        }
+        self.contract.patch_shape[1]
     }
 
     fn action_shape(&self) -> [usize; 2] {
-        match &self.config {
-            BindingConfig::Pi05(config) => [config.action_horizon, config.action_dim],
-            BindingConfig::Walloss(config) => {
-                [config.action.action_horizon, config.action.action_dim]
-            }
-        }
+        self.contract.action_shape
     }
 
     fn max_token_len_value(&self) -> usize {
-        match &self.config {
-            BindingConfig::Pi05(config) => config.max_token_len,
-            BindingConfig::Walloss(config) => config.text.max_position_embeddings,
-        }
+        self.contract.max_token_len
     }
 
     fn validate_tokens(&self, token_ids: &[u32]) -> PyResult<()> {
@@ -330,91 +304,55 @@ impl Model {
         sampling_seed: u64,
     ) -> PyResult<Self> {
         let device = parse_device(device)?;
-        let is_walloss = matches!(
-            model.to_ascii_lowercase().as_str(),
-            "walloss" | "wall-oss" | "wall_oss_05"
-        );
-        if is_walloss {
-            if action_horizon.is_some() || num_views.is_some() {
-                return Err(PyValueError::new_err(
-                    "apxinf_py.load: WallOSS action_horizon/num_views are fixed by the runtime",
-                ));
+        // These are PI0.5 deployment overrides. When absent, the binding does
+        // not inspect a concrete model config at all; AutoModel and the selected
+        // loader own detection and parsing. A non-PI0.5 loader rejects the
+        // explicit config below rather than being detected here by name.
+        let config = if action_horizon.is_some()
+            || num_views.is_some()
+            || num_flow_steps.is_some()
+            || flow_start_time.is_some()
+        {
+            let mut config = load_config(&path)?;
+            if let Some(horizon) = action_horizon {
+                config.action_horizon = horizon;
             }
-            let root = if path.is_dir() {
-                path.as_path()
-            } else {
-                path.parent().unwrap_or_else(|| Path::new("."))
-            };
-            let mut config =
-                WallossConfig::from_json_file(&root.join("config.json")).map_err(runtime_err)?;
-            let options = LoadOptions {
-                model_name: Some("walloss".to_owned()),
-                precision: parse_precision(precision)?,
-                calibration_path: calibration,
-                tuning_path: tactics,
-                ..LoadOptions::default()
-            };
-            let loaded = AutoModel::load_model(device, &path, &options).map_err(runtime_err)?;
-            let [action_horizon, action_dim] = loaded.vla().map_err(runtime_err)?.action_shape();
-            config.action.action_horizon = action_horizon;
-            config.action.action_dim = action_dim;
-            config.action.proprio_dim = action_dim;
-            return Ok(Self {
-                model: loaded,
-                config: BindingConfig::Walloss(config),
-                device,
-                sampling_seed: Cell::new(sampling_seed),
-                sampling_draw: Cell::new(0),
-            });
-        }
-
-        let mut config = load_config(&path)?;
-        // Only hand the loader an explicit config when the caller actually
-        // overrode something; otherwise it reads `config.json` itself, exactly
-        // as before.
-        let mut overridden = false;
-        if let Some(horizon) = action_horizon {
-            config.action_horizon = horizon;
-            overridden = true;
-        }
-        if let Some(views) = num_views {
-            if views == 0 || views > config.num_views {
-                return Err(PyValueError::new_err(format!(
-                    "apxinf_py.load: num_views={views} must be in 1..={} (the \
-                     checkpoint's view count); a checkpoint cannot serve more \
-                     cameras than it was trained on",
-                    config.num_views
-                )));
+            if let Some(views) = num_views {
+                if views == 0 || views > config.num_views {
+                    return Err(PyValueError::new_err(format!(
+                        "apxinf_py.load: num_views={views} must be in 1..={} (the \
+                         checkpoint's view count); a checkpoint cannot serve more \
+                         cameras than it was trained on",
+                        config.num_views
+                    )));
+                }
+                config.num_views = views;
             }
-            config.num_views = views;
-            overridden = true;
-        }
-        if let Some(steps) = num_flow_steps {
-            config.num_flow_steps = steps;
-            overridden = true;
-        }
-        if let Some(start_time) = flow_start_time {
-            config.flow_start_time = start_time;
-            overridden = true;
-        }
-        // Validate once, after every override, so a combination that is
-        // individually valid but jointly is not still fails here.
-        if overridden {
+            if let Some(steps) = num_flow_steps {
+                config.num_flow_steps = steps;
+            }
+            if let Some(start_time) = flow_start_time {
+                config.flow_start_time = start_time;
+            }
             config.validate().map_err(runtime_err)?;
-        }
+            Some(config)
+        } else {
+            None
+        };
         let options = LoadOptions {
             model_name: Some(model.to_owned()),
             precision: parse_precision(precision)?,
             calibration_path: calibration,
             tuning_path: tactics,
             autotune,
-            config: overridden.then(|| config.clone()),
+            config,
             ..LoadOptions::default()
         };
         let loaded = AutoModel::load_model(device, &path, &options).map_err(runtime_err)?;
+        let contract = loaded.vla().map_err(runtime_err)?.contract();
         Ok(Self {
             model: loaded,
-            config: BindingConfig::Pi05(config),
+            contract,
             device,
             sampling_seed: Cell::new(sampling_seed),
             sampling_draw: Cell::new(0),
@@ -512,9 +450,10 @@ impl Model {
             ..LoadOptions::default()
         };
         let loaded = AutoModel::load_model(device, Path::new(""), &options).map_err(runtime_err)?;
+        let contract = loaded.vla().map_err(runtime_err)?.contract();
         Ok(Self {
             model: loaded,
-            config: BindingConfig::Pi05(config),
+            contract,
             device,
             sampling_seed: Cell::new(sampling_seed),
             sampling_draw: Cell::new(0),
@@ -646,9 +585,9 @@ impl Model {
         token_ids: PyReadonlyArray1<'py, u32>,
         noise: Option<PyReadonlyArray2<'py, f32>>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let config = self.require_pi05_rgb_config("infer_rgb")?;
+        let contract = self.require_rgb_contract("infer_rgb")?;
         let layout = parse_layout(layout)?;
-        let expected_bytes = config.num_views * config.image_size * config.image_size * 3;
+        let expected_bytes = contract.num_views * contract.image_size * contract.image_size * 3;
         let bytes = rgb_u8
             .as_slice()
             .map_err(|_| {
@@ -659,9 +598,9 @@ impl Model {
             return Err(PyValueError::new_err(format!(
                 "apxinf_py.infer_rgb: rgb_u8 expected {} bytes ({} views x {}x{}x3), got {}",
                 expected_bytes,
-                config.num_views,
-                config.image_size,
-                config.image_size,
+                contract.num_views,
+                contract.image_size,
+                contract.image_size,
                 bytes.len()
             )));
         }
@@ -749,9 +688,9 @@ impl Model {
         sequence: u64,
         draw: u64,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let config = self.require_pi05_rgb_config("infer_rgb_seeded")?;
+        let contract = self.require_rgb_contract("infer_rgb_seeded")?;
         let layout = parse_layout(layout)?;
-        let expected_bytes = config.num_views * config.image_size * config.image_size * 3;
+        let expected_bytes = contract.num_views * contract.image_size * contract.image_size * 3;
         let bytes = rgb_u8
             .as_slice()
             .map_err(|_| {
@@ -764,9 +703,9 @@ impl Model {
             return Err(PyValueError::new_err(format!(
                 "apxinf_py.infer_rgb_seeded: rgb_u8 expected {} bytes ({} views x {}x{}x3), got {}",
                 expected_bytes,
-                config.num_views,
-                config.image_size,
-                config.image_size,
+                contract.num_views,
+                contract.image_size,
+                contract.image_size,
                 bytes.len()
             )));
         }
@@ -818,37 +757,18 @@ impl Model {
     }
 
     #[getter]
-    fn num_flow_steps(&self) -> usize {
-        self.config.num_flow_steps
-    }
-
-    #[getter]
-    fn flow_start_time(&self) -> f32 {
-        self.config.flow_start_time
-    }
-
-    #[getter]
     fn num_views(&self) -> usize {
-        match &self.config {
-            BindingConfig::Pi05(config) => config.num_views,
-            BindingConfig::Walloss(_) => 2,
-        }
+        self.contract.num_views
     }
 
     #[getter]
     fn image_size(&self) -> usize {
-        match &self.config {
-            BindingConfig::Pi05(config) => config.image_size,
-            BindingConfig::Walloss(config) => 18 * config.vision.patch_size,
-        }
+        self.contract.image_size
     }
 
     #[getter]
     fn patch_size(&self) -> usize {
-        match &self.config {
-            BindingConfig::Pi05(config) => config.patch_size,
-            BindingConfig::Walloss(config) => config.vision.patch_size,
-        }
+        self.contract.patch_size
     }
 
     #[getter]

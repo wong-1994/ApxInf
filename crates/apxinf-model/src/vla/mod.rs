@@ -139,13 +139,33 @@ pub trait PreparedInference {
     fn run(&self, request: &VlaRequest<'_>) -> Result<Action>;
 }
 
+/// Fixed public shape contract of a loaded VLA runtime.
+///
+/// Frontends use this to validate host inputs without parsing a concrete
+/// model family's checkpoint config or repeating model-name switches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VlaContract {
+    pub action_shape: [usize; 2],
+    pub patch_shape: [usize; 2],
+    pub max_token_len: usize,
+    pub num_views: usize,
+    pub image_size: usize,
+    pub patch_size: usize,
+    pub accepts_rgb_u8: bool,
+}
+
 /// Unified VLA runtime interface.
 ///
 /// The boxed return keeps this trait object-safe so `LoadedModel::Vla` can
 /// directly hold heterogeneous model runtimes.
 pub trait VlaRuntime {
+    /// Fixed input/output capabilities of this loaded checkpoint.
+    fn contract(&self) -> VlaContract;
+
     /// Native action tensor shape produced by this loaded checkpoint.
-    fn action_shape(&self) -> [usize; 2];
+    fn action_shape(&self) -> [usize; 2] {
+        self.contract().action_shape
+    }
 
     fn infer(&self, request: &VlaRequest<'_>) -> Result<Action>;
     fn prepare(&self, spec: &InferenceSpec) -> Result<Box<dyn PreparedInference>>;

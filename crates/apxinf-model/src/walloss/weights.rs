@@ -7,18 +7,10 @@ use apxinf_core::{Backend, DType, Error, Result, Tensor};
 
 use super::WallossConfig;
 
-#[derive(Debug)]
-pub struct LinearWeights {
-    /// Physical `[input, output]` matrix consumed by row-major GEMMs.
-    pub weight: Tensor,
-    pub bias: Option<Tensor>,
-}
-
 pub struct WallossWeights {
     pub token_embedding: Tensor,
     pub language_layers: Vec<WallossLayerWeights>,
     pub action_layers: Vec<WallossLayerWeights>,
-    pub language_norm: Tensor,
     pub action_norm: Tensor,
     pub vision: WallossVisionWeights,
     pub action: WallossActionWeights,
@@ -128,6 +120,10 @@ impl WallossWeights {
             )?);
         }
 
+        // The V/L prefill contributes only its per-layer KV cache to action
+        // denoising. Its final hidden state is discarded, so the reference
+        // model's terminal V/L norm has no numerical consumer here. Still
+        // require and validate the tensor to reject incomplete checkpoints.
         let language_norm = take(&mut tensors, "model.norms.0.weight")?;
         let action_norm = take(&mut tensors, "model.norms.1.weight")?;
         expect_shape(
@@ -145,7 +141,6 @@ impl WallossWeights {
             token_embedding,
             language_layers,
             action_layers,
-            language_norm,
             action_norm,
             vision: load_vision(config, &mut tensors)?,
             action: load_action(config, &mut tensors)?,
@@ -165,7 +160,6 @@ impl WallossWeights {
                 .iter()
                 .map(|layer| layer.to_bf16_device(backend))
                 .collect::<Result<_>>()?,
-            language_norm: bf16_to_device(&self.language_norm, backend)?,
             action_norm: bf16_to_device(&self.action_norm, backend)?,
             vision: self.vision.to_bf16_device(backend)?,
             action: self.action.to_bf16_device(backend)?,
