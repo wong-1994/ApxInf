@@ -169,8 +169,11 @@ impl WallossConfig {
                     .transpose()?
                     .unwrap_or(hidden_size),
                 intermediate_size: usize_field(action_expert, "intermediate_size")?,
-                action_dim: 26,
-                proprio_dim: 26,
+                // These widths are not reliably serialized by published
+                // WallOSS configs. Zero means "unspecified" until the weight
+                // loader resolves the checkpoint-native dimensions.
+                action_dim: 0,
+                proprio_dim: 0,
                 action_horizon: 10,
                 solver_steps: value
                     .pointer("/noise_scheduler/num_inference_timesteps")
@@ -292,6 +295,8 @@ mod tests {
         assert_eq!(config.text.mrope_section, [16, 24, 24]);
         assert_eq!(config.vision.depth, 32);
         assert_eq!(config.action.hidden_size, 1024);
+        assert_eq!(config.action.action_dim, 0);
+        assert_eq!(config.action.proprio_dim, 0);
         assert_eq!(config.action.solver_steps, 10);
     }
 

@@ -13,74 +13,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .ok_or("usage: walloss_bf16_smoke CHECKPOINT")?;
     let config = WallossConfig::from_json_file(&checkpoint.join("config.json"))?;
-    let patch_rows = 2 * 18 * 18;
-    let patch_width =
-        3 * config.vision.temporal_patch_size * config.vision.patch_size * config.vision.patch_size;
-    let fixture = std::env::var_os("APXINF_WALLOSS_FIXTURE_DIR").map(PathBuf::from);
-    let (patches, token_ids, state, action_mask, latent) = if let Some(directory) = fixture {
-        let read_f32 = |name: &str| -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-            let bytes = std::fs::read(directory.join(name))?;
-            Ok(bytes
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
-                .collect())
-        };
-        let input_bytes = std::fs::read(directory.join("input_ids.bin"))?;
-        let token_ids = input_bytes
-            .chunks_exact(8)
-            .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()) as u32)
-            .collect::<Vec<_>>();
-        let patches = Tensor::from_f32((patch_rows, patch_width), &read_f32("pixel_values.bin")?)?;
-        let state_values = read_f32("state.bin")?;
-        let state = Some(Tensor::from_f32(
-            (1, config.action.action_dim),
-            &state_values,
-        )?);
-        let mask = read_f32("dof_mask.bin")?;
-        let action_mask = Some(Tensor::from_f32(
-            (config.action.action_horizon, config.action.action_dim),
-            &mask
-                .into_iter()
-                .cycle()
-                .take(config.action.action_horizon * config.action.action_dim)
-                .collect::<Vec<_>>(),
-        )?);
-        let latent = Tensor::from_f32(
-            (config.action.action_horizon, config.action.action_dim),
-            &read_f32("initial_noise.bin")?,
-        )?;
-        (patches, token_ids, state, action_mask, latent)
-    } else {
-        let image_tokens_per_view = (18usize / config.vision.spatial_merge_size).pow(2);
-        let mut token_ids = vec![1, config.vision_start_token_id];
-        token_ids.extend(std::iter::repeat_n(
-            config.image_token_id,
-            image_tokens_per_view,
-        ));
-        token_ids.extend([config.vision_end_token_id, 2, config.vision_start_token_id]);
-        token_ids.extend(std::iter::repeat_n(
-            config.image_token_id,
-            image_tokens_per_view,
-        ));
-        token_ids.extend([config.vision_end_token_id, 3]);
-        token_ids.extend(std::iter::repeat_n(4, config.action.action_horizon));
-        (
-            Tensor::zeros((patch_rows, patch_width), DType::F32),
-            token_ids,
-            None,
-            None,
-            Tensor::zeros(
-                (config.action.action_horizon, config.action.action_dim),
-                DType::F32,
-            ),
-        )
-    };
-    let observation = Observation {
-        vision: VisionObservation::Patches(patches),
-        token_ids,
-        state,
-        action_mask,
-    };
     let fp8_scale = std::env::var("APXINF_WALLOSS_FP8_SCALE")
         .ok()
         .map(|value| value.parse::<f32>())
@@ -103,6 +35,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let load_start = Instant::now();
     let model = AutoModel::load_model(Device::Cuda(0), &checkpoint, &options)?;
     eprintln!("load_ms={:.3}", load_start.elapsed().as_secs_f64() * 1e3);
+    let [action_horizon, action_dim] = model.vla()?.action_shape();
+    let patch_rows = 2 * 18 * 18;
+    let patch_width =
+        3 * config.vision.temporal_patch_size * config.vision.patch_size * config.vision.patch_size;
+    let fixture = std::env::var_os("APXINF_WALLOSS_FIXTURE_DIR").map(PathBuf::from);
+    let (patches, token_ids, state, action_mask, latent) = if let Some(directory) = fixture {
+        let read_f32 = |name: &str| -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+            let bytes = std::fs::read(directory.join(name))?;
+            Ok(bytes
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+                .collect())
+        };
+        let input_bytes = std::fs::read(directory.join("input_ids.bin"))?;
+        let token_ids = input_bytes
+            .chunks_exact(8)
+            .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()) as u32)
+            .collect::<Vec<_>>();
+        let patches = Tensor::from_f32((patch_rows, patch_width), &read_f32("pixel_values.bin")?)?;
+        let state_values = read_f32("state.bin")?;
+        let state = Some(Tensor::from_f32(
+            (1, action_dim),
+            &state_values,
+        )?);
+        let mask = read_f32("dof_mask.bin")?;
+        let action_mask = Some(Tensor::from_f32(
+            (action_horizon, action_dim),
+            &mask
+                .into_iter()
+                .cycle()
+                .take(action_horizon * action_dim)
+                .collect::<Vec<_>>(),
+        )?);
+        let latent = Tensor::from_f32(
+            (action_horizon, action_dim),
+            &read_f32("initial_noise.bin")?,
+        )?;
+        (patches, token_ids, state, action_mask, latent)
+    } else {
+        let image_tokens_per_view = (18usize / config.vision.spatial_merge_size).pow(2);
+        let mut token_ids = vec![1, config.vision_start_token_id];
+        token_ids.extend(std::iter::repeat_n(
+            config.image_token_id,
+            image_tokens_per_view,
+        ));
+        token_ids.extend([config.vision_end_token_id, 2, config.vision_start_token_id]);
+        token_ids.extend(std::iter::repeat_n(
+            config.image_token_id,
+            image_tokens_per_view,
+        ));
+        token_ids.extend([config.vision_end_token_id, 3]);
+        token_ids.extend(std::iter::repeat_n(4, action_horizon));
+        (
+            Tensor::zeros((patch_rows, patch_width), DType::F32),
+            token_ids,
+            None,
+            None,
+            Tensor::zeros(
+                (action_horizon, action_dim),
+                DType::F32,
+            ),
+        )
+    };
+    let observation = Observation {
+        vision: VisionObservation::Patches(patches),
+        token_ids,
+        state,
+        action_mask,
+    };
     let request = VlaRequest::provided(&observation, &latent);
     let profile_run = std::env::var("APXINF_PROFILE_RUN")
         .ok()
