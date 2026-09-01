@@ -304,27 +304,38 @@ policy = AutoPolicy.from_pretrained(
 )
 ```
 
-The calibration is per-tensor activation scales from a calibration sweep and
-decides accuracy; `uniform:SCALE` is a flat stand-in for latency work only.
+The calibration is per-tensor activation scales from a representative
+Observation sweep and decides accuracy; `uniform:SCALE` is a flat stand-in for
+latency work only. The storage-neutral input is a JSONL manifest whose rows use
+the same fields as inference, with image values expressed as paths relative to
+the manifest:
 
-Generate one directly from a representative LeRobot dataset. ApxInf selects a
-deterministic task-balanced subset (one sample per task by default), adapts each
-record to the normal business Observation, and runs the native BF16 collector
-through `Pi05Policy` preprocessing:
+```json
+{"observation/image":"frames/000-base.png","observation/wrist_image":"frames/000-wrist.png","prompt":"pick up the block","observation/state":[0.1,0.2,0.3]}
+```
 
 ```bash
 python3 scripts/calibrate_pi05.py \
   --model-dir "$APXINF_MODEL_DIR" \
-  --dataset organization/deployment-dataset \
-  --dataset-root /optional/local/dataset/root
+  --manifest /path/to/observations.jsonl
 ```
 
-`--samples N` overrides the balanced sample count and
-`--output PATH` overrides the default `<model-dir>/calibration.json`. For an
-offline or exactly replayable run, use `--input-dir DIR` with Observation NPZs;
-repeated `--input FILE` remains supported for existing automation. NPZs contain
-the same camera, prompt, and optional state fields used by inference, never
-preprocessed `rgb`, `token_ids`, or `noise` tensors.
+The calibration job itself accepts any iterable of model-native Observations;
+JSONL is only the portable CLI adapter. If the deployment data already uses
+LeRobot, an optional adapter can select a deterministic task-balanced subset
+(one sample per task by default):
+
+```bash
+python3 scripts/calibrate_pi05.py \
+  --model-dir "$APXINF_MODEL_DIR" \
+  --dataset organization/deployment-dataset
+```
+
+This path requires LeRobot but is not limited to LIBERO. `--dataset-root PATH`
+selects an existing local LeRobot dataset and `--samples N` overrides the sample
+count. For exact replay of existing automation, `--input-dir DIR` and repeated
+Observation NPZ `--input FILE` remain supported. `--output PATH` overrides the
+default `<model-dir>/calibration.json`.
 
 The output is a self-describing, checkpoint-bound profile whose logical site set
 must exactly match the FP8 execution plan before inference can start. Existing
@@ -333,24 +344,10 @@ replace the dataset with `--zero-fixture`; the manifest labels that
 profile synthetic and non-production so it cannot be mistaken for representative
 calibration. Calibration and tactic tuning remain separate operations.
 
-Maintainers can run the stricter reproducibility, BF16/FP8 accuracy, and timing
-release gate with two independently generated profiles:
-
-```bash
-python3 scripts/validate_pi05_calibration.py \
-  --model-dir "$APXINF_MODEL_DIR" \
-  --profile /path/to/calibration-run-1.json \
-  --profile /path/to/calibration-run-2.json \
-  --input /path/to/calibration-sample-000.npz \
-  --input /path/to/calibration-sample-001.npz \
-  --max-relative-l2 0.20 --warmup 10 --samples 30 \
-  --out /path/to/thor-validation.json
-```
-
-See [PI0.5 FP8 calibration on Thor](doc/pi05-fp8-calibration-thor.md) and the
-[LIBERO-10 sample sweep](doc/pi05-fp8-calibration-libero10.md) for the evidence
-behind the current `absmax`, margin `1.1`, and accuracy-gate choices. Sample
-count and acceptance thresholds remain deployment-specific.
+Maintainer-only reproducibility, accuracy, and timing gates are documented in
+[PI0.5 FP8 calibration on Thor](doc/pi05-fp8-calibration-thor.md) and the
+[LIBERO-10 sample sweep](doc/pi05-fp8-calibration-libero10.md). Sample count and
+acceptance thresholds remain deployment-specific.
 
 ### INT8
 

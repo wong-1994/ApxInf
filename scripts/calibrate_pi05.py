@@ -24,16 +24,31 @@ if _APXINF_PKG.is_dir() and str(_APXINF_PKG) not in sys.path:
 
 SCHEMA = "apxinf.pi05.fp8-calibration.v1"
 
+if __package__:
+    from .pi05_calibration_data import (
+        load_lerobot_observations,
+        load_npz_observations,
+        load_observation_manifest,
+        task_stratified_indices,
+    )
+else:
+    from pi05_calibration_data import (
+        load_lerobot_observations,
+        load_npz_observations,
+        load_observation_manifest,
+        task_stratified_indices,
+    )
+
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         usage=(
-            "%(prog)s --model-dir MODEL_DIR --dataset REPO_ID "
-            "[--dataset-root PATH] [--samples N] [--output PATH]"
+            "%(prog)s --model-dir MODEL_DIR --manifest OBSERVATIONS.jsonl "
+            "[--output PATH]"
         ),
         description=(
-            "Generate a checkpoint-bound PI0.5 FP8 profile directly from a "
-            "representative LeRobot dataset. NPZ inputs remain available for replay."
+            "Generate a checkpoint-bound PI0.5 FP8 profile from representative "
+            "business Observations. LeRobot and NPZ are optional source adapters."
         ),
     )
     parser.add_argument("--model-dir", required=True, type=pathlib.Path)
@@ -51,8 +66,13 @@ def parse_args(argv=None):
         help="directory of replayable Observation *.npz files",
     )
     parser.add_argument(
+        "--manifest",
+        type=pathlib.Path,
+        help="JSONL Observation manifest; image fields are paths relative to this file",
+    )
+    parser.add_argument(
         "--dataset",
-        help="LeRobot dataset repository id; records are adapted directly without NPZ export",
+        help="optional LeRobot dataset repository id",
     )
     parser.add_argument(
         "--dataset-root",
@@ -95,12 +115,18 @@ def validate_args(args):
         raise ValueError(f"model directory does not exist: {args.model_dir}")
     modes = sum(
         bool(value)
-        for value in (args.input, args.input_dir, args.dataset, args.zero_fixture)
+        for value in (
+            args.input,
+            args.input_dir,
+            args.manifest,
+            args.dataset,
+            args.zero_fixture,
+        )
     )
     if modes != 1:
         raise ValueError(
-            "pass exactly one calibration source: --dataset, --input-dir, one or more "
-            "--input files, or --zero-fixture"
+            "pass exactly one calibration source: --manifest, --dataset, --input-dir, "
+            "one or more --input files, or --zero-fixture"
         )
     if args.dataset_root is not None and args.dataset is None:
         raise ValueError("--dataset-root requires --dataset")
@@ -123,7 +149,7 @@ def validate_args(args):
     if args.data_id is not None and not args.data_id.strip():
         raise ValueError("--data-id must not be empty")
     if (
-        (args.input or args.input_dir or args.dataset)
+        (args.input or args.input_dir or args.manifest or args.dataset)
         and args.data_id is not None
         and args.data_id.startswith("synthetic:")
     ):
@@ -136,6 +162,8 @@ def validate_args(args):
             raise ValueError(f"calibration input directory does not exist: {args.input_dir}")
         if not any(args.input_dir.glob("*.npz")):
             raise ValueError(f"calibration input directory has no *.npz files: {args.input_dir}")
+    if args.manifest is not None and not args.manifest.is_file():
+        raise ValueError(f"calibration manifest does not exist: {args.manifest}")
     checkpoint = args.checkpoint or args.model_dir / "model.safetensors"
     if not checkpoint.exists():
         raise ValueError(f"checkpoint does not exist: {checkpoint}")
@@ -143,84 +171,6 @@ def validate_args(args):
     if output.exists() and not args.force:
         raise ValueError(f"output already exists (pass --force to replace it): {output}")
     return output, checkpoint
-
-
-def _decode_npz_value(value):
-    array = np.asarray(value)
-    if array.ndim == 0:
-        return array.item()
-    return np.ascontiguousarray(array)
-
-
-def _load_npz_observations(paths: Sequence[pathlib.Path]):
-    for path in paths:
-        with np.load(path, allow_pickle=False) as sample:
-            yield {name: _decode_npz_value(sample[name]) for name in sample.files}
-
-
-def task_stratified_indices(
-    task_indices: Sequence[object], *, sample_count: int, seed: int
-) -> list[int]:
-    """Choose deterministic, balanced frame indices across every dataset task."""
-    if sample_count < 1:
-        raise ValueError("calibration sample count must be positive")
-    if sample_count > len(task_indices):
-        raise ValueError(
-            f"requested {sample_count} calibration samples from {len(task_indices)} frames"
-        )
-    groups: dict[object, list[int]] = {}
-    for index, raw_task in enumerate(task_indices):
-        task = raw_task.item() if hasattr(raw_task, "item") else raw_task
-        groups.setdefault(task, []).append(index)
-    if sample_count < len(groups):
-        raise ValueError(
-            f"--samples={sample_count} cannot cover all {len(groups)} dataset tasks; "
-            "pass a deployment-specific dataset split or increase --samples"
-        )
-
-    rng = np.random.default_rng(seed)
-    tasks = sorted(groups, key=lambda value: (type(value).__name__, repr(value)))
-    queues = {task: list(rng.permutation(groups[task])) for task in tasks}
-    selected: list[int] = []
-    while len(selected) < sample_count:
-        progressed = False
-        for task in tasks:
-            if queues[task] and len(selected) < sample_count:
-                selected.append(int(queues[task].pop()))
-                progressed = True
-        if not progressed:
-            break
-    return selected
-
-
-def _open_lerobot_dataset(repo_id: str, root: pathlib.Path | None):
-    try:
-        from lerobot.datasets import LeRobotDataset
-    except ImportError as error:
-        raise ImportError(
-            "--dataset requires LeRobot; install it in the calibration environment, "
-            "or use --input-dir for replayable NPZ observations"
-        ) from error
-    options = {"repo_id": repo_id, "return_uint8": True}
-    if root is not None:
-        options["root"] = root
-    try:
-        return LeRobotDataset(**options)
-    except TypeError as error:
-        # LeRobot v2 did not expose return_uint8; the existing adapter also accepts
-        # its CHW float [0,1] images, so retain compatibility with that read path.
-        if "return_uint8" not in str(error):
-            raise
-        options.pop("return_uint8")
-        return LeRobotDataset(**options)
-
-
-def _task_indices(dataset) -> list[object] | None:
-    try:
-        values = dataset.hf_dataset["task_index"]
-    except (AttributeError, KeyError, TypeError):
-        return None
-    return [value.item() if hasattr(value, "item") else value for value in values]
 
 
 def _observation_identity(observations: Sequence[Mapping[str, object]]) -> str:
@@ -258,28 +208,28 @@ def resolve_observations(args, policy):
         return (observation,), "synthetic:zero-observation-v1"
 
     if args.dataset is not None:
-        from apxinf.adapters.lerobot import observation_to_apxinf
+        observations = load_lerobot_observations(
+            args.dataset,
+            root=args.dataset_root,
+            image_keys=policy.image_keys,
+            sample_count=args.samples,
+            seed=args.seed,
+        )
+        return observations, _observation_identity(observations)
 
-        dataset = _open_lerobot_dataset(args.dataset, args.dataset_root)
-        tasks = _task_indices(dataset)
-        if tasks is None:
-            if args.samples is None:
-                raise ValueError(
-                    "LeRobot dataset has no task_index metadata; pass --samples explicitly"
-                )
-            tasks = [0] * len(dataset)
-        sample_count = args.samples if args.samples is not None else len(set(tasks))
-        indices = task_stratified_indices(tasks, sample_count=sample_count, seed=args.seed)
-        observations = tuple(
-            observation_to_apxinf(dataset[index], image_keys=policy.image_keys)
-            for index in indices
+    if args.manifest is not None:
+        observations = load_observation_manifest(
+            args.manifest,
+            image_keys=policy.image_keys,
+            prompt_key=policy.prompt_key,
+            state_key=policy.state_key,
         )
         return observations, _observation_identity(observations)
 
     paths = tuple(args.input)
     if args.input_dir is not None:
         paths = tuple(sorted(args.input_dir.glob("*.npz")))
-    observations = tuple(_load_npz_observations(paths))
+    observations = load_npz_observations(paths)
     return observations, calibration_data_identity(paths, args.data_id)
 
 
@@ -429,77 +379,100 @@ class CalibrationJobResult:
 
 
 class Pi05CalibrationJob:
-    """Own the user-facing PI0.5 Observation-to-profile operation."""
+    """Turn model-native Observations into one PI0.5 calibration profile."""
 
-    def __init__(self, args, *, policy_factory=None):
+    def __init__(self, args, *, policy, output: pathlib.Path, checkpoint: pathlib.Path):
         self.args = args
-        self.policy_factory = policy_factory
+        self.policy = policy
+        self.output = output
+        self.checkpoint = checkpoint
 
-    def run(self) -> CalibrationJobResult:
+    def run(
+        self,
+        observations: Iterable[Mapping[str, object]],
+        *,
+        data_identity: str,
+        bootstrap: bool = False,
+    ) -> CalibrationJobResult:
         args = self.args
-        output, checkpoint = validate_args(args)
-        if self.policy_factory is None:
-            from apxinf import Pi05Policy
-
-            policy_factory = Pi05Policy.from_pretrained
-        else:
-            policy_factory = self.policy_factory
         from apxinf.calibration import CalibrationRunner
 
-        policy_options = {
-            "checkpoint": checkpoint,
-            "device": args.device,
-            "precision": "bf16",
-            "seed": args.seed,
-            "prompt_key": args.prompt_key,
-            "state_key": args.state_key,
-            "discrete_state": args.discrete_state,
-            "state_norm_key": args.state_norm_key,
-        }
-        if args.image_key:
-            policy_options["image_keys"] = tuple(args.image_key)
-            policy_options["num_views"] = args.num_views or len(args.image_key)
-        if args.tokenizer_path is not None:
-            policy_options["tokenizer_path"] = args.tokenizer_path
-        if args.action_horizon is not None:
-            policy_options["action_horizon"] = args.action_horizon
-
-        policy = policy_factory(args.model_dir, **policy_options)
-        try:
-            observations, inferred_identity = resolve_observations(args, policy)
-            plan = policy.calibration_plan()
-            if args.zero_fixture:
-                plan = replace(
-                    plan,
-                    minimum_amax={
-                        "vision.patch_input": 1.0 / args.margin,
-                        "action.input": 5.0 / args.margin,
-                    },
-                )
-            runner = CalibrationRunner(
-                policy,
+        plan = self.policy.calibration_plan()
+        if bootstrap:
+            plan = replace(
                 plan,
-                checkpoint=checkpoint_identity(checkpoint),
-                data_identity=args.data_id or inferred_identity,
-                source_revision=source_revision(args.source_revision),
-                device={"requested": args.device, "host": platform.platform()},
-                margin=args.margin,
-                seed=args.seed,
-                bootstrap=args.zero_fixture,
+                minimum_amax={
+                    "vision.patch_input": 1.0 / args.margin,
+                    "action.input": 5.0 / args.margin,
+                },
             )
-            document = runner.run(observations)
-        finally:
-            policy.close()
+        runner = CalibrationRunner(
+            self.policy,
+            plan,
+            checkpoint=checkpoint_identity(self.checkpoint),
+            data_identity=data_identity,
+            source_revision=source_revision(args.source_revision),
+            device={"requested": args.device, "host": platform.platform()},
+            margin=args.margin,
+            seed=args.seed,
+            bootstrap=bootstrap,
+        )
+        document = runner.run(observations)
 
         if document is None:
             return CalibrationJobResult(document=None, output=None)
-        write_profile(output, document, force=args.force)
-        return CalibrationJobResult(document=document, output=output)
+        write_profile(self.output, document, force=args.force)
+        return CalibrationJobResult(document=document, output=self.output)
+
+
+def _load_policy(args, checkpoint: pathlib.Path, policy_factory=None):
+    if policy_factory is None:
+        from apxinf import Pi05Policy
+
+        policy_factory = Pi05Policy.from_pretrained
+    policy_options = {
+        "checkpoint": checkpoint,
+        "device": args.device,
+        "precision": "bf16",
+        "seed": args.seed,
+        "prompt_key": args.prompt_key,
+        "state_key": args.state_key,
+        "discrete_state": args.discrete_state,
+        "state_norm_key": args.state_norm_key,
+    }
+    if args.image_key:
+        policy_options["image_keys"] = tuple(args.image_key)
+        policy_options["num_views"] = args.num_views or len(args.image_key)
+    if args.tokenizer_path is not None:
+        policy_options["tokenizer_path"] = args.tokenizer_path
+    if args.action_horizon is not None:
+        policy_options["action_horizon"] = args.action_horizon
+    return policy_factory(args.model_dir, **policy_options)
+
+
+def run_from_args(args, *, policy_factory=None) -> CalibrationJobResult:
+    """CLI adapter: resolve one storage source, then cross the job seam."""
+    output, checkpoint = validate_args(args)
+    policy = _load_policy(args, checkpoint, policy_factory)
+    try:
+        observations, inferred_identity = resolve_observations(args, policy)
+        return Pi05CalibrationJob(
+            args,
+            policy=policy,
+            output=output,
+            checkpoint=checkpoint,
+        ).run(
+            observations,
+            data_identity=args.data_id or inferred_identity,
+            bootstrap=args.zero_fixture,
+        )
+    finally:
+        policy.close()
 
 
 def main(argv=None):
     args = parse_args(argv)
-    result = Pi05CalibrationJob(args).run()
+    result = run_from_args(args)
     document = result.document
     if document is None:
         print("dynamic activation FP8 is calibration-free; no profile was generated")

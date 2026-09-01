@@ -5,9 +5,10 @@ import unittest
 from unittest import mock
 
 import numpy as np
+from PIL import Image
 
 from apxinf.calibration import CalibrationPlan
-from scripts import calibrate_pi05
+from scripts import calibrate_pi05, pi05_calibration_data
 
 
 class CalibratePi05Test(unittest.TestCase):
@@ -68,7 +69,7 @@ class CalibratePi05Test(unittest.TestCase):
             ]
         )
         with mock.patch.object(
-            calibrate_pi05, "_open_lerobot_dataset", return_value=Dataset()
+            pi05_calibration_data, "_open_lerobot_dataset", return_value=Dataset()
         ):
             observations, identity = calibrate_pi05.resolve_observations(args, Policy())
 
@@ -97,7 +98,7 @@ class CalibratePi05Test(unittest.TestCase):
             ["--model-dir", "/model", "--dataset", "company/unlabeled"]
         )
         with mock.patch.object(
-            calibrate_pi05, "_open_lerobot_dataset", return_value=Dataset()
+            pi05_calibration_data, "_open_lerobot_dataset", return_value=Dataset()
         ):
             with self.assertRaisesRegex(ValueError, "no task_index.*--samples"):
                 calibrate_pi05.resolve_observations(args, Policy())
@@ -125,6 +126,39 @@ class CalibratePi05Test(unittest.TestCase):
             observations, identity = calibrate_pi05.resolve_observations(args, Policy())
 
         self.assertEqual([item["prompt"] for item in observations], ["two", "ten"])
+        self.assertTrue(identity.startswith("sha256:"))
+
+    def test_manifest_loads_model_native_observations_without_lerobot(self):
+        class Policy:
+            image_keys = ("observation/image", "observation/wrist_image")
+            prompt_key = "prompt"
+            state_key = "observation/state"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            Image.fromarray(np.full((3, 4, 3), 11, np.uint8)).save(root / "base.png")
+            Image.fromarray(np.full((3, 4, 3), 22, np.uint8)).save(root / "wrist.png")
+            manifest = root / "observations.jsonl"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "observation/image": "base.png",
+                        "observation/wrist_image": "wrist.png",
+                        "observation/state": [1, 2, 3],
+                        "prompt": "pick up the block",
+                    }
+                )
+                + "\n"
+            )
+            args = calibrate_pi05.parse_args(
+                ["--model-dir", directory, "--manifest", str(manifest)]
+            )
+            observations, identity = calibrate_pi05.resolve_observations(args, Policy())
+
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0]["prompt"], "pick up the block")
+        self.assertEqual(observations[0]["observation/image"].dtype, np.uint8)
+        self.assertEqual(observations[0]["observation/state"].dtype, np.float32)
         self.assertTrue(identity.startswith("sha256:"))
 
     def test_calibration_job_consumes_dataset_source_end_to_end(self):
@@ -185,11 +219,11 @@ class CalibratePi05Test(unittest.TestCase):
                 ]
             )
             with mock.patch.object(
-                calibrate_pi05, "_open_lerobot_dataset", return_value=Dataset()
+                pi05_calibration_data, "_open_lerobot_dataset", return_value=Dataset()
             ):
-                result = calibrate_pi05.Pi05CalibrationJob(
+                result = calibrate_pi05.run_from_args(
                     args, policy_factory=lambda *_args, **_kwargs: Policy()
-                ).run()
+                )
 
             document = json.loads(output.read_text())
 
@@ -197,6 +231,49 @@ class CalibratePi05Test(unittest.TestCase):
         self.assertEqual(document["calibration_data"]["sample_count"], 2)
         self.assertTrue(document["calibration_data"]["identity"].startswith("sha256:"))
         self.assertEqual(document["scales"]["vision.patch_input"]["amax"], 2.0)
+
+    def test_calibration_job_accepts_observation_iterable_without_source_adapter(self):
+        class Policy:
+            def calibration_plan(self):
+                return CalibrationPlan.runtime_validated_sites(
+                    model_family="pi05",
+                    sites=("vision.patch_input",),
+                    schema=calibrate_pi05.SCHEMA,
+                    seed_algorithm="numpy-pcg64-seed-sequence-v1",
+                )
+
+            def collect_calibration(self, observation, context):
+                return {"vision.patch_input": float(observation["amax"])}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            checkpoint = root / "model.safetensors"
+            checkpoint.write_bytes(b"weights")
+            output = root / "profile.json"
+            args = calibrate_pi05.parse_args(
+                [
+                    "--model-dir",
+                    str(root),
+                    "--output",
+                    str(output),
+                    "--zero-fixture",
+                    "--source-revision",
+                    "test-revision",
+                ]
+            )
+            observations = ({"amax": value} for value in (2.0, 7.0))
+            result = calibrate_pi05.Pi05CalibrationJob(
+                args,
+                policy=Policy(),
+                output=output,
+                checkpoint=checkpoint,
+            ).run(
+                observations,
+                data_identity="dataset:custom-observation-source",
+            )
+
+        self.assertEqual(result.document["calibration_data"]["sample_count"], 2)
+        self.assertEqual(result.document["scales"]["vision.patch_input"]["amax"], 7.0)
 
     def test_calibration_job_maps_observation_to_manifest(self):
         import apxinf
