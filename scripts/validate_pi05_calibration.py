@@ -170,11 +170,21 @@ def _sha256(path: pathlib.Path) -> str:
 
 def _stats(samples: Sequence[float]) -> dict[str, Any]:
     ordered = sorted(float(value) for value in samples)
+
+    def percentile(fraction: float) -> float:
+        position = fraction * (len(ordered) - 1)
+        lower = int(np.floor(position))
+        upper = int(np.ceil(position))
+        if lower == upper:
+            return ordered[lower]
+        weight = position - lower
+        return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
     return {
         "samples": len(ordered),
         "min": ordered[0],
-        "p50": ordered[int(0.50 * (len(ordered) - 1))],
-        "p95": ordered[int(0.95 * (len(ordered) - 1))],
+        "p50": percentile(0.50),
+        "p95": percentile(0.95),
         "max": ordered[-1],
         "mean": statistics.fmean(ordered),
         "std": statistics.pstdev(ordered) if len(ordered) > 1 else 0.0,
@@ -420,7 +430,10 @@ def main(argv=None) -> int:
             "state_key": args.state_key,
             "discrete_state": args.discrete_state,
         },
-        "coverage": {**coverage, "fp8_runtime_accepted": True},
+        "coverage": {
+            **coverage,
+            "fp8_runtime_accepted": bool(coverage["complete"]),
+        },
         "reproducibility": reproducibility,
         "accuracy": {
             **accuracy,

@@ -90,5 +90,18 @@ policy = AutoPolicy.from_pretrained(
 )
 ```
 
+At FP8 startup, ApxInf reads the checkpoint shards to compare their SHA-256
+identity with the profile. This can add startup time on slower storage. An
+identity mismatch emits a warning and continues; malformed profiles, missing or
+invalid scales, and incompatible execution plans still fail because the runtime
+cannot use them safely.
+
+`tactics.json` is optional. If it is absent, the runtime warns and continues
+with compatible kernel fallbacks; calibration is unaffected, though performance
+may be lower than with tuned tactics.
+
+Profiles using an older calibration schema are not migrated automatically.
+Regenerate `calibration.json` with the ApxInf version being deployed.
+
 Run `python3 scripts/calibrate_pi05.py --help` for checkpoint-specific input
 overrides and reproducibility options.

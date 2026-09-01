@@ -247,16 +247,18 @@ def deterministic_noise(policy, seed: int, sample_index: int) -> np.ndarray:
     )
 
 
-def merge_records(aggregate, records):
-    from apxinf.calibration import merge_records as merge
-
-    merge(aggregate, records)
-
-
 def _hash_files(paths: Iterable[pathlib.Path], root: pathlib.Path) -> str:
     digest = hashlib.sha256()
-    for path in sorted(paths, key=lambda item: str(item.relative_to(root))):
-        digest.update(str(path.relative_to(root)).encode())
+    canonical = []
+    for path in paths:
+        try:
+            relative = path.relative_to(root).as_posix()
+            encoded = relative.encode("utf-8", errors="strict")
+        except (UnicodeEncodeError, ValueError) as error:
+            raise ValueError(f"checkpoint path is not canonical UTF-8: {path}") from error
+        canonical.append((encoded, path))
+    for relative, path in sorted(canonical, key=lambda item: item[0]):
+        digest.update(relative)
         digest.update(b"\0")
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -264,14 +266,35 @@ def _hash_files(paths: Iterable[pathlib.Path], root: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def _checkpoint_index_files(index_path: pathlib.Path) -> list[pathlib.Path]:
+    index = json.loads(index_path.read_text())
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict):
+        raise ValueError(f"checkpoint index has no weight_map: {index_path}")
+    names = set()
+    for value in weight_map.values():
+        if not isinstance(value, str):
+            raise ValueError(f"checkpoint index has a non-string shard: {index_path}")
+        relative = pathlib.PurePosixPath(value)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"checkpoint index has an unsafe shard path: {value}")
+        names.add(relative)
+    return [index_path.parent / name for name in names]
+
+
 def checkpoint_identity(checkpoint: pathlib.Path) -> str:
     if checkpoint.is_dir():
-        files = list(checkpoint.rglob("*.safetensors"))
         root = checkpoint
+        index = checkpoint / "model.safetensors.index.json"
+        model = checkpoint / "model.safetensors"
+        if index.is_file():
+            files = _checkpoint_index_files(index)
+        elif model.is_file():
+            files = [model]
+        else:
+            files = list(checkpoint.rglob("*.safetensors"))
     elif checkpoint.name.endswith(".index.json"):
-        index = json.loads(checkpoint.read_text())
-        shards = sorted(set(index.get("weight_map", {}).values()))
-        files = [checkpoint, *(checkpoint.parent / name for name in shards)]
+        files = _checkpoint_index_files(checkpoint)
         root = checkpoint.parent
     else:
         files = [checkpoint]
@@ -310,51 +333,6 @@ def source_revision(explicit=None) -> str:
         raise ValueError(
             "cannot determine source revision; pass --source-revision explicitly"
         ) from error
-
-
-def calibration_document(
-    records,
-    *,
-    margin,
-    sample_count,
-    bootstrap,
-    required_sites,
-    checkpoint,
-    data_identity,
-    seed,
-    device,
-    revision=None,
-):
-    from apxinf.calibration import (
-        CalibrationPlan,
-        build_calibration_document,
-    )
-
-    required = tuple(required_sites)
-    minimum_amax = (
-        {"vision.patch_input": 1.0 / margin, "action.input": 5.0 / margin}
-        if bootstrap
-        else {}
-    )
-    plan = CalibrationPlan.runtime_validated_sites(
-        model_family="pi05",
-        sites=required,
-        schema=SCHEMA,
-        seed_algorithm="numpy-pcg64-seed-sequence-v1",
-    )
-    plan = replace(plan, minimum_amax=minimum_amax)
-    return build_calibration_document(
-        records,
-        plan=plan,
-        checkpoint=checkpoint,
-        data_identity=data_identity,
-        source_revision=source_revision(revision),
-        device={"requested": device, "host": platform.platform()},
-        margin=margin,
-        seed=seed,
-        bootstrap=bootstrap,
-        sample_count=sample_count,
-    )
 
 
 def write_profile(output: pathlib.Path, document, *, force: bool) -> None:

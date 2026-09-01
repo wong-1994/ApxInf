@@ -1,7 +1,8 @@
 //! Native BF16 activation collection for PI0.5 FP8 calibration.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use apxinf_core::{Backend, Error, Result, Tensor};
 use apxinf_cuda::kernels::gemm::Bf16ActivationObserver;
@@ -12,7 +13,7 @@ pub struct Pi05CalibrationObserver {
     backend: Arc<RuntimeBackend>,
     sites: HashMap<usize, String>,
     plan: Pi05CalibrationPlan,
-    records: Mutex<BTreeMap<String, f32>>,
+    records: RefCell<BTreeMap<String, f32>>,
 }
 
 impl Pi05CalibrationObserver {
@@ -91,12 +92,12 @@ impl Pi05CalibrationObserver {
             backend,
             sites,
             plan,
-            records: Mutex::new(BTreeMap::new()),
+            records: RefCell::new(BTreeMap::new()),
         })
     }
 
     pub fn records(&self) -> Result<BTreeMap<String, f32>> {
-        let records = self.records.lock().unwrap().clone();
+        let records = self.records.borrow().clone();
         let expected = self.plan.sites().iter().cloned().collect::<BTreeSet<_>>();
         let observed = records.keys().cloned().collect::<BTreeSet<_>>();
         if observed != expected {
@@ -124,7 +125,7 @@ impl Bf16ActivationObserver for Pi05CalibrationObserver {
         // the collector retains only one scalar per logical site.
         let values = self.backend.to_cpu(activation)?.to_f32_vec()?;
         let amax = finite_amax(values, name)?;
-        let mut records = self.records.lock().unwrap();
+        let mut records = self.records.borrow_mut();
         records
             .entry(name.clone())
             .and_modify(|current| *current = current.max(amax))

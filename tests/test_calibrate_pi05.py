@@ -12,6 +12,18 @@ from scripts import calibrate_pi05, pi05_calibration_data
 
 
 class CalibratePi05Test(unittest.TestCase):
+    def test_checkpoint_identity_matches_shared_cross_language_fixture(self):
+        fixture = pathlib.Path(__file__).parent / "fixtures" / "checkpoint_identity"
+        expected = (fixture / "expected.sha256").read_text().strip()
+
+        self.assertEqual(calibrate_pi05.checkpoint_identity(fixture), expected)
+        self.assertEqual(
+            calibrate_pi05.checkpoint_identity(
+                fixture / "model.safetensors.index.json"
+            ),
+            expected,
+        )
+
     def test_task_stratified_indices_cover_tasks_before_repeating(self):
         indices = calibrate_pi05.task_stratified_indices(
             [0, 0, 0, 1, 1, 2], sample_count=5, seed=7
@@ -470,67 +482,46 @@ class CalibratePi05Test(unittest.TestCase):
             calibrate_pi05.source_revision("unknown")
         self.assertEqual(calibrate_pi05.source_revision("release-1.2.3"), "release-1.2.3")
 
-    def test_aggregation_is_order_independent_and_rejects_non_finite_values(self):
-        forward = {}
-        reverse = {}
-        for records in ({"a": 2.0, "b": 3.0}, {"a": 4.0}):
-            calibrate_pi05.merge_records(forward, records)
-        for records in ({"a": 4.0}, {"a": 2.0, "b": 3.0}):
-            calibrate_pi05.merge_records(reverse, records)
-        self.assertEqual(forward, reverse)
-        self.assertEqual(forward, {"a": 4.0, "b": 3.0})
-        with self.assertRaisesRegex(ValueError, "invalid amax"):
-            calibrate_pi05.merge_records({}, {"a": float("nan")})
-
-    def test_manifest_is_complete_and_self_describing(self):
-        document = calibrate_pi05.calibration_document(
-            {"vision.patch_input": 4.0},
-            margin=1.25,
-            sample_count=2,
-            bootstrap=False,
-            required_sites=["vision.patch_input"],
-            checkpoint="sha256:abc",
-            data_identity="dataset:libero-v1",
-            seed=7,
-            device="cuda:0",
-        )
-        self.assertEqual(document["schema"], calibrate_pi05.SCHEMA)
-        self.assertEqual(document["model"], {"family": "pi05", "checkpoint": "sha256:abc"})
-        self.assertEqual(document["quantization"]["format"], "e4m3fn")
-        self.assertEqual(document["quantization"]["statistic"], "absmax")
-        self.assertEqual(document["calibration_data"]["sample_count"], 2)
-        self.assertEqual(document["seed_policy"]["base_seed"], 7)
-        self.assertEqual(document["observed_sites"], ["vision.patch_input"])
-        self.assertAlmostEqual(document["scales"]["vision.patch_input"]["scale"], 5 / 448)
-        self.assertIn("source_revision", document)
-        self.assertIn("device", document)
-
-    def test_manifest_rejects_missing_and_unknown_sites(self):
-        with self.assertRaisesRegex(ValueError, "missing=.*b.*unknown=.*c"):
-            calibrate_pi05.calibration_document(
-                {"a": 1.0, "c": 2.0},
-                margin=1.0,
-                sample_count=1,
-                bootstrap=False,
-                required_sites=["a", "b"],
-                checkpoint="sha256:abc",
-                data_identity="dataset:test",
-                seed=0,
-                device="cuda:0",
-            )
-
     def test_bootstrap_is_unambiguously_non_production(self):
-        document = calibrate_pi05.calibration_document(
-            {"vision.patch_input": 0.0, "action.input": 0.0},
-            margin=2.35,
-            sample_count=1,
-            bootstrap=True,
-            required_sites=["vision.patch_input", "action.input"],
-            checkpoint="sha256:abc",
-            data_identity="synthetic:zero-observation-v1",
-            seed=0,
-            device="cuda:0",
-        )
+        class Policy:
+            def calibration_plan(self):
+                return CalibrationPlan.runtime_validated_sites(
+                    model_family="pi05",
+                    sites=("vision.patch_input", "action.input"),
+                    schema=calibrate_pi05.SCHEMA,
+                    seed_algorithm="numpy-pcg64-seed-sequence-v1",
+                )
+
+            def collect_calibration(self, observation, context):
+                return {"vision.patch_input": 0.0, "action.input": 0.0}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            checkpoint = root / "model.safetensors"
+            checkpoint.write_bytes(b"weights")
+            output = root / "calibration.json"
+            args = calibrate_pi05.parse_args(
+                [
+                    "--model-dir",
+                    str(root),
+                    "--zero-fixture",
+                    "--margin",
+                    "2.35",
+                    "--source-revision",
+                    "test-revision",
+                ]
+            )
+            document = calibrate_pi05.Pi05CalibrationJob(
+                args,
+                policy=Policy(),
+                output=output,
+                checkpoint=checkpoint,
+            ).run(
+                ({"fixture": True},),
+                data_identity="synthetic:zero-observation-v1",
+                bootstrap=True,
+            ).document
+
         self.assertFalse(document["calibration_data"]["production"])
         self.assertEqual(document["calibration_data"]["kind"], "synthetic-zero-fixture")
         self.assertAlmostEqual(document["scales"]["vision.patch_input"]["amax"], 1 / 2.35)

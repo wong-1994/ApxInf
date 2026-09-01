@@ -124,6 +124,7 @@ fn extend_sites(sites: &mut Vec<String>, layers: &[LayerCalibrationSites]) {
 #[derive(Debug, Clone)]
 pub struct StaticFp8Calibration {
     scales: HashMap<String, f32>,
+    warnings: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -238,7 +239,11 @@ impl StaticFp8Calibration {
     ) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| Error::Other(format!("read {}: {e}", path.display())))?;
-        Self::from_json_str(&raw, config, checkpoint)
+        let calibration = Self::from_json_str(&raw, config, checkpoint)?;
+        for warning in calibration.warnings() {
+            eprintln!("warning: {warning}");
+        }
+        Ok(calibration)
     }
 
     /// Parse and fully validate a profile before an FP8 runtime is constructed.
@@ -257,8 +262,12 @@ impl StaticFp8Calibration {
                 profile.model.family
             )));
         }
+        let mut warnings = Vec::new();
         if profile.model.checkpoint != checkpoint {
-            return Err(Error::Other("π0.5 FP8 calibration checkpoint mismatch".into()));
+            warnings.push(format!(
+                "π0.5 FP8 calibration checkpoint identity mismatch: profile={}, runtime={}; continuing with the supplied profile",
+                profile.model.checkpoint, checkpoint
+            ));
         }
         if profile.quantization.format != FP8_FORMAT
             || profile.quantization.statistic != CALIBRATION_STATISTIC
@@ -345,7 +354,7 @@ impl StaticFp8Calibration {
             }
             scales.insert(name, entry.scale);
         }
-        Ok(Self { scales })
+        Ok(Self { scales, warnings })
     }
 
     pub fn scale(&self, name: &str) -> Result<f32> {
@@ -362,6 +371,10 @@ impl StaticFp8Calibration {
     pub fn is_empty(&self) -> bool {
         self.scales.is_empty()
     }
+
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
 }
 
 fn unique_sites(label: &str, sites: &[String]) -> Result<BTreeSet<String>> {
@@ -376,35 +389,29 @@ fn unique_sites(label: &str, sites: &[String]) -> Result<BTreeSet<String>> {
 
 /// Content identity shared by calibration generation and runtime validation.
 pub fn checkpoint_identity(path: &Path) -> Result<String> {
-    let (root, mut files) = if path.is_dir() {
-        let mut files = Vec::new();
-        collect_safetensors(path, &mut files)?;
+    let (root, files) = if path.is_dir() {
+        let index = path.join("model.safetensors.index.json");
+        let model = path.join("model.safetensors");
+        let files = if index.is_file() {
+            checkpoint_index_files(&index)?
+        } else if model.is_file() {
+            vec![model]
+        } else {
+            let mut files = Vec::new();
+            collect_safetensors(path, &mut files)?;
+            files
+        };
         (path.to_path_buf(), files)
     } else if path
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(".index.json"))
     {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|error| Error::Other(format!("read {}: {error}", path.display())))?;
-        let index: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|error| Error::Other(format!("checkpoint index JSON: {error}")))?;
-        let mut files = vec![path.to_path_buf()];
-        let weight_map = index
-            .get("weight_map")
-            .and_then(|value| value.as_object())
-            .ok_or_else(|| Error::Other("checkpoint index has no weight_map".into()))?;
-        for name in weight_map.values().filter_map(|value| value.as_str()) {
-            let shard = path.parent().unwrap_or_else(|| Path::new(".")).join(name);
-            if !files.contains(&shard) {
-                files.push(shard);
-            }
-        }
         (
             path.parent()
                 .unwrap_or_else(|| Path::new("."))
                 .to_path_buf(),
-            files,
+            checkpoint_index_files(path)?,
         )
     } else {
         (
@@ -420,11 +427,35 @@ pub fn checkpoint_identity(path: &Path) -> Result<String> {
             path.display()
         )));
     }
-    files.sort_by_key(|file| file.strip_prefix(&root).unwrap_or(file).to_path_buf());
+    let mut canonical = files
+        .into_iter()
+        .map(|file| {
+            let relative = file.strip_prefix(&root).map_err(|_| {
+                Error::Other(format!(
+                    "checkpoint file {} is outside {}",
+                    file.display(),
+                    root.display()
+                ))
+            })?;
+            let relative = relative
+                .components()
+                .map(|part| {
+                    part.as_os_str().to_str().ok_or_else(|| {
+                        Error::Other(format!(
+                            "checkpoint path is not canonical UTF-8: {}",
+                            file.display()
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join("/");
+            Ok((relative, file))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    canonical.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
     let mut digest = Sha256::new();
-    for file in files {
-        let relative = file.strip_prefix(&root).unwrap_or(&file);
-        digest.update(relative.to_string_lossy().as_bytes());
+    for (relative, file) in canonical {
+        digest.update(relative.as_bytes());
         digest.update(&[0]);
         let mut handle = File::open(&file)
             .map_err(|error| Error::Other(format!("read {}: {error}", file.display())))?;
@@ -439,6 +470,36 @@ pub fn checkpoint_identity(path: &Path) -> Result<String> {
         }
     }
     Ok(format!("sha256:{}", digest.finish_hex()))
+}
+
+fn checkpoint_index_files(index_path: &Path) -> Result<Vec<PathBuf>> {
+    let raw = std::fs::read_to_string(index_path)
+        .map_err(|error| Error::Other(format!("read {}: {error}", index_path.display())))?;
+    let index: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| Error::Other(format!("checkpoint index JSON: {error}")))?;
+    let weight_map = index
+        .get("weight_map")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| Error::Other("checkpoint index has no weight_map".into()))?;
+    let mut names = BTreeSet::new();
+    for value in weight_map.values() {
+        let name = value
+            .as_str()
+            .ok_or_else(|| Error::Other("checkpoint index has a non-string shard".into()))?;
+        let relative = Path::new(name);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(Error::Other(format!(
+                "checkpoint index has an unsafe shard path: {name}"
+            )));
+        }
+        names.insert(name.to_owned());
+    }
+    let root = index_path.parent().unwrap_or_else(|| Path::new("."));
+    Ok(names.into_iter().map(|name| root.join(name)).collect())
 }
 
 fn collect_safetensors(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -780,12 +841,11 @@ mod tests {
     }
 
     #[test]
-    fn strict_profile_rejects_incompatible_identity_and_contract() {
+    fn strict_profile_rejects_incompatible_contract() {
         let config = test_config();
         for (pointer, value) in [
             ("/schema", serde_json::json!("wrong-schema")),
             ("/model/family", serde_json::json!("other-model")),
-            ("/model/checkpoint", serde_json::json!("sha256:wrong")),
             ("/quantization/format", serde_json::json!("e5m2")),
             ("/source_revision", serde_json::json!("unknown")),
         ] {
@@ -796,6 +856,18 @@ mod tests {
                 "accepted mutation at {pointer}"
             );
         }
+    }
+
+    #[test]
+    fn checkpoint_identity_mismatch_warns_without_blocking_profile_load() {
+        let config = test_config();
+        let mut document = profile(&config);
+        document["model"]["checkpoint"] = serde_json::json!("sha256:other-checkpoint");
+
+        let calibration = parse(&document, &config).unwrap();
+
+        assert_eq!(calibration.warnings().len(), 1);
+        assert!(calibration.warnings()[0].contains("checkpoint identity mismatch"));
     }
 
     #[test]
@@ -853,6 +925,22 @@ mod tests {
         assert_eq!(
             digest.finish_hex(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn checkpoint_identity_matches_shared_cross_language_fixture() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/checkpoint_identity");
+        let expected = std::fs::read_to_string(fixture.join("expected.sha256"))
+            .unwrap()
+            .trim()
+            .to_owned();
+
+        assert_eq!(checkpoint_identity(&fixture).unwrap(), expected);
+        assert_eq!(
+            checkpoint_identity(&fixture.join("model.safetensors.index.json")).unwrap(),
+            expected
         );
     }
 }

@@ -9,6 +9,12 @@ from scripts import validate_pi05_calibration
 
 
 class ValidatePi05CalibrationTest(unittest.TestCase):
+    def test_timing_percentiles_interpolate_between_samples(self):
+        result = validate_pi05_calibration._stats([0.0, 10.0, 20.0, 30.0])
+
+        self.assertEqual(result["p50"], 15.0)
+        self.assertAlmostEqual(result["p95"], 28.5)
+
     def test_manifest_coverage_and_reproducibility_ignore_only_environment(self):
         manifest = {
             "schema": "apxinf.pi05.fp8-calibration.v1",
