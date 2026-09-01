@@ -7,6 +7,7 @@ optional outer seam that translates storage formats into that contract.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import importlib
 import json
 import pathlib
 from typing import Any
@@ -149,14 +150,22 @@ def task_stratified_indices(
     return selected
 
 
+def _lerobot_dataset_class():
+    last_error = None
+    for module_name in ("lerobot.datasets", "lerobot.datasets.lerobot_dataset"):
+        try:
+            module = importlib.import_module(module_name)
+            return module.LeRobotDataset
+        except (AttributeError, ImportError) as error:
+            last_error = error
+    raise ImportError(
+        "the optional --dataset adapter requires LeRobot; install it or use "
+        "--manifest/--input-dir"
+    ) from last_error
+
+
 def _open_lerobot_dataset(repo_id: str, root: pathlib.Path | None):
-    try:
-        from lerobot.datasets import LeRobotDataset
-    except ImportError as error:
-        raise ImportError(
-            "the optional --dataset adapter requires LeRobot; install it or use "
-            "--manifest/--input-dir"
-        ) from error
+    LeRobotDataset = _lerobot_dataset_class()
     options = {"repo_id": repo_id, "return_uint8": True}
     if root is not None:
         options["root"] = root

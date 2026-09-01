@@ -12,6 +12,23 @@ from scripts import calibrate_pi05, pi05_calibration_data
 
 
 class CalibratePi05Test(unittest.TestCase):
+    def test_lerobot_dataset_import_supports_legacy_module(self):
+        dataset_class = object()
+
+        def import_module(name):
+            if name == "lerobot.datasets":
+                return object()
+            if name == "lerobot.datasets.lerobot_dataset":
+                return mock.Mock(LeRobotDataset=dataset_class)
+            raise AssertionError(f"unexpected module: {name}")
+
+        with mock.patch.object(
+            pi05_calibration_data.importlib, "import_module", side_effect=import_module
+        ):
+            actual = pi05_calibration_data._lerobot_dataset_class()
+
+        self.assertIs(actual, dataset_class)
+
     def test_checkpoint_identity_matches_shared_cross_language_fixture(self):
         fixture = pathlib.Path(__file__).parent / "fixtures" / "checkpoint_identity"
         expected = (fixture / "expected.sha256").read_text().strip()
