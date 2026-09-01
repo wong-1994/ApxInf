@@ -317,6 +317,8 @@ For the PI0.5 LIBERO checkpoint, generate one directly from the LeRobot LIBERO
 dataset:
 
 ```bash
+pip install lerobot
+
 python3 scripts/calibrate_pi05.py \
   --model-dir "$APXINF_MODEL_DIR" \
   --dataset lerobot/libero
