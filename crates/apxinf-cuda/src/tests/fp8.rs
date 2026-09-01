@@ -10,8 +10,7 @@ use crate::kernels::elementwise::*;
 use crate::kernels::embedding::*;
 use crate::kernels::fused::*;
 use crate::kernels::gemm::{
-    autotune_cutlass_dynamic_bf16, gemm_fp8_dynamic_bf16, prepare_cublaslt_fp8_gemm,
-    DynamicFp8WeightView,
+    gemm_fp8_dynamic_bf16, prepare_cublaslt_fp8_gemm, DynamicFp8WeightView,
 };
 use crate::kernels::norm::*;
 use crate::kernels::preprocess::*;
@@ -86,14 +85,14 @@ fn fused_gqa_qkv_mrope_cache_matches_composed_kernels() {
     let values = (0..TOKENS * WIDTH)
         .map(|index| bf16::from_f32((index as f32 - 71.0) / 53.0))
         .collect::<Vec<_>>();
-    let bias = (0..WIDTH)
+    let bias_values = (0..WIDTH)
         .map(|index| bf16::from_f32((index as f32 - 19.0) / 97.0))
         .collect::<Vec<_>>();
     let qkv = backend
         .to_device(&Tensor::from_bf16(vec![TOKENS, WIDTH], &values).unwrap())
         .unwrap();
     let bias = backend
-        .to_device(&Tensor::from_bf16(vec![WIDTH], &bias).unwrap())
+        .to_device(&Tensor::from_bf16(vec![WIDTH], &bias_values).unwrap())
         .unwrap();
     let positions = [2u32, 3, 5, 7, 11, 13, 17, 19, 23];
     let position_bytes = positions
@@ -103,18 +102,44 @@ fn fused_gqa_qkv_mrope_cache_matches_composed_kernels() {
     let position_ids = CudaBuffer::alloc(position_bytes.len(), backend.device_id()).unwrap();
     position_ids.copy_from_host(&position_bytes).unwrap();
 
-    let split = split_gqa_qkv_bias_bf16(
-        backend.context(),
-        &qkv,
-        Some(&bias),
-        Q_HEADS,
-        KV_HEADS,
-        HEAD_DIM,
-    )
-    .unwrap();
+    let q_width = Q_HEADS * HEAD_DIM;
+    let kv_width = KV_HEADS * HEAD_DIM;
+    let split_values = |offset: usize, width: usize| {
+        (0..TOKENS * width)
+            .map(|index| {
+                let token = index / width;
+                let col = index % width + offset;
+                bf16::from_f32(
+                    values[token * WIDTH + col].to_f32() + bias_values[col].to_f32(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let q = backend
+        .to_device(
+            &Tensor::from_bf16(
+                vec![TOKENS, Q_HEADS, HEAD_DIM],
+                &split_values(0, q_width),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let k = backend
+        .to_device(
+            &Tensor::from_bf16(
+                vec![TOKENS, KV_HEADS, HEAD_DIM],
+                &split_values(q_width, kv_width),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let reference_v = split_values(q_width + kv_width, kv_width)
+        .into_iter()
+        .map(bf16::to_f32)
+        .collect::<Vec<_>>();
     let reference_q = crate::kernels::rope::apply_mrope(
         backend.context(),
-        &split.q,
+        &q,
         Q_HEADS,
         HEAD_DIM,
         10_000.0,
@@ -124,7 +149,7 @@ fn fused_gqa_qkv_mrope_cache_matches_composed_kernels() {
     .unwrap();
     let reference_k = crate::kernels::rope::apply_mrope(
         backend.context(),
-        &split.k,
+        &k,
         KV_HEADS,
         HEAD_DIM,
         10_000.0,
@@ -150,7 +175,6 @@ fn fused_gqa_qkv_mrope_cache_matches_composed_kernels() {
 
     let reference_q = backend.to_cpu(&reference_q).unwrap().to_f32_vec().unwrap();
     let reference_k = backend.to_cpu(&reference_k).unwrap().to_f32_vec().unwrap();
-    let reference_v = backend.to_cpu(&split.v).unwrap().to_f32_vec().unwrap();
     let fused_q = backend.to_cpu(&fused.q).unwrap().to_f32_vec().unwrap();
     let fused_k = backend.to_cpu(&fused.k).unwrap().to_f32_vec().unwrap();
     let fused_v = backend.to_cpu(&fused.v).unwrap().to_f32_vec().unwrap();
@@ -541,7 +565,6 @@ fn fa2_causal_gqa_hdim128_matches_fp32_reference() {
     const QUERY_HEADS: usize = 16;
     const KV_HEADS: usize = 2;
     const HEAD_DIM: usize = 128;
-    const CAUSAL: bool = true;
 
     let backend = CudaBackend::new(0).unwrap();
     let q_values = (0..TOKENS * QUERY_HEADS * HEAD_DIM)
@@ -565,21 +588,17 @@ fn fa2_causal_gqa_hdim128_matches_fp32_reference() {
 
     let workspace = GraphWorkspace::new(16 << 20, backend.device_id()).unwrap();
     let actual = prepare_with_workspace(&workspace, || {
-        if CAUSAL {
-            crate::kernels::attention::fa2_attention_causal(
-                backend.context(),
-                &q,
-                &k,
-                &v,
-                TOKENS,
-                TOKENS,
-                QUERY_HEADS,
-                KV_HEADS,
-                HEAD_DIM,
-            )
-        } else {
-            crate::kernels::attention::gqa_bf16(backend.context(), &q, &k, &v, TOKENS)
-        }
+        crate::kernels::attention::fa2_attention_causal(
+            backend.context(),
+            &q,
+            &k,
+            &v,
+            TOKENS,
+            TOKENS,
+            QUERY_HEADS,
+            KV_HEADS,
+            HEAD_DIM,
+        )
     })
     .unwrap();
     backend.synchronize().unwrap();
@@ -605,7 +624,7 @@ fn fa2_causal_gqa_hdim128_matches_fp32_reference() {
         for query_head in 0..QUERY_HEADS {
             let kv_head = query_head / heads_per_kv;
             let q_base = (query_token * QUERY_HEADS + query_head) * HEAD_DIM;
-            let visible_tokens = if CAUSAL { query_token + 1 } else { TOKENS };
+            let visible_tokens = query_token + 1;
             let mut maximum = f32::NEG_INFINITY;
             for key_token in 0..visible_tokens {
                 let k_base = (key_token * KV_HEADS + kv_head) * HEAD_DIM;
@@ -965,60 +984,18 @@ fn dynamic_fp8_row_channel_scales_match_bf16_reference() {
     let activation_fp8 =
         quantize_rows_bf16_e4m3_padded(backend.context(), &activation_gpu, K_PADDED).unwrap();
     let weight_fp8 = quantize_rows_bf16_e4m3(backend.context(), &weight_gpu).unwrap();
-    let weight_fp8_kn = transpose_e4m3(backend.context(), &weight_fp8.values).unwrap();
     let output_padded = gemm_fp8_dynamic_bf16(
         backend.context(),
         &activation_fp8.values,
         &activation_fp8.scales,
         DynamicFp8WeightView {
             values_e4m3: &weight_fp8.values,
-            values_e4m3_kn: &weight_fp8_kn,
             channel_scales: &weight_fp8.scales,
         },
         Some(&bias_gpu),
     )
     .unwrap();
     let output = slice_columns_bf16(backend.context(), &output_padded, N).unwrap();
-    let outer_buffer =
-        CudaBuffer::alloc_zeros(M * N_PADDED * DType::BF16.size_in_bytes(), 0).unwrap();
-    let prepare = unsafe {
-        ffi::apxinf_dynamic_prepare_fp8_gemm_bf16(
-            std::ptr::null(),
-            M as i32,
-            N_PADDED as i32,
-            K_PADDED as i32,
-        )
-    };
-    assert_eq!(prepare, 0);
-    let outer_status = unsafe {
-        ffi::apxinf_dynamic_fp8_gemm_bf16(
-            gpu_ptr(&activation_fp8.values).unwrap(),
-            gpu_ptr(&weight_fp8_kn).unwrap(),
-            gpu_ptr(&activation_fp8.scales).unwrap().cast::<f32>(),
-            gpu_ptr(&weight_fp8.scales).unwrap().cast::<f32>(),
-            std::ptr::null(),
-            outer_buffer.ptr(),
-            M as i32,
-            N_PADDED as i32,
-            K_PADDED as i32,
-            backend.context().stream().handle(),
-        )
-    };
-    assert_eq!(outer_status, 0);
-    unsafe {
-        ffi::check_cuda(ffi::apxinf_dynamic_rescale_rows_columns_bias_bf16(
-            outer_buffer.ptr(),
-            gpu_ptr(&activation_fp8.scales).unwrap().cast::<f32>(),
-            gpu_ptr(&weight_fp8.scales).unwrap().cast::<f32>(),
-            gpu_ptr(&bias_gpu).unwrap(),
-            M as i32,
-            N_PADDED as i32,
-            backend.context().stream().handle(),
-        ))
-        .unwrap();
-    }
-    let outer_padded = outer_buffer.into_tensor(Shape::new(vec![M, N_PADDED]), DType::BF16);
-    let outer_output = slice_columns_bf16(backend.context(), &outer_padded, N).unwrap();
     backend.synchronize().unwrap();
 
     let row_scales = backend
@@ -1037,9 +1014,7 @@ fn dynamic_fp8_row_channel_scales_match_bf16_reference() {
     assert!(column_scales[N..].iter().all(|scale| *scale == 1.0e-12));
 
     let output = backend.to_cpu(&output).unwrap().to_f32_vec().unwrap();
-    let outer_output = backend.to_cpu(&outer_output).unwrap().to_f32_vec().unwrap();
     let mut maximum_error = 0.0f32;
-    let mut outer_maximum_error = 0.0f32;
     let mut maximum_reference = 0.0f32;
     for row in 0..M {
         for col in 0..N {
@@ -1048,8 +1023,6 @@ fn dynamic_fp8_row_channel_scales_match_bf16_reference() {
                 expected += activation[row * K + inner] * weight[inner * N + col];
             }
             maximum_error = maximum_error.max((output[row * N + col] - expected).abs());
-            outer_maximum_error =
-                outer_maximum_error.max((outer_output[row * N + col] - expected).abs());
             maximum_reference = maximum_reference.max(expected.abs());
         }
     }
@@ -1057,11 +1030,6 @@ fn dynamic_fp8_row_channel_scales_match_bf16_reference() {
         maximum_error / maximum_reference < 0.04,
         "dynamic FP8 relative max error is {}",
         maximum_error / maximum_reference
-    );
-    assert!(
-        outer_maximum_error / maximum_reference < 0.04,
-        "native NNT FP8 relative max error is {}",
-        outer_maximum_error / maximum_reference
     );
 }
 
@@ -1346,55 +1314,6 @@ fn dynamic_fp8_vec4_and_large_vec8_fusions_match_composed_operators() {
         &decode(&residual_fused.normalized),
         &decode(&residual_reference),
     );
-}
-
-#[cfg(apxinf_cutlass_gemm)]
-#[test]
-#[ignore = "Thor-only cold-L2 tactic scan"]
-fn dynamic_fp8_walloss_shape_tactics() {
-    let backend = CudaBackend::new(0).unwrap();
-    let shapes = [
-        (10, 1024, 2048),
-        (10, 2560, 1024),
-        (10, 4096, 1024),
-        (217, 2048, 2048),
-        (217, 2560, 2048),
-        (217, 22016, 2048),
-        (217, 2048, 11008),
-        (648, 1280, 1280),
-        (648, 3840, 1280),
-        (648, 6848, 1280),
-        (648, 1280, 3424),
-    ];
-    for (m, n, k) in shapes {
-        let activation = backend
-            .to_device(&Tensor::from_f8_e4m3(vec![m, k], &vec![0; m * k]).unwrap())
-            .unwrap();
-        let weight = backend
-            .to_device(&Tensor::from_f8_e4m3(vec![n, k], &vec![0; k * n]).unwrap())
-            .unwrap();
-        let activation_scales = backend
-            .to_device(&Tensor::from_f32(vec![m], &vec![1.0; m]).unwrap())
-            .unwrap();
-        let channel_scales = backend
-            .to_device(&Tensor::from_f32(vec![n], &vec![1.0; n]).unwrap())
-            .unwrap();
-        let mut timings = autotune_cutlass_dynamic_bf16(
-            backend.context(),
-            &activation,
-            &activation_scales,
-            DynamicFp8WeightView {
-                values_e4m3: &weight,
-                values_e4m3_kn: &weight,
-                channel_scales: &channel_scales,
-            },
-            2,
-            10,
-        )
-        .unwrap();
-        timings.sort_by(|left, right| left.milliseconds.total_cmp(&right.milliseconds));
-        println!("shape [{m},{n},{k}] {timings:?}");
-    }
 }
 
 #[test]

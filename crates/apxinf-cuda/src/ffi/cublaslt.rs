@@ -86,24 +86,6 @@ extern "C" {
     pub fn apxinf_static_native_fp8_supported(device: i32, supported: *mut i32) -> cudaError_t;
     /// Install immutable cuBLASLt resources for one FP8 GEMM shape.
     pub fn apxinf_static_prepare_fp8_gemm_f16(m: i32, n: i32, k: i32) -> cublasStatus_t;
-    pub fn apxinf_dynamic_prepare_fp8_gemm_bf16(
-        bias: *const c_void,
-        m: i32,
-        n: i32,
-        k: i32,
-    ) -> cublasStatus_t;
-    pub fn apxinf_dynamic_fp8_gemm_bf16(
-        activation: *const c_void,
-        weight_kn: *const c_void,
-        activation_scales: *const f32,
-        weight_scales: *const f32,
-        bias: *const c_void,
-        output: *mut c_void,
-        m: i32,
-        n: i32,
-        k: i32,
-        stream: cudaStream_t,
-    ) -> cublasStatus_t;
     pub fn apxinf_static_prepare_fp8_gemm_split_f16(m: i32, n: i32, k: i32) -> cublasStatus_t;
     /// Install a fused GELU plan and bind its stable bias/scale resources.
     pub fn apxinf_static_prepare_fp8_gemm_bias_gelu_e4m3(

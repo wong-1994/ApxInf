@@ -96,7 +96,7 @@ extern "C" {
     #[cfg(apxinf_cutlass_gemm)]
     pub fn apxinf_dynamic_cutlass_fp8_gemm_bf16(
         activation: *const c_void,
-        weight_kn: *const c_void,
+        weight_nk: *const c_void,
         activation_scales: *const f32,
         weight_scales: *const f32,
         bias: *const c_void,

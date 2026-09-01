@@ -222,8 +222,6 @@ pub struct Fp8WeightView<'a> {
 pub struct DynamicFp8WeightView<'a> {
     /// Contiguous output-major physical `[N, K]` E4M3 matrix.
     pub values_e4m3: &'a Tensor,
-    /// The same encoded weights in contiguous `[K, N]` order.
-    pub values_e4m3_kn: &'a Tensor,
     /// FP32 scale for each output channel, shape `[N]`.
     pub channel_scales: &'a Tensor,
 }
@@ -524,10 +522,9 @@ pub fn gemm_fp8_dynamic_bf16(
     }
     let a = activation.shape().dims();
     let b = weight.values_e4m3.shape().dims();
-    let b_kn = weight.values_e4m3_kn.shape().dims();
-    if a.len() != 2 || b.len() != 2 || b_kn.len() != 2 || a[1] != b[1] || b_kn != [b[1], b[0]] {
+    if a.len() != 2 || b.len() != 2 || a[1] != b[1] {
         return Err(Error::Other(format!(
-            "dynamic FP8 GEMM shape mismatch: activation {a:?}, NK weight {b:?}, KN weight {b_kn:?}"
+            "dynamic FP8 GEMM shape mismatch: activation {a:?}, NK weight {b:?}"
         )));
     }
     let (m, k, n) = (a[0], a[1], b[0]);
@@ -552,7 +549,6 @@ pub fn gemm_fp8_dynamic_bf16(
         activation,
         activation_scales,
         weight.values_e4m3,
-        weight.values_e4m3_kn,
         weight.channel_scales,
     ] {
         if tensor.device() != expected_device {
@@ -1496,90 +1492,6 @@ pub fn autotune_cutlass_gemm_f16(
             } else {
                 Err(Error::Cuda(format!(
                     "CUTLASS tactic {tactic} rejected shape [{m},{n},{k}] ({status})"
-                )))
-            }
-        };
-        if (0..warmup)
-            .try_for_each(|_| {
-                evictor.evict(ctx)?;
-                launch()
-            })
-            .is_err()
-        {
-            continue;
-        }
-        ctx.stream().synchronize().map_err(Error::Cuda)?;
-        let mut milliseconds = 0.0f64;
-        for _ in 0..iterations {
-            milliseconds += events.measure(ctx, &mut evictor, &launch)?;
-        }
-        timings.push(CutlassTacticTiming {
-            tactic,
-            milliseconds: milliseconds / iterations as f64,
-        });
-    }
-    Ok(timings)
-}
-
-#[cfg(all(test, apxinf_cutlass_gemm))]
-pub fn autotune_cutlass_dynamic_bf16(
-    ctx: &CudaContext,
-    activation: &Tensor,
-    activation_scales: &Tensor,
-    weight: DynamicFp8WeightView<'_>,
-    warmup: usize,
-    iterations: usize,
-) -> Result<Vec<CutlassTacticTiming>> {
-    if iterations == 0 {
-        return Err(Error::Other(
-            "dynamic CUTLASS autotune iterations must be non-zero".into(),
-        ));
-    }
-    let a = activation.shape().dims();
-    let b = weight.values_e4m3.shape().dims();
-    if activation.dtype() != DType::F8E4M3
-        || weight.values_e4m3.dtype() != DType::F8E4M3
-        || activation_scales.dtype() != DType::F32
-        || weight.channel_scales.dtype() != DType::F32
-        || a.len() != 2
-        || b.len() != 2
-        || a[1] != b[1]
-        || activation_scales.shape().dims() != [a[0]]
-        || weight.channel_scales.shape().dims() != [b[0]]
-        || a[1] % 16 != 0
-        || b[0] % 16 != 0
-    {
-        return Err(Error::Other(
-            "dynamic CUTLASS autotune expects aligned rowwise E4M3 operands and FP32 scales".into(),
-        ));
-    }
-    let (m, k, n) = (a[0], a[1], b[0]);
-    let output = CudaBuffer::alloc_zeros(m * n * 2, ctx.device_id()).map_err(Error::Cuda)?;
-    let mut evictor = ColdL2Evictor::new(ctx)?;
-    let events = CudaEventPair::new()?;
-    let mut timings = Vec::new();
-    for tactic in 0..=14 {
-        let launch = || -> Result<()> {
-            let status = unsafe {
-                ffi::apxinf_dynamic_cutlass_fp8_gemm_bf16(
-                    gpu_ptr(activation)?,
-                    gpu_ptr(weight.values_e4m3)?,
-                    gpu_ptr(activation_scales)?.cast::<f32>(),
-                    gpu_ptr(weight.channel_scales)?.cast::<f32>(),
-                    std::ptr::null(),
-                    output.ptr(),
-                    m as i32,
-                    n as i32,
-                    k as i32,
-                    tactic,
-                    ctx.stream().handle(),
-                )
-            };
-            if status == 0 {
-                Ok(())
-            } else {
-                Err(Error::Cuda(format!(
-                    "dynamic CUTLASS tactic {tactic} rejected shape [{m},{n},{k}] ({status})"
                 )))
             }
         };

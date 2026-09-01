@@ -71,31 +71,6 @@ extern "C" {
         output_cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub fn apxinf_transpose_e4m3(
-        input: *const c_void,
-        output: *mut c_void,
-        rows: i32,
-        cols: i32,
-        stream: cudaStream_t,
-    ) -> cudaError_t;
-
-    pub fn apxinf_dynamic_rescale_rows_columns_bias_bf16(
-        values: *mut c_void,
-        row_scales: *const f32,
-        channel_scales: *const f32,
-        bias: *const c_void,
-        rows: i32,
-        cols: i32,
-        stream: cudaStream_t,
-    ) -> cudaError_t;
-    pub fn apxinf_dynamic_quantize_columns_f16_e4m3(
-        input: *const c_void,
-        output: *mut c_void,
-        scales: *mut c_void,
-        rows: i32,
-        cols: i32,
-        stream: cudaStream_t,
-    ) -> cudaError_t;
     pub fn apxinf_static_cast_f16_bf16(
         input: *const c_void,
         output: *mut c_void,
@@ -674,17 +649,6 @@ extern "C" {
         v: *mut c_void,
         tokens: i32,
         projection_width: i32,
-        stream: cudaStream_t,
-    ) -> cudaError_t;
-    pub fn apxinf_static_gqa_qkv_split_bias_bf16(
-        qkv: *const c_void,
-        bias: *const c_void,
-        q: *mut c_void,
-        k: *mut c_void,
-        v: *mut c_void,
-        tokens: i32,
-        q_width: i32,
-        kv_width: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
     pub fn apxinf_static_gqa_qkv_mrope_cache_bf16(

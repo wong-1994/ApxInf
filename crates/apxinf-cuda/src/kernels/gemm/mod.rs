@@ -28,7 +28,7 @@ pub use fp8::{
     CublasLtAlgorithmTiming, CutlassTacticTiming, DynamicFp8WeightView, Fp8WeightView,
 };
 #[cfg(test)]
-pub(crate) use fp8::{autotune_cutlass_dynamic_bf16, prepare_cublaslt_fp8_gemm};
+pub(crate) use fp8::prepare_cublaslt_fp8_gemm;
 #[cfg(test)]
 pub(crate) use w8a8::gemm_w8a8_with_preference;
 pub use w8a8::{gemm_w8a8 as w8a8, W8A8Layout, W8A8ScaleMode, W8A8WeightView};

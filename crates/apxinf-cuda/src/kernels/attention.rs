@@ -539,70 +539,6 @@ pub fn split_qkv_bias_bf16(
     })
 }
 
-pub fn split_gqa_qkv_bias_bf16(
-    ctx: &CudaContext,
-    qkv: &Tensor,
-    bias: Option<&Tensor>,
-    q_heads: usize,
-    kv_heads: usize,
-    head_dim: usize,
-) -> Result<QkvTensors> {
-    let (tokens, width) = matrix_shape(qkv, "GQA QKV split")?;
-    let q_width = q_heads * head_dim;
-    let kv_width = kv_heads * head_dim;
-    let expected_width = q_width + 2 * kv_width;
-    if qkv.dtype() != DType::BF16
-        || width != expected_width
-        || q_heads == 0
-        || kv_heads == 0
-        || q_heads % kv_heads != 0
-        || bias.is_some_and(|value| {
-            value.dtype() != DType::BF16 || value.shape().dims() != [expected_width]
-        })
-    {
-        return Err(Error::Other(
-            "static inference BF16 GQA QKV shape mismatch".into(),
-        ));
-    }
-    let q = bf16_output(ctx, tokens, q_width)?;
-    let k = bf16_output(ctx, tokens, kv_width)?;
-    let v = bf16_output(ctx, tokens, kv_width)?;
-    unsafe {
-        ffi::check_cuda(ffi::apxinf_static_gqa_qkv_split_bias_bf16(
-            gpu_ptr(qkv)?,
-            optional_ptr(bias)?,
-            q.ptr(),
-            k.ptr(),
-            v.ptr(),
-            tokens as i32,
-            q_width as i32,
-            kv_width as i32,
-            ctx.stream().handle(),
-        ))
-        .map_err(Error::Cuda)?;
-    }
-    Ok(QkvTensors {
-        q: make_gpu_tensor(
-            Shape::new(vec![tokens, q_heads, head_dim]),
-            DType::BF16,
-            ctx.device_id(),
-            q,
-        ),
-        k: make_gpu_tensor(
-            Shape::new(vec![tokens, kv_heads, head_dim]),
-            DType::BF16,
-            ctx.device_id(),
-            k,
-        ),
-        v: make_gpu_tensor(
-            Shape::new(vec![tokens, kv_heads, head_dim]),
-            DType::BF16,
-            ctx.device_id(),
-            v,
-        ),
-    })
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn split_gqa_qkv_mrope_cache_bf16(
     ctx: &CudaContext,
@@ -1104,48 +1040,6 @@ pub fn mqa_bf16(
         ctx.device_id(),
         output,
     ))
-}
-
-pub fn gqa_bf16(
-    ctx: &CudaContext,
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    key_tokens: usize,
-) -> Result<Tensor> {
-    let q_shape = q.shape().dims();
-    let k_shape = k.shape().dims();
-    if [q, k, v]
-        .into_iter()
-        .any(|tensor| tensor.dtype() != DType::BF16)
-        || q_shape.len() != 3
-        || k_shape.len() != 3
-        || v.shape() != k.shape()
-        || k_shape[0] < key_tokens
-        || k_shape[2] != q_shape[2]
-        || k_shape[1] == 0
-        || q_shape[1] % k_shape[1] != 0
-        || key_tokens == 0
-    {
-        return Err(Error::Other(
-            "static inference BF16 GQA shape mismatch".into(),
-        ));
-    }
-    #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
-    {
-        return fa2_attention(
-            ctx, q, k, v, 1, q_shape[0], key_tokens, q_shape[1], k_shape[1], q_shape[2],
-        );
-    }
-    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
-    {
-        if k_shape[1] == 1 {
-            return mqa_bf16(ctx, q, k, v, key_tokens);
-        }
-        Err(Error::Other(
-            "BF16 grouped-query attention requires the FA2 backend".into(),
-        ))
-    }
 }
 
 pub fn causal_gqa_bf16(

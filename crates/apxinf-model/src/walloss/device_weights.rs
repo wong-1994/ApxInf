@@ -11,9 +11,6 @@ use super::{encode_e4m3, quantize_e4m3_absmax, LinearWeights, E4M3_MAX};
 pub struct DynamicFp8LinearWeights {
     /// Contiguous output-major physical `[output, input]` E4M3 matrix.
     pub weight: Tensor,
-    /// Same encoded values in contiguous `[input, output]` order for the
-    /// native NNT backend.
-    pub weight_kn: Tensor,
     /// FP32 scale vector with one element per output channel.
     pub channel_scales: Tensor,
     /// Optional BF16 bias consumed by the rowwise CUTLASS epilogue.
@@ -29,7 +26,6 @@ impl DynamicFp8LinearWeights {
     pub fn as_kernel_view(&self) -> kernels::gemm::DynamicFp8WeightView<'_> {
         kernels::gemm::DynamicFp8WeightView {
             values_e4m3: &self.weight,
-            values_e4m3_kn: &self.weight_kn,
             channel_scales: &self.channel_scales,
         }
     }
@@ -53,7 +49,7 @@ impl DynamicFp8LinearWeights {
         )?;
 
         #[cfg(feature = "cuda")]
-        let (weight, weight_kn, channel_scales) = if let Some(cuda_backend) =
+        let (weight, channel_scales) = if let Some(cuda_backend) =
             backend.as_any().downcast_ref::<RuntimeBackend>()
         {
             let values = padded_weight
@@ -68,20 +64,12 @@ impl DynamicFp8LinearWeights {
                 cuda_backend.context(),
                 &device_bf16,
             )?;
-            let weight_kn =
-                kernels::quantization::transpose_e4m3(cuda_backend.context(), &quantized.values)?;
-            (quantized.values, weight_kn, quantized.scales)
+            (quantized.values, quantized.scales)
         } else {
-            let (weight, channel_scales) = quantize_rows_host(&padded_weight, backend)?;
-            let weight_kn = transpose_e4m3_host(&weight, backend)?;
-            (weight, weight_kn, channel_scales)
+            quantize_rows_host(&padded_weight, backend)?
         };
         #[cfg(not(feature = "cuda"))]
-        let (weight, weight_kn, channel_scales) = {
-            let (weight, channel_scales) = quantize_rows_host(&padded_weight, backend)?;
-            let weight_kn = transpose_e4m3_host(&weight, backend)?;
-            (weight, weight_kn, channel_scales)
-        };
+        let (weight, channel_scales) = quantize_rows_host(&padded_weight, backend)?;
 
         let bias = linear
             .bias
@@ -105,7 +93,6 @@ impl DynamicFp8LinearWeights {
             .transpose()?;
         Ok(Self {
             weight,
-            weight_kn,
             channel_scales,
             bias,
             input_features,
@@ -153,19 +140,6 @@ fn quantize_rows_host(weight: &Tensor, backend: &dyn Backend) -> Result<(Tensor,
         backend.to_device(&Tensor::from_f8_e4m3(shape.to_vec(), &values)?)?,
         backend.to_device(&Tensor::from_f32(vec![rows], &scales)?)?,
     ))
-}
-
-fn transpose_e4m3_host(weight: &Tensor, backend: &dyn Backend) -> Result<Tensor> {
-    let shape = weight.shape().dims();
-    let (rows, cols) = (shape[0], shape[1]);
-    let source = weight.as_f8_e4m3()?;
-    let mut transposed = vec![0u8; source.len()];
-    for row in 0..rows {
-        for col in 0..cols {
-            transposed[col * rows + row] = source[row * cols + col];
-        }
-    }
-    backend.to_device(&Tensor::from_f8_e4m3(vec![cols, rows], &transposed)?)
 }
 
 #[derive(Debug)]
@@ -484,7 +458,6 @@ mod tests {
         );
         let quantized = DynamicFp8LinearWeights::from_host(&source, &CpuBackend).unwrap();
         assert_eq!(quantized.weight.shape().dims(), &[16, 16]);
-        assert_eq!(quantized.weight_kn.shape().dims(), &[16, 16]);
         assert_eq!(quantized.input_features, 2);
         assert_eq!(quantized.output_features, 3);
         assert_eq!(quantized.weight.dtype(), DType::F8E4M3);
@@ -495,16 +468,14 @@ mod tests {
         );
         assert!(scales[3..].iter().all(|scale| *scale == 1.0e-12));
         let values = quantized.weight.as_f8_e4m3().unwrap();
-        let values_kn = quantized.weight_kn.as_f8_e4m3().unwrap();
         for (output, expected) in [[1.0, -3.0], [2.0, -8.0], [4.0, 12.0]]
             .into_iter()
             .enumerate()
         {
             for input in 0..2 {
-                let decoded = crate::walloss::decode_e4m3(values[output * 16 + input])
-                    * scales[output];
+                let decoded =
+                    crate::walloss::decode_e4m3(values[output * 16 + input]) * scales[output];
                 assert!((decoded - expected[input]).abs() < expected[input].abs() * 0.05);
-                assert_eq!(values_kn[input * 16 + output], values[output * 16 + input]);
             }
         }
         assert_eq!(quantized.bias.as_ref().unwrap().dtype(), DType::BF16);
