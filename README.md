@@ -285,10 +285,8 @@ policy = AutoPolicy.from_pretrained("<path-to-model>", precision="bf16")
 Thor only, where it is the fastest path. Orin has no FP8 Tensor Cores and is not
 supported.
 
-FP8 is the one precision that needs an artifact beyond the weights: per-tensor
-activation scales, and the load fails without them. A `calibration.json` in the
-checkpoint directory is picked up automatically, so `--calibration` is only for
-pointing elsewhere:
+FP8 needs per-tensor activation scales. A `calibration.json` in the checkpoint
+directory is picked up automatically:
 
 ```bash
 python scripts/pi05_openpi_websocket_server.py \
@@ -300,19 +298,11 @@ python scripts/pi05_openpi_websocket_server.py \
 policy = AutoPolicy.from_pretrained(
     "<path-to-model>",
     precision="fp8",
-    calibration="<path-to-calibration.json>",   # default: <model-dir>/calibration.json
 )
 ```
 
-The calibration is per-tensor activation scales from a representative
-Observation sweep and decides accuracy; `uniform:SCALE` is a flat stand-in for
-latency work only. The storage-neutral input is a JSONL manifest whose rows use
-the same fields as inference, with image values expressed as paths relative to
-the manifest:
-
-```json
-{"observation/image":"frames/000-base.png","observation/wrist_image":"frames/000-wrist.png","prompt":"pick up the block","observation/state":[0.1,0.2,0.3]}
-```
+If the checkpoint does not contain `calibration.json`, generate one from
+representative Observations:
 
 ```bash
 python3 scripts/calibrate_pi05.py \
@@ -320,34 +310,17 @@ python3 scripts/calibrate_pi05.py \
   --manifest /path/to/observations.jsonl
 ```
 
-The calibration job itself accepts any iterable of model-native Observations;
-JSONL is only the portable CLI adapter. If the deployment data already uses
-LeRobot, an optional adapter can select a deterministic task-balanced subset
-(one sample per task by default):
+For the PI0.5 LIBERO checkpoint, generate one directly from the LeRobot LIBERO
+dataset:
 
 ```bash
 python3 scripts/calibrate_pi05.py \
   --model-dir "$APXINF_MODEL_DIR" \
-  --dataset organization/deployment-dataset
+  --dataset lerobot/libero
 ```
 
-This path requires LeRobot but is not limited to LIBERO. `--dataset-root PATH`
-selects an existing local LeRobot dataset and `--samples N` overrides the sample
-count. For exact replay of existing automation, `--input-dir DIR` and repeated
-Observation NPZ `--input FILE` remain supported. `--output PATH` overrides the
-default `<model-dir>/calibration.json`.
-
-The output is a self-describing, checkpoint-bound profile whose logical site set
-must exactly match the FP8 execution plan before inference can start. Existing
-outputs are protected unless `--force` is passed. For a smoke-only bootstrap,
-replace the dataset with `--zero-fixture`; the manifest labels that
-profile synthetic and non-production so it cannot be mistaken for representative
-calibration. Calibration and tactic tuning remain separate operations.
-
-Maintainer-only reproducibility, accuracy, and timing gates are documented in
-[PI0.5 FP8 calibration on Thor](doc/pi05-fp8-calibration-thor.md) and the
-[LIBERO-10 sample sweep](doc/pi05-fp8-calibration-libero10.md). Sample count and
-acceptance thresholds remain deployment-specific.
+See [PI0.5 FP8 calibration](doc/pi05-fp8-calibration.md) for the Observation
+format, local datasets, sampling, NPZ replay, and output options.
 
 ### INT8
 
