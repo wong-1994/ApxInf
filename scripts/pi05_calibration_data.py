@@ -6,14 +6,18 @@ optional outer seam that translates storage formats into that contract.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-import importlib
+from collections.abc import Callable, Mapping, Sequence
 import json
 import pathlib
 from typing import Any
 
 import numpy as np
 from PIL import Image
+
+if __package__:
+    from .libero_observation import make_env, to_apxinf_observation
+else:
+    from libero_observation import make_env, to_apxinf_observation
 
 
 def _decode_npz_value(value):
@@ -118,7 +122,7 @@ def load_observation_manifest(
 def task_stratified_indices(
     task_indices: Sequence[object], *, sample_count: int, seed: int
 ) -> list[int]:
-    """Choose deterministic, balanced frame indices across every dataset task."""
+    """Choose deterministic, balanced frame indices across every task group."""
     if sample_count < 1:
         raise ValueError("calibration sample count must be positive")
     if sample_count > len(task_indices):
@@ -131,8 +135,8 @@ def task_stratified_indices(
         groups.setdefault(task, []).append(index)
     if sample_count < len(groups):
         raise ValueError(
-            f"--samples={sample_count} cannot cover all {len(groups)} dataset tasks; "
-            "pass a deployment-specific dataset split or increase --samples"
+            f"--samples={sample_count} cannot cover all {len(groups)} tasks; "
+            "increase --samples"
         )
 
     rng = np.random.default_rng(seed)
@@ -150,64 +154,86 @@ def task_stratified_indices(
     return selected
 
 
-def _lerobot_dataset_class():
-    last_error = None
-    for module_name in ("lerobot.datasets", "lerobot.datasets.lerobot_dataset"):
-        try:
-            module = importlib.import_module(module_name)
-            return module.LeRobotDataset
-        except (AttributeError, ImportError) as error:
-            last_error = error
-    raise ImportError(
-        "the optional --dataset adapter requires LeRobot; install it or use "
-        "--manifest/--input-dir"
-    ) from last_error
-
-
-def _open_lerobot_dataset(repo_id: str, root: pathlib.Path | None):
-    LeRobotDataset = _lerobot_dataset_class()
-    options = {"repo_id": repo_id, "return_uint8": True}
-    if root is not None:
-        options["root"] = root
+def _load_libero_suite(suite_name: str):
     try:
-        return LeRobotDataset(**options)
-    except TypeError as error:
-        if "return_uint8" not in str(error):
-            raise
-        options.pop("return_uint8")
-        return LeRobotDataset(**options)
+        from libero.libero import benchmark
+    except ImportError as error:
+        raise ImportError(
+            "native LIBERO observations require the LIBERO and MuJoCo evaluation "
+            "dependencies; install LIBERO as described in README.md"
+        ) from error
+    benchmark_dict = benchmark.get_benchmark_dict()
+    if suite_name not in benchmark_dict:
+        raise ValueError(f"unknown LIBERO suite: {suite_name}")
+    return benchmark_dict[suite_name]()
 
 
-def _task_indices(dataset) -> list[object] | None:
-    try:
-        values = dataset.hf_dataset["task_index"]
-    except (AttributeError, KeyError, TypeError):
-        return None
-    return [value.item() if hasattr(value, "item") else value for value in values]
-
-
-def load_lerobot_observations(
-    repo_id: str,
+def load_libero_observations(
+    suite_name: str,
     *,
-    root: pathlib.Path | None,
     image_keys: Sequence[str],
     sample_count: int | None,
     seed: int,
+    prompt_key: str,
+    state_key: str,
+    progress: Callable[[str], None] | None = None,
 ) -> tuple[Mapping[str, object], ...]:
-    """Optional LeRobot adapter; calibration itself has no LeRobot dependency."""
-    from apxinf.adapters.lerobot import observation_to_apxinf
-
-    dataset = _open_lerobot_dataset(repo_id, root)
-    tasks = _task_indices(dataset)
-    if tasks is None:
-        if sample_count is None:
-            raise ValueError(
-                "LeRobot dataset has no task_index metadata; pass --samples explicitly"
-            )
-        tasks = [0] * len(dataset)
-    selected_count = sample_count if sample_count is not None else len(set(tasks))
-    indices = task_stratified_indices(tasks, sample_count=selected_count, seed=seed)
-    return tuple(
-        observation_to_apxinf(dataset[index], image_keys=image_keys)
-        for index in indices
+    """Capture task-balanced observations from native LIBERO initial states."""
+    if len(image_keys) != 2:
+        raise ValueError(
+            "native LIBERO calibration requires exactly two configured image views"
+        )
+    progress = progress or (lambda _message: None)
+    suite = _load_libero_suite(suite_name)
+    states_by_task = [
+        suite.get_task_init_states(task_id) for task_id in range(suite.n_tasks)
+    ]
+    task_indices = [
+        task_id
+        for task_id, initial_states in enumerate(states_by_task)
+        for _ in range(len(initial_states))
+    ]
+    selected_count = sample_count if sample_count is not None else suite.n_tasks
+    flat_indices = task_stratified_indices(
+        task_indices, sample_count=selected_count, seed=seed
     )
+    offsets = []
+    offset = 0
+    for initial_states in states_by_task:
+        offsets.append(offset)
+        offset += len(initial_states)
+    selected_by_task: dict[int, list[int]] = {}
+    for flat_index in flat_indices:
+        task_id = task_indices[flat_index]
+        selected_by_task.setdefault(task_id, []).append(flat_index - offsets[task_id])
+
+    observations = []
+    dummy_action = [0.0] * 6 + [-1.0]
+    for task_id in sorted(selected_by_task):
+        task = suite.get_task(task_id)
+        prompt = str(task.language)
+        progress(
+            f"Capturing {suite_name} task {task_id} "
+            f"({len(selected_by_task[task_id])} observation(s))..."
+        )
+        env = make_env(task, seed)
+        try:
+            for initial_state_index in selected_by_task[task_id]:
+                env.reset()
+                raw_observation = env.set_init_state(
+                    states_by_task[task_id][initial_state_index]
+                )
+                for _ in range(10):
+                    raw_observation, _, _, _ = env.step(dummy_action)
+                observations.append(
+                    to_apxinf_observation(
+                        raw_observation,
+                        prompt=prompt,
+                        image_keys=(image_keys[0], image_keys[1]),
+                        prompt_key=prompt_key,
+                        state_key=state_key,
+                    )
+                )
+        finally:
+            env.close()
+    return tuple(observations)

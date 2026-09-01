@@ -313,19 +313,19 @@ python3 scripts/calibrate_pi05.py \
   --manifest <path-to-observations.jsonl>
 ```
 
-For the PI0.5 LIBERO checkpoint, generate one directly from the LeRobot LIBERO
-dataset:
+For the PI0.5 LIBERO checkpoint, capture task-balanced observations directly
+from the native LIBERO10 simulator:
 
 ```bash
-pip install lerobot
-
 python3 scripts/calibrate_pi05.py \
   --model-dir <path-to-model> \
-  --dataset lerobot/libero
+  --libero-suite libero_10
 ```
 
 See [PI0.5 FP8 calibration](doc/pi05-fp8-calibration.md) for the Observation
-format, local datasets, sampling, NPZ replay, and output options.
+format, native LIBERO sampling, NPZ replay, and output options. The native path
+uses the same LIBERO/MuJoCo dependencies as [LIBERO evaluation](#libero-evaluation);
+LeRobot is not required.
 
 ### INT8
 

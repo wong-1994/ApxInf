@@ -29,16 +29,17 @@ SCHEMA = "apxinf.pi05.fp8-calibration.v1"
 def _progress(message: str) -> None:
     print(f"[calibration] {message}", file=sys.stderr, flush=True)
 
+
 if __package__:
     from .pi05_calibration_data import (
-        load_lerobot_observations,
+        load_libero_observations,
         load_npz_observations,
         load_observation_manifest,
         task_stratified_indices,
     )
 else:
     from pi05_calibration_data import (
-        load_lerobot_observations,
+        load_libero_observations,
         load_npz_observations,
         load_observation_manifest,
         task_stratified_indices,
@@ -48,12 +49,14 @@ else:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         usage=(
-            "%(prog)s --model-dir MODEL_DIR --manifest OBSERVATIONS.jsonl "
+            "%(prog)s --model-dir MODEL_DIR "
+            "(--libero-suite libero_10 | --manifest OBSERVATIONS.jsonl | SOURCE) "
             "[--output PATH]"
         ),
         description=(
             "Generate a checkpoint-bound PI0.5 FP8 profile from representative "
-            "business Observations. LeRobot and NPZ are optional source adapters."
+            "business Observations. Native LIBERO, manifest, and NPZ sources are "
+            "supported."
         ),
     )
     parser.add_argument("--model-dir", required=True, type=pathlib.Path)
@@ -76,18 +79,20 @@ def parse_args(argv=None):
         help="JSONL Observation manifest; image fields are paths relative to this file",
     )
     parser.add_argument(
-        "--dataset",
-        help="optional LeRobot dataset repository id",
-    )
-    parser.add_argument(
-        "--dataset-root",
-        type=pathlib.Path,
-        help="optional local root for --dataset (otherwise LeRobot resolves/downloads it)",
+        "--libero-suite",
+        choices=(
+            "libero_10",
+            "libero_90",
+            "libero_spatial",
+            "libero_object",
+            "libero_goal",
+        ),
+        help="capture native simulator observations from this LIBERO task suite",
     )
     parser.add_argument(
         "--samples",
         type=int,
-        help="task-stratified dataset sample count (default: one sample per task)",
+        help="task-balanced LIBERO sample count (default: one initial state per task)",
     )
     parser.add_argument(
         "--zero-fixture",
@@ -124,19 +129,17 @@ def validate_args(args):
             args.input,
             args.input_dir,
             args.manifest,
-            args.dataset,
+            args.libero_suite,
             args.zero_fixture,
         )
     )
     if modes != 1:
         raise ValueError(
-            "pass exactly one calibration source: --manifest, --dataset, --input-dir, "
+            "pass exactly one calibration source: --manifest, --libero-suite, --input-dir, "
             "one or more --input files, or --zero-fixture"
         )
-    if args.dataset_root is not None and args.dataset is None:
-        raise ValueError("--dataset-root requires --dataset")
-    if args.samples is not None and args.dataset is None:
-        raise ValueError("--samples applies only to --dataset")
+    if args.samples is not None and args.libero_suite is None:
+        raise ValueError("--samples applies only to --libero-suite")
     if args.samples is not None and args.samples < 1:
         raise ValueError("--samples must be positive")
     if not np.isfinite(args.margin) or args.margin < 1.0:
@@ -154,7 +157,7 @@ def validate_args(args):
     if args.data_id is not None and not args.data_id.strip():
         raise ValueError("--data-id must not be empty")
     if (
-        (args.input or args.input_dir or args.manifest or args.dataset)
+        (args.input or args.input_dir or args.manifest or args.libero_suite)
         and args.data_id is not None
         and args.data_id.startswith("synthetic:")
     ):
@@ -212,13 +215,15 @@ def resolve_observations(args, policy):
             observation[policy.state_key] = np.zeros(state_width, np.float32)
         return (observation,), "synthetic:zero-observation-v1"
 
-    if args.dataset is not None:
-        observations = load_lerobot_observations(
-            args.dataset,
-            root=args.dataset_root,
+    if args.libero_suite is not None:
+        observations = load_libero_observations(
+            args.libero_suite,
             image_keys=policy.image_keys,
             sample_count=args.samples,
             seed=args.seed,
+            prompt_key=policy.prompt_key,
+            state_key=policy.state_key,
+            progress=_progress,
         )
         return observations, _observation_identity(observations)
 

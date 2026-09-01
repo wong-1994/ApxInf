@@ -12,23 +12,6 @@ from scripts import calibrate_pi05, pi05_calibration_data
 
 
 class CalibratePi05Test(unittest.TestCase):
-    def test_lerobot_dataset_import_supports_legacy_module(self):
-        dataset_class = object()
-
-        def import_module(name):
-            if name == "lerobot.datasets":
-                return object()
-            if name == "lerobot.datasets.lerobot_dataset":
-                return mock.Mock(LeRobotDataset=dataset_class)
-            raise AssertionError(f"unexpected module: {name}")
-
-        with mock.patch.object(
-            pi05_calibration_data.importlib, "import_module", side_effect=import_module
-        ):
-            actual = pi05_calibration_data._lerobot_dataset_class()
-
-        self.assertIs(actual, dataset_class)
-
     def test_checkpoint_identity_matches_shared_cross_language_fixture(self):
         fixture = pathlib.Path(__file__).parent / "fixtures" / "checkpoint_identity"
         expected = (fixture / "expected.sha256").read_text().strip()
@@ -54,83 +37,65 @@ class CalibratePi05Test(unittest.TestCase):
         self.assertEqual(set(selected_tasks[:3]), {0, 1, 2})
         self.assertLessEqual(max(selected_tasks.count(task) for task in set(selected_tasks)), 2)
 
-    def test_dataset_mode_loads_lerobot_records_without_npz_export(self):
-        class MetadataColumn:
-            def __init__(self):
-                self.values = [0, 0, 1, 1]
+    def test_libero_mode_captures_task_balanced_native_observations(self):
+        class Task:
+            def __init__(self, task_id):
+                self.language = f"task {task_id}"
 
-            def __getitem__(self, name):
-                if name != "task_index":
-                    raise KeyError(name)
-                return self.values
+        class Suite:
+            n_tasks = 2
 
-        class Dataset:
-            repo_id = "company/libero"
-            revision = "v3.0"
-            hf_dataset = MetadataColumn()
+            def get_task(self, task_id):
+                return Task(task_id)
 
-            def __len__(self):
-                return 4
+            def get_task_init_states(self, task_id):
+                return np.asarray([[task_id, 0], [task_id, 1]], dtype=np.float32)
 
-            def __getitem__(self, index):
+        class Env:
+            def reset(self):
+                pass
+
+            def set_init_state(self, initial_state):
+                self.value = int(initial_state[0] * 10 + initial_state[1])
+                return self._observation()
+
+            def step(self, _action):
+                return self._observation(), 0.0, False, {}
+
+            def _observation(self):
                 return {
-                    "observation.images.base_0_rgb": np.full(
-                        (3, 4, 3), index, dtype=np.uint8
+                    "agentview_image": np.full((3, 4, 3), self.value, np.uint8),
+                    "robot0_eye_in_hand_image": np.full(
+                        (3, 4, 3), self.value + 20, np.uint8
                     ),
-                    "observation.images.left_wrist_0_rgb": np.full(
-                        (3, 4, 3), index + 10, dtype=np.uint8
-                    ),
-                    "observation.state": np.arange(8, dtype=np.float32),
-                    "task": f"task {index // 2}",
+                    "robot0_eef_pos": np.arange(3, dtype=np.float32),
+                    "robot0_eef_quat": np.asarray([0, 0, 0, 1], np.float32),
+                    "robot0_gripper_qpos": np.asarray([0.1, 0.2], np.float32),
                 }
 
-        class Policy:
-            image_keys = ("observation/image", "observation/wrist_image")
+            def close(self):
+                pass
 
-        args = calibrate_pi05.parse_args(
-            [
-                "--model-dir",
-                "/model",
-                "--dataset",
-                "company/libero",
-                "--samples",
-                "2",
-            ]
-        )
         with mock.patch.object(
-            pi05_calibration_data, "_open_lerobot_dataset", return_value=Dataset()
-        ):
-            observations, identity = calibrate_pi05.resolve_observations(args, Policy())
+            pi05_calibration_data, "_load_libero_suite", return_value=Suite()
+        ), mock.patch.object(pi05_calibration_data, "make_env", side_effect=lambda *_: Env()):
+            observations = pi05_calibration_data.load_libero_observations(
+                "libero_10",
+                image_keys=("observation/image", "observation/wrist_image"),
+                sample_count=2,
+                seed=7,
+                prompt_key="prompt",
+                state_key="observation/state",
+            )
 
         self.assertEqual(len(observations), 2)
-        self.assertEqual({observation["prompt"] for observation in observations}, {"task 0", "task 1"})
-        self.assertTrue(identity.startswith("sha256:"))
         self.assertEqual(
-            set(observations[0]),
-            {
-                "observation/image",
-                "observation/wrist_image",
-                "observation/state",
-                "prompt",
-            },
+            {observation["prompt"] for observation in observations},
+            {"task 0", "task 1"},
         )
-
-    def test_dataset_without_task_metadata_requires_explicit_sample_count(self):
-        class Dataset:
-            def __len__(self):
-                return 4
-
-        class Policy:
-            image_keys = ("observation/image",)
-
-        args = calibrate_pi05.parse_args(
-            ["--model-dir", "/model", "--dataset", "company/unlabeled"]
-        )
-        with mock.patch.object(
-            pi05_calibration_data, "_open_lerobot_dataset", return_value=Dataset()
-        ):
-            with self.assertRaisesRegex(ValueError, "no task_index.*--samples"):
-                calibrate_pi05.resolve_observations(args, Policy())
+        self.assertEqual(observations[0]["observation/image"].shape, (224, 224, 3))
+        self.assertEqual(observations[0]["observation/state"].shape, (8,))
+        self.assertEqual(observations[0]["observation/state"].dtype, np.float32)
 
     def test_input_directory_expands_npz_files_in_stable_order(self):
         class Policy:
@@ -157,7 +122,7 @@ class CalibratePi05Test(unittest.TestCase):
         self.assertEqual([item["prompt"] for item in observations], ["two", "ten"])
         self.assertTrue(identity.startswith("sha256:"))
 
-    def test_manifest_loads_model_native_observations_without_lerobot(self):
+    def test_manifest_loads_model_native_observations_without_external_dataset(self):
         class Policy:
             image_keys = ("observation/image", "observation/wrist_image")
             prompt_key = "prompt"
@@ -190,21 +155,7 @@ class CalibratePi05Test(unittest.TestCase):
         self.assertEqual(observations[0]["observation/state"].dtype, np.float32)
         self.assertTrue(identity.startswith("sha256:"))
 
-    def test_calibration_job_consumes_dataset_source_end_to_end(self):
-        class Dataset:
-            hf_dataset = {"task_index": [0, 1]}
-
-            def __len__(self):
-                return 2
-
-            def __getitem__(self, index):
-                return {
-                    "observation.images.base": np.full(
-                        (2, 2, 3), index, dtype=np.uint8
-                    ),
-                    "task": f"task {index}",
-                }
-
+    def test_calibration_job_consumes_native_libero_source_end_to_end(self):
         class Model:
             image_size = 2
             action_horizon = 2
@@ -212,7 +163,7 @@ class CalibratePi05Test(unittest.TestCase):
 
         class Policy:
             model = Model()
-            image_keys = ("observation/image",)
+            image_keys = ("observation/image", "observation/wrist_image")
             prompt_key = "prompt"
             state_key = "observation/state"
             discrete_state = False
@@ -239,16 +190,27 @@ class CalibratePi05Test(unittest.TestCase):
                 [
                     "--model-dir",
                     str(root),
-                    "--dataset",
-                    "company/libero",
+                    "--libero-suite",
+                    "libero_10",
                     "--output",
                     str(output),
                     "--source-revision",
                     "test-revision",
                 ]
             )
+            observations = tuple(
+                {
+                    "observation/image": np.zeros((2, 2, 3), np.uint8),
+                    "observation/wrist_image": np.zeros((2, 2, 3), np.uint8),
+                    "observation/state": np.zeros(8, np.float32),
+                    "prompt": f"task {index}",
+                }
+                for index in range(2)
+            )
             with mock.patch.object(
-                pi05_calibration_data, "_open_lerobot_dataset", return_value=Dataset()
+                calibrate_pi05,
+                "load_libero_observations",
+                return_value=observations,
             ), mock.patch.object(calibrate_pi05, "_progress") as progress:
                 result = calibrate_pi05.run_from_args(
                     args, policy_factory=lambda *_args, **_kwargs: Policy()

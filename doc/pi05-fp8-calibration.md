@@ -20,11 +20,11 @@ Generate the profile:
 
 ```bash
 python3 scripts/calibrate_pi05.py \
-  --model-dir "$APXINF_MODEL_DIR" \
-  --manifest /path/to/observations.jsonl
+  --model-dir <path-to-model> \
+  --manifest <path-to-observations.jsonl>
 ```
 
-By default this writes `$APXINF_MODEL_DIR/calibration.json`. Use `--output` for
+By default this writes `<path-to-model>/calibration.json`. Use `--output` for
 another location. Existing files are not overwritten unless `--force` is
 passed.
 
@@ -32,25 +32,28 @@ Choose observations that represent deployment cameras, prompts, robot state,
 lighting, scenes, and object poses. Every observation must contain exactly the
 camera views expected by the checkpoint.
 
-## LIBERO and other LeRobot datasets
+## Native LIBERO task observations
 
-For the PI0.5 LIBERO checkpoint, a profile can be generated directly from the
-LeRobot LIBERO dataset:
+For the PI0.5 LIBERO checkpoint, generate a profile from observations rendered
+by the actual LIBERO10 task suite:
 
 ```bash
 python3 scripts/calibrate_pi05.py \
-  --model-dir "$APXINF_MODEL_DIR" \
-  --dataset lerobot/libero
+  --model-dir <path-to-model> \
+  --libero-suite libero_10
 ```
 
-This adapter requires LeRobot. It is not limited to LIBERO: `--dataset` accepts
-any compatible LeRobot repository ID. `--dataset-root PATH` selects an existing
-local copy. Sampling is deterministic and task-balanced; by default it selects
-one frame per `task_index`, while `--samples N` sets the total count. A dataset
-without `task_index` requires an explicit `--samples N`.
+This path uses LIBERO's BDDL tasks, language instructions, initial states, and
+off-screen simulator cameras. It applies the same camera orientation, resize,
+and robot-state conversion as `scripts/eval_libero.py`. Sampling is
+deterministic and task-balanced. By default it captures one settled initial
+state from every task; `--samples N` selects more initial states while retaining
+balanced task coverage.
 
-LeRobot is only a data-source adapter. `Pi05CalibrationJob` itself consumes an
-iterable of model-native Observation dictionaries and has no LeRobot dependency.
+This command needs the same LIBERO and MuJoCo dependencies as the repository's
+LIBERO evaluation command. It does not require LeRobot or a downloaded replay
+dataset. For another simulator or deployment source, export its public
+Observations through the manifest interface instead.
 
 ## Replay existing NPZ observations
 
@@ -58,15 +61,15 @@ Existing automation can pass a directory or repeat individual inputs:
 
 ```bash
 python3 scripts/calibrate_pi05.py \
-  --model-dir "$APXINF_MODEL_DIR" \
-  --input-dir /path/to/observation-npz
+  --model-dir <path-to-model> \
+  --input-dir <path-to-observation-npz>
 ```
 
 ```bash
 python3 scripts/calibrate_pi05.py \
-  --model-dir "$APXINF_MODEL_DIR" \
-  --input sample-000.npz \
-  --input sample-001.npz
+  --model-dir <path-to-model> \
+  --input <path-to-sample-000.npz> \
+  --input <path-to-sample-001.npz>
 ```
 
 Each NPZ contains the configured image keys, scalar prompt string, and optional
