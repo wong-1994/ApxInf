@@ -357,6 +357,7 @@ impl Pi05PreparedInference {
     }
 
     fn run_eager(&self, inputs: &EagerInputs, request: &VlaRequest<'_>) -> Result<Action> {
+        let observation = request.observation;
         self.update_eager_inputs(inputs, request)?;
         Ok(Action::new(self.runtime.infer(
             &inputs.patches,
