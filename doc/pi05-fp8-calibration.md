@@ -51,9 +51,8 @@ state from every task; `--samples N` selects more initial states while retaining
 balanced task coverage.
 
 This command needs the same LIBERO and MuJoCo dependencies as the repository's
-LIBERO evaluation command. It does not require LeRobot or a downloaded replay
-dataset. For another simulator or deployment source, export its public
-Observations through the manifest interface instead.
+LIBERO evaluation command. For another simulator or deployment source, export
+its public Observations through the manifest interface instead.
 
 ## Replay existing NPZ observations
 
