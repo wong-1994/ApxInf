@@ -13,8 +13,6 @@ mod device_weights;
 #[cfg(any(feature = "cuda", test))]
 mod fp8;
 #[cfg(feature = "cuda")]
-mod fp8_executor;
-#[cfg(feature = "cuda")]
 mod fp8_weights;
 #[cfg(any(feature = "cuda", test))]
 mod geometry;
@@ -26,16 +24,15 @@ mod weights;
 #[cfg(any(feature = "cuda", test))]
 pub(crate) use config::{WallossConfig, WallossTextConfig, WallossVisionConfig};
 #[cfg(feature = "cuda")]
-pub(crate) use device_weights::{DynamicFp8LinearWeights, Fp8LinearWeights};
+pub(crate) use device_weights::DynamicFp8LinearWeights;
 #[cfg(all(feature = "cuda", test))]
 pub(crate) use fp8::decode_e4m3;
 #[cfg(feature = "cuda")]
-pub(crate) use fp8::{encode_e4m3, quantize_e4m3_absmax, StaticFp8Calibration, E4M3_MAX};
+pub(crate) use fp8::{encode_e4m3, E4M3_MAX};
 #[cfg(feature = "cuda")]
 pub(crate) use fp8_weights::{
-    WallossActivationScales, WallossDynamicFp8LayerWeights, WallossDynamicFp8VisionBlockWeights,
-    WallossDynamicFp8VisionWeights, WallossDynamicFp8Weights, WallossFp8LayerWeights,
-    WallossFp8VisionBlockWeights, WallossFp8VisionWeights, WallossFp8Weights,
+    WallossDynamicFp8LayerWeights, WallossDynamicFp8VisionBlockWeights,
+    WallossDynamicFp8VisionWeights, WallossDynamicFp8Weights,
 };
 #[cfg(feature = "cuda")]
 pub(crate) use geometry::DeviceVisionGeometry;

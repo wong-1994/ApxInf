@@ -1,107 +1,7 @@
-//! WallOSS FP8 E4M3 quantization and calibration.
-//!
-//! Matrix weights use one scale per tensor. Activations obtain named scales
-//! from a calibration file so CUDA graph replay never performs a reduction or
-//! allocates scale tensors. Attention probabilities, residuals, and norms stay
-//! FP16.
-
-use std::collections::HashMap;
-use std::path::Path;
-
-use apxinf_core::{Error, Result, Tensor};
+//! WallOSS dynamic FP8 E4M3 encoding helpers.
 
 /// Largest finite NVIDIA/CUDA E4M3 value (`0x7e`).
 pub const E4M3_MAX: f32 = 448.0;
-
-#[derive(Debug, Clone)]
-pub struct Fp8Tensor {
-    pub values: Tensor,
-    /// Dequantization multiplier: `real = fp8(values) * scale`.
-    pub scale: f32,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct StaticFp8Calibration {
-    scales: HashMap<String, f32>,
-}
-
-impl StaticFp8Calibration {
-    pub fn from_json_file(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| Error::Other(format!("read {}: {e}", path.display())))?;
-        Self::from_json_str(&raw)
-    }
-
-    /// Accept either `{ "name": scale }`, a nested `scales` object,
-    /// or entries shaped as `{ "scale": number }` / `{ "amax": number }`.
-    pub fn from_json_str(raw: &str) -> Result<Self> {
-        let root: serde_json::Value = serde_json::from_str(raw)
-            .map_err(|e| Error::Other(format!("WallOSS FP8 calibration JSON: {e}")))?;
-        let values = root.get("scales").unwrap_or(&root);
-        let object = values
-            .as_object()
-            .ok_or_else(|| Error::Other("WallOSS FP8 calibration must be a JSON object".into()))?;
-        let mut scales = HashMap::with_capacity(object.len());
-        for (name, value) in object {
-            let scale = value
-                .as_f64()
-                .or_else(|| value.get("scale").and_then(|v| v.as_f64()))
-                .or_else(|| {
-                    value
-                        .get("amax")
-                        .and_then(|v| v.as_f64())
-                        .map(|amax| amax / E4M3_MAX as f64)
-                })
-                .ok_or_else(|| {
-                    Error::Other(format!(
-                        "WallOSS FP8 calibration entry `{name}` has no numeric scale or amax"
-                    ))
-                })? as f32;
-            if !scale.is_finite() || scale <= 0.0 {
-                return Err(Error::Other(format!(
-                    "WallOSS FP8 calibration entry `{name}` has invalid scale {scale}"
-                )));
-            }
-            scales.insert(name.clone(), scale);
-        }
-        Ok(Self { scales })
-    }
-
-    pub fn scale(&self, name: &str) -> Result<f32> {
-        self.scales
-            .get(name)
-            .copied()
-            .ok_or_else(|| Error::Other(format!("missing static FP8 activation scale `{name}`")))
-    }
-}
-
-/// Quantize a CPU F32/F16/BF16 tensor using a static per-tensor scale.
-pub fn quantize_e4m3(tensor: &Tensor, scale: f32) -> Result<Fp8Tensor> {
-    if !scale.is_finite() || scale <= 0.0 {
-        return Err(Error::Other(format!(
-            "FP8 quantization scale must be finite and positive, got {scale}"
-        )));
-    }
-    let source = tensor.to_f32_vec()?;
-    let inverse_scale = scale.recip();
-    let bytes = source
-        .iter()
-        .map(|value| encode_e4m3(*value * inverse_scale))
-        .collect::<Vec<_>>();
-    Ok(Fp8Tensor {
-        values: Tensor::from_f8_e4m3(tensor.shape().dims().to_vec(), &bytes)?,
-        scale,
-    })
-}
-
-/// Select the standard absmax scale and quantize a weight matrix.
-pub fn quantize_e4m3_absmax(tensor: &Tensor) -> Result<Fp8Tensor> {
-    let source = tensor.to_f32_vec()?;
-    let amax = source.iter().fold(0.0f32, |m, value| m.max(value.abs()));
-    // All-zero matrices use scale 1 so their representation remains valid.
-    let scale = if amax == 0.0 { 1.0 } else { amax / E4M3_MAX };
-    quantize_e4m3(tensor, scale)
-}
 
 /// CUDA-compatible saturating finite E4M3 encoding, round-to-nearest-even.
 pub fn encode_e4m3(value: f32) -> u8 {
@@ -165,7 +65,6 @@ fn round_ties_even(value: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apxinf_core::DType;
 
     #[test]
     fn canonical_e4m3_values_match_cuda_layout() {
@@ -187,33 +86,5 @@ mod tests {
         assert_eq!(encode_e4m3(1.0625), 0x38);
         // Halfway between mantissas 1 and 2 rounds to mantissa 2.
         assert_eq!(encode_e4m3(1.1875), 0x3a);
-    }
-
-    #[test]
-    fn absmax_quantization_preserves_shape_and_range() {
-        let source = Tensor::from_f32(vec![2, 2], &[-2.0, -0.5, 0.5, 2.0]).unwrap();
-        let quantized = quantize_e4m3_absmax(&source).unwrap();
-        assert_eq!(quantized.values.dtype(), DType::F8E4M3);
-        assert_eq!(quantized.values.shape(), source.shape());
-        let output = quantized
-            .values
-            .as_f8_e4m3()
-            .unwrap()
-            .iter()
-            .map(|byte| decode_e4m3(*byte) * quantized.scale)
-            .collect::<Vec<_>>();
-        assert_eq!(output[0], -2.0);
-        assert_eq!(output[3], 2.0);
-    }
-
-    #[test]
-    fn calibration_accepts_scales_and_amax() {
-        let calibration = StaticFp8Calibration::from_json_str(
-            r#"{"scales":{"vision.input":0.25,"action.q":{"amax":448.0}}}"#,
-        )
-        .unwrap();
-        assert_eq!(calibration.scale("vision.input").unwrap(), 0.25);
-        assert_eq!(calibration.scale("action.q").unwrap(), 1.0);
-        assert!(calibration.scale("missing").is_err());
     }
 }

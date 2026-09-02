@@ -159,6 +159,18 @@ def test_walloss_rejects_disabling_checkpoint_state_encoding(tmp_path):
         )
 
 
+def test_walloss_rejects_static_fp8_calibration(tmp_path):
+    from apxinf import WallossPolicy
+
+    with pytest.raises(TypeError, match="unsupported WallossPolicy options.*calibration"):
+        WallossPolicy.from_pretrained(
+            tmp_path,
+            model=_FakeModel(),
+            precision="fp8",
+            calibration=tmp_path / "calibration.json",
+        )
+
+
 def test_walloss_action_width_uses_checkpoint_unless_user_overrides(tmp_path, monkeypatch):
     from apxinf import WallossPolicy
     from apxinf.policies.impls import walloss

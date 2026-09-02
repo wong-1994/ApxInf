@@ -256,7 +256,7 @@ class WallossPolicy:
 
     @classmethod
     def from_pretrained(cls, model_dir, *, model=None, checkpoint=None, device="cuda:0",
-                        precision="auto", calibration=None, tactics=None, norm_key="x2_normal",
+                        precision="auto", tactics=None, norm_key="x2_normal",
                         action_dim=None, image_keys=_DEFAULT_IMAGE_KEYS,
                         camera_names=("face_view", "right_wrist_view"),
                         state_key="observation/state", prompt_key="prompt",
@@ -282,7 +282,6 @@ class WallossPolicy:
             ckpt = str(checkpoint) if checkpoint is not None else str(model_dir / "model.safetensors")
             model = apxinf_py.Model.load(
                 "walloss", ckpt, device=device, precision=precision,
-                **({"calibration": str(calibration)} if calibration else {}),
                 **({"tactics": str(tactics)} if tactics else {}), sampling_seed=int(seed),
             )
         width = int(action_dim) if action_dim is not None else int(model.action_dim)

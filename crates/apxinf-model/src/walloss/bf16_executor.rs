@@ -6,15 +6,13 @@ use super::backend::{kernels, Context, DeviceBuffer};
 use super::WallossActionWeights;
 use super::{
     DeviceVisionGeometry, WallossDynamicFp8LayerWeights, WallossDynamicFp8VisionBlockWeights,
-    WallossDynamicFp8VisionWeights, WallossFp8LayerWeights, WallossFp8VisionBlockWeights,
-    WallossFp8VisionWeights, WallossLayerWeights, WallossTextConfig, WallossVisionBlockWeights,
-    WallossVisionConfig, WallossVisionWeights,
+    WallossDynamicFp8VisionWeights, WallossLayerWeights, WallossTextConfig,
+    WallossVisionBlockWeights, WallossVisionConfig, WallossVisionWeights,
 };
 
 #[derive(Clone, Copy)]
 pub(super) enum MatrixRef<'a> {
     Bf16(&'a Tensor),
-    Fp8(&'a super::Fp8LinearWeights, f32),
     DynamicFp8(&'a super::DynamicFp8LinearWeights),
 }
 
@@ -55,9 +53,6 @@ pub(super) trait VisionTowerWeights {
 fn linear(context: &Context, input: &Tensor, weights: MatrixRef<'_>) -> Result<Tensor> {
     match weights {
         MatrixRef::Bf16(weight) => kernels::gemm::bf16(context, input, weight),
-        MatrixRef::Fp8(weight, scale) => {
-            super::fp8_executor::linear_bf16(context, input, scale, weight)
-        }
         MatrixRef::DynamicFp8(weight) => dynamic_linear(context, input, weight),
     }
 }
@@ -125,11 +120,6 @@ fn qkv_after_rms(
         MatrixRef::Bf16(weight) => {
             let normalized = kernels::norm::rms_bf16(context, input, norm_weight, eps)?;
             kernels::gemm::bf16(context, &normalized, weight)
-        }
-        MatrixRef::Fp8(weight, scale) => {
-            let normalized =
-                kernels::norm::rms_quant_bf16_e4m3(context, input, norm_weight, eps, scale)?;
-            kernels::gemm::fp8(context, &normalized, scale, weight.as_kernel_view())
         }
         MatrixRef::DynamicFp8(weight) => {
             let normalized = kernels::norm::rms_quantize_rows_bf16_e4m3(
@@ -215,44 +205,6 @@ fn residual_mlp(
             let activated = kernels::activation::swiglu_bf16(context, &gate_up)?;
             let down = kernels::gemm::bf16(context, &activated, down)?;
             kernels::fused::bias_residual_bf16(context, &down, down_bias, &fused.hidden)
-        }
-        (
-            MatrixRef::Fp8(output, attention_scale),
-            MatrixRef::Fp8(gate_up, gate_scale),
-            MatrixRef::Fp8(down, activation_scale),
-        ) => {
-            let attention =
-                kernels::quantization::quantize_bf16_e4m3(context, attention, attention_scale)?;
-            let projected = kernels::gemm::fp8(
-                context,
-                &attention,
-                attention_scale,
-                output.as_kernel_view(),
-            )?;
-            let fused = kernels::fused::bias_residual_rms_quant_f16_bf16_e4m3(
-                context,
-                &projected,
-                output_bias,
-                input,
-                post_attention_norm,
-                eps,
-                gate_scale,
-            )?;
-            let gate_up = kernels::gemm::fp8(
-                context,
-                &fused.normalized,
-                gate_scale,
-                gate_up.as_kernel_view(),
-            )?;
-            let activated = kernels::activation::swiglu_quant_f16_e4m3(
-                context,
-                &gate_up,
-                gate_up_bias,
-                activation_scale,
-            )?;
-            let down =
-                kernels::gemm::fp8(context, &activated, activation_scale, down.as_kernel_view())?;
-            kernels::fused::bias_residual_f16_bf16(context, &down, down_bias, &fused.hidden)
         }
         (
             MatrixRef::DynamicFp8(output),
@@ -367,30 +319,6 @@ impl TransformerWeights for WallossLayerWeights {
     }
 }
 
-impl TransformerWeights for WallossFp8LayerWeights {
-    fn input_norm(&self) -> &Tensor {
-        &self.input_norm
-    }
-    fn post_attention_norm(&self) -> &Tensor {
-        &self.post_attention_norm
-    }
-    fn qkv(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.qkv, self.qkv_scale)
-    }
-    fn qkv_bias(&self) -> &Tensor {
-        &self.qkv_bias
-    }
-    fn output(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.output, self.output_scale)
-    }
-    fn gate_up(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.gate_up, self.gate_up_scale)
-    }
-    fn down(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.down, self.down_scale)
-    }
-}
-
 impl TransformerWeights for WallossDynamicFp8LayerWeights {
     fn input_norm(&self) -> &Tensor {
         &self.input_norm
@@ -442,39 +370,6 @@ impl VisionBlockWeights for WallossVisionBlockWeights {
     }
     fn down(&self) -> MatrixRef<'_> {
         MatrixRef::Bf16(&self.down)
-    }
-    fn down_bias(&self) -> &Tensor {
-        &self.down_bias
-    }
-}
-
-impl VisionBlockWeights for WallossFp8VisionBlockWeights {
-    fn input_norm(&self) -> &Tensor {
-        &self.input_norm
-    }
-    fn post_attention_norm(&self) -> &Tensor {
-        &self.post_attention_norm
-    }
-    fn qkv(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.qkv, self.qkv_scale)
-    }
-    fn qkv_bias(&self) -> &Tensor {
-        &self.qkv_bias
-    }
-    fn output(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.output, self.output_scale)
-    }
-    fn output_bias(&self) -> &Tensor {
-        &self.output_bias
-    }
-    fn gate_up(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.gate_up, self.gate_up_scale)
-    }
-    fn gate_up_bias(&self) -> &Tensor {
-        &self.gate_up_bias
-    }
-    fn down(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.down, self.down_scale)
     }
     fn down_bias(&self) -> &Tensor {
         &self.down_bias
@@ -533,31 +428,6 @@ impl VisionTowerWeights for WallossVisionWeights {
     }
     fn merger_output(&self) -> MatrixRef<'_> {
         MatrixRef::Bf16(&self.merger_output)
-    }
-    fn merger_output_bias(&self) -> &Tensor {
-        &self.merger_output_bias
-    }
-}
-
-impl VisionTowerWeights for WallossFp8VisionWeights {
-    type Block = WallossFp8VisionBlockWeights;
-    fn patch_projection(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.patch_projection, self.patch_scale)
-    }
-    fn blocks(&self) -> &[Self::Block] {
-        &self.blocks
-    }
-    fn merger_norm(&self) -> &Tensor {
-        &self.merger_norm
-    }
-    fn merger_hidden(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.merger_hidden, self.merger_norm_scale)
-    }
-    fn merger_hidden_bias(&self) -> &Tensor {
-        &self.merger_hidden_bias
-    }
-    fn merger_output(&self) -> MatrixRef<'_> {
-        MatrixRef::Fp8(&self.merger_output, self.merger_hidden_scale)
     }
     fn merger_output_bias(&self) -> &Tensor {
         &self.merger_output_bias
