@@ -726,6 +726,12 @@ impl VlaRuntime for Pi05VlaRuntime {
         };
         prepared.calibrate_eager(inputs, request)
     }
+
+    fn calibration_plan(&self) -> Result<Vec<String>> {
+        Ok(super::Pi05CalibrationPlan::for_config(&self.config)
+            .sites()
+            .to_vec())
+    }
 }
 
 pub(super) fn load_registered(

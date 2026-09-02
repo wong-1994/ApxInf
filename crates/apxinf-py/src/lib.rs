@@ -39,7 +39,6 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use apxinf_core::{Device, RngKey, Shape, Tensor};
-use apxinf_model::pi05::Pi05CalibrationPlan;
 use apxinf_model::{
     AutoModel, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation, Pi05Config,
     SyntheticWeights, VisionObservation, VlaContract, VlaRequest,
@@ -635,9 +634,9 @@ impl Model {
         token_ids: PyReadonlyArray1<'_, u32>,
         noise: PyReadonlyArray2<'_, f32>,
     ) -> PyResult<BTreeMap<String, f32>> {
+        let contract = self.require_rgb_contract("_calibrate_rgb")?;
         let layout = parse_layout(layout)?;
-        let expected_bytes =
-            self.config.num_views * self.config.image_size * self.config.image_size * 3;
+        let expected_bytes = contract.num_views * contract.image_size * contract.image_size * 3;
         let bytes = rgb_u8
             .as_slice()
             .map_err(|_| {
@@ -663,6 +662,8 @@ impl Model {
         let observation = Observation {
             vision: VisionObservation::RgbU8 { bytes, layout },
             token_ids: tokens,
+            state: None,
+            action_mask: None,
         };
         self.model
             .calibration_amax(&VlaRequest::provided(&observation, &noise))
@@ -671,8 +672,8 @@ impl Model {
 
     /// Stable logical sites required by this model's static-FP8 execution plan.
     #[pyo3(name = "_calibration_plan")]
-    fn calibration_plan(&self) -> Vec<String> {
-        Pi05CalibrationPlan::for_config(&self.config).sites().to_vec()
+    fn calibration_plan(&self) -> PyResult<Vec<String>> {
+        self.model.calibration_plan().map_err(runtime_err)
     }
 
     /// Seeded L1 inference. This avoids creating or transferring a host noise

@@ -42,9 +42,7 @@ Reported latency is P50 over 30 samples after 10 warm-up iterations
 import numpy as np
 from apxinf import AutoPolicy
 
-policy = AutoPolicy.from_pretrained(
-    "<path-to-model>", precision="bf16", autotune=True
-)
+policy = AutoPolicy.from_pretrained("<path-to-model>", precision="bf16")
 
 result = policy.infer({
     "observation/image":       np.zeros((256, 256, 3), np.uint8),

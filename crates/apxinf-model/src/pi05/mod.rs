@@ -51,7 +51,8 @@ pub use calibration::Pi05CalibrationObserver;
 pub use config::{GemmaVariantConfig, Pi05Config, Pi05PerformanceProfile};
 pub use device_weights::{fp16_to_device, Fp8LinearWeights};
 pub use fp8::{
-    decode_e4m3, dequantize_e4m3, encode_e4m3, quantize_e4m3, quantize_e4m3_absmax, Fp8Tensor,
+    checkpoint_identity, decode_e4m3, dequantize_e4m3, encode_e4m3, quantize_e4m3,
+    quantize_e4m3_absmax, Fp8Tensor, LayerCalibrationSites, Pi05CalibrationPlan,
     StaticFp8Calibration, E4M3_MAX,
 };
 #[cfg(feature = "cuda")]

@@ -186,6 +186,13 @@ pub trait VlaRuntime {
             "activation calibration is not supported by this VLA runtime".into(),
         ))
     }
+
+    /// Stable logical sites required by this runtime's calibration profile.
+    fn calibration_plan(&self) -> Result<Vec<String>> {
+        Err(Error::Other(
+            "activation calibration is not supported by this VLA runtime".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
