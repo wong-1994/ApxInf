@@ -16,7 +16,7 @@ the checkpoint's input configuration requires it.
 {"observation/image":"frames/001-base.png","observation/wrist_image":"frames/001-wrist.png","prompt":"open the drawer","observation/state":[0.2,0.1,0.4]}
 ```
 
-Generate the profile:
+Generate the calibration file:
 
 ```bash
 python3 scripts/calibrate_pi05.py \
@@ -34,8 +34,8 @@ camera views expected by the checkpoint.
 
 ## Native LIBERO task observations
 
-For the PI0.5 LIBERO checkpoint, generate a profile from observations rendered
-by the actual LIBERO10 task suite:
+For the PI0.5 LIBERO checkpoint, generate a calibration file from observations
+rendered by the actual LIBERO10 task suite:
 
 ```bash
 python3 scripts/calibrate_pi05.py \
@@ -54,27 +54,7 @@ This command needs the same LIBERO and MuJoCo dependencies as the repository's
 LIBERO evaluation command. For another simulator or deployment source, export
 its public Observations through the manifest interface instead.
 
-## Replay existing NPZ observations
-
-Existing automation can pass a directory or repeat individual inputs:
-
-```bash
-python3 scripts/calibrate_pi05.py \
-  --model-dir <path-to-model> \
-  --input-dir <path-to-observation-npz>
-```
-
-```bash
-python3 scripts/calibrate_pi05.py \
-  --model-dir <path-to-model> \
-  --input <path-to-sample-000.npz> \
-  --input <path-to-sample-001.npz>
-```
-
-Each NPZ contains the configured image keys, scalar prompt string, and optional
-state. NPZ is useful for exact replay; it is not required for normal calibration.
-
-## Loading the profile
+## Loading the calibration file
 
 `AutoPolicy` automatically uses `<model-dir>/calibration.json`:
 
@@ -82,7 +62,7 @@ state. NPZ is useful for exact replay; it is not required for normal calibration
 policy = AutoPolicy.from_pretrained("<path-to-model>", precision="fp8")
 ```
 
-Pass `calibration=` only when the profile is stored elsewhere:
+Pass `calibration=` only when the calibration file is stored elsewhere:
 
 ```python
 policy = AutoPolicy.from_pretrained(
@@ -93,16 +73,16 @@ policy = AutoPolicy.from_pretrained(
 ```
 
 At FP8 startup, ApxInf reads the checkpoint shards to compare their SHA-256
-identity with the profile. This can add startup time on slower storage. An
-identity mismatch emits a warning and continues; malformed profiles, missing or
-invalid scales, and incompatible execution plans still fail because the runtime
-cannot use them safely.
+identity with the calibration file. This can add startup time on slower storage.
+An identity mismatch emits a warning and continues; malformed calibration files,
+missing or invalid scales, and incompatible execution plans still fail because
+the runtime cannot use them safely.
 
 `tactics.json` is optional. If it is absent, the runtime warns and continues
 with compatible kernel fallbacks; calibration is unaffected, though performance
 may be lower than with tuned tactics.
 
-Profiles using an older calibration schema are not migrated automatically.
+Calibration files using an older schema are not migrated automatically.
 Regenerate `calibration.json` with the ApxInf version being deployed.
 
 Run `python3 scripts/calibrate_pi05.py --help` for checkpoint-specific input

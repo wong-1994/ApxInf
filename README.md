@@ -323,8 +323,8 @@ python3 scripts/calibrate_pi05.py \
 ```
 
 See [PI0.5 FP8 calibration](doc/pi05-fp8-calibration.md) for the Observation
-format, native LIBERO sampling, NPZ replay, and output options. The native path
-uses the same LIBERO/MuJoCo dependencies as [LIBERO evaluation](#libero-evaluation).
+format, native LIBERO sampling, and output options. The native path uses the
+same LIBERO/MuJoCo dependencies as [LIBERO evaluation](#libero-evaluation).
 
 ### INT8
 
