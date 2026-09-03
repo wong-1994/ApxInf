@@ -56,6 +56,7 @@ def build_unitree_g1_policy(
     *,
     state_key: str,
     image_keys: Sequence[str],
+    prompt_key: str = "prompt",
     use_delta_joint_actions: bool = True,
     adapt_to_pi: bool = True,
     discrete_state: bool = True,
