@@ -57,6 +57,8 @@ def synthetic_observation_for(policy, *, prompt: str = "pick up the block"):
         raise ValueError(f"policy metadata image_keys must be non-empty strings, got {image_keys!r}")
     return synthetic_observation(
         image_keys=tuple(image_keys),
+        state_key=policy.metadata.get("state_key", "observation/state"),
+        prompt_key=policy.metadata.get("prompt_key", "prompt"),
         state_dim=policy.action_dim,
         prompt=prompt,
     )
