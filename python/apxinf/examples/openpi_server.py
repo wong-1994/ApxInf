@@ -71,9 +71,10 @@ def main() -> None:
         action_dim=(args.action_dim or None),
         metadata={"protocol": "openpi.websocket_policy", "precision": args.precision},
     )
-    if args.image_keys:
+    image_keys = getattr(args, "image_keys", None)
+    if image_keys:
         options["image_keys"] = tuple(
-            key.strip() for key in args.image_keys.split(",") if key.strip()
+            key.strip() for key in image_keys.split(",") if key.strip()
         )
     policy = (
         build_robot_policy(args.robot, args.model_dir, **options)
