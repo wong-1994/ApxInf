@@ -62,6 +62,13 @@ from ...checkpoints import (
     require_norm_stats,
     resolve_tokenizer,
 )
+from ...checkpoints.descriptor import (
+    IDENTITY,
+    IDENTITY_MISSING_STATS,
+    MEAN_STD,
+    QUANTILE,
+    TransformSpec,
+)
 from ..base import VIEW_SLOTS, BareModel
 from ...processors import (
     GaussianNoise,
@@ -100,6 +107,78 @@ _LOGGER = logging.getLogger("apxinf.policies.pi05")
 #: dialect on this wire uses it — so unlike the camera and state keys it is not
 #: any one dataset's convention and keeps a default here.
 _PROMPT_KEY = "prompt"
+
+
+def _normalizer_from_transform(spec: TransformSpec, *, dtype=None) -> Optional[Normalizer]:
+    """Materialize a canonical checkpoint transform as an ApxInf processor."""
+    if spec.mode == IDENTITY:
+        return None
+    if spec.mode == QUANTILE:
+        q01, q99 = _lerobot_quantile_bounds(spec)
+        return Normalizer(q01=q01, q99=q99, mode=QUANTILE, eps=0.0, dtype=dtype)
+    if spec.mode == MEAN_STD:
+        std = np.asarray(spec.values["std"], dtype=np.float64) + spec.eps
+        return Normalizer(
+            mean=spec.values["mean"],
+            std=std,
+            mode=MEAN_STD,
+            eps=0.0,
+            dtype=dtype,
+        )
+    raise ValueError(f"unsupported state transform mode {spec.mode!r}")
+
+
+def _unnormalizer_from_transform(
+    spec: TransformSpec, *, dims: Optional[int] = None, dtype=None
+) -> Unnormalizer:
+    """Materialize action transform, preserving an explicit identity width."""
+    width = spec.width if dims is None else int(dims)
+    if width <= 0 or width > spec.width:
+        raise ValueError(
+            f"action_dim={width} is incompatible with checkpoint normalization width {spec.width}"
+        )
+    if spec.mode == IDENTITY:
+        return Unnormalizer(
+            q01=[-1.0] * width,
+            q99=[1.0] * width,
+            mode=QUANTILE,
+            eps=0.0,
+            dtype=dtype,
+        )
+    common = {"mode": spec.mode, "dims": width, "eps": spec.eps, "dtype": dtype}
+    if spec.mode == QUANTILE:
+        q01, q99 = _lerobot_quantile_bounds(spec)
+        return Unnormalizer(
+            q01=q01,
+            q99=q99,
+            mode=QUANTILE,
+            dims=width,
+            eps=0.0,
+            dtype=dtype,
+        )
+    if spec.mode == MEAN_STD:
+        return Unnormalizer(mean=spec.values["mean"], std=spec.values["std"], **common)
+    raise ValueError(f"unsupported action transform mode {spec.mode!r}")
+
+
+def _lerobot_quantile_bounds(spec: TransformSpec) -> Tuple[np.ndarray, np.ndarray]:
+    """Encode LeRobot's zero-only epsilon guard for existing processors.
+
+    ApxInf's OpenPI quantile processor adds ``eps`` to every range. LeRobot only
+    substitutes ``eps`` where ``q01 == q99``. Pre-adjusting those entries and
+    constructing the processor with ``eps=0`` preserves LeRobot's exact rule
+    without changing the established OpenPI processor behavior.
+    """
+    q01 = np.asarray(spec.values["q01"], dtype=np.float64)
+    q99 = np.asarray(spec.values["q99"], dtype=np.float64)
+    return q01, np.where(q99 == q01, q01 + spec.eps, q99)
+
+
+def _normalization_metadata(plan) -> Mapping[str, str]:
+    def render(spec):
+        return "absent" if spec is None else f"{spec.mode}/{spec.status}"
+
+    return {"state": render(plan.state), "action": render(plan.action)}
 
 
 @register_policy("pi05")
@@ -302,7 +381,7 @@ class Pi05Policy:
 
         This is the from-disk convenience path: it loads the ``apxinf_py`` model
         (unless one is passed in), builds the SentencePiece tokenizer and the
-        action quantiles from files under ``model_dir``, assembles the default
+        declared normalization transforms from files under ``model_dir``, assembles the default
         pre/post chains via :meth:`default_pipelines`, and constructs the policy.
         Its many parameters are exactly the knobs for *building processors from
         disk* (``norm_key``/``action_dim``/``discrete_state``/``tokenizer_path``/
@@ -320,9 +399,9 @@ class Pi05Policy:
         value, an explicit value outranks it (the horizon is a sequence length,
         not a weight dimension, so the same weights run at any horizon the config
         validator accepts). State injection is off by default; with
-        ``discrete_state=True`` a state normalizer is built from
-        ``norm_stats[state_norm_key]`` to map raw state to ``[-1, 1]`` before it is
-        discretized into the prompt, and ``state_key`` becomes **required** —
+        ``discrete_state=True`` a state normalizer is built from the checkpoint's
+        selected normalization source to map raw state before it is discretized
+        into the prompt, and ``state_key`` becomes **required** —
         there is no dataset-neutral name to fall back to, and guessing one would
         drop proprioception silently.
 
@@ -482,31 +561,57 @@ class Pi05Policy:
         # demanding the file there would break a stand-in checkpoint run. An
         # explicit path still works with no layout at all, which is the flat
         # directory whose statistics were handed over separately.
-        needs_stats = unnormalizer is None or discrete_state
-        if not needs_stats:
-            stats_path = None
-        elif layout is not None:
-            stats_path = require_norm_stats(layout)
-        elif norm_stats is not None:
-            stats_path = Path(norm_stats)
-            if not stats_path.is_file():
-                raise CheckpointError(f"norm_stats path {stats_path} does not exist")
+        plan = layout.normalization if layout is not None else None
+        if plan is not None:
+            unnormalizer = (
+                unnormalizer
+                if unnormalizer is not None
+                else _unnormalizer_from_transform(
+                    plan.action, dims=action_dim, dtype=norm_dtype
+                )
+            )
+            state_normalizer = (
+                _normalizer_from_transform(plan.state, dtype=norm_dtype)
+                if discrete_state and plan.state is not None
+                else None
+            )
+            if any(
+                spec is not None and spec.status == IDENTITY_MISSING_STATS
+                for spec in (plan.state, plan.action)
+            ):
+                _LOGGER.warning(
+                    "checkpoint %s lacks LeRobot processor statistics for one or "
+                    "more transforms; using identity for those transforms to match "
+                    "upstream. This is load-compatible, not evidence of "
+                    "embodiment-level parity.",
+                    model_dir,
+                )
         else:
-            stats_path = None
-        unnormalizer = (
-            unnormalizer
-            if unnormalizer is not None
-            else Unnormalizer.from_norm_stats(
-                model_dir, key=norm_key, dims=action_dim, dtype=norm_dtype, path=stats_path
+            needs_stats = unnormalizer is None or discrete_state
+            if not needs_stats:
+                stats_path = None
+            elif layout is not None:
+                stats_path = require_norm_stats(layout)
+            elif norm_stats is not None:
+                stats_path = Path(norm_stats)
+                if not stats_path.is_file():
+                    raise CheckpointError(f"norm_stats path {stats_path} does not exist")
+            else:
+                stats_path = None
+            unnormalizer = (
+                unnormalizer
+                if unnormalizer is not None
+                else Unnormalizer.from_norm_stats(
+                    model_dir, key=norm_key, dims=action_dim, dtype=norm_dtype, path=stats_path
+                )
             )
-        )
-        state_normalizer = (
-            Normalizer.from_norm_stats(
-                model_dir, key=state_norm_key, dtype=norm_dtype, path=stats_path
+            state_normalizer = (
+                Normalizer.from_norm_stats(
+                    model_dir, key=state_norm_key, dtype=norm_dtype, path=stats_path
+                )
+                if discrete_state
+                else None
             )
-            if discrete_state
-            else None
-        )
         reset_sampling = getattr(model, "reset_sampling", None)
         if callable(reset_sampling):
             reset_sampling(int(seed))
@@ -529,7 +634,10 @@ class Pi05Policy:
             prompt_key=prompt_key,
             state_key=state_key,
             action_dim=unnormalizer.width,
-            metadata=metadata,
+            metadata={
+                **({"normalization": _normalization_metadata(plan)} if plan is not None else {}),
+                **(dict(metadata) if metadata else {}),
+            },
         )
 
     @classmethod

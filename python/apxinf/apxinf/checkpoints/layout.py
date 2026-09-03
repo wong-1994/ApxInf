@@ -11,10 +11,10 @@ Five directory layouts turn up in the field and only two of them matter here:
 
 ``lerobot``
     A HuggingFace robot-policy directory: ``config.json`` with ``"type": "pi05"``
-    plus ``model.safetensors``. LeRobot keeps normalization statistics inside
-    ``policy_preprocessor_step_<N>_normalizer_processor.safetensors`` rather than
-    a JSON file (and the official pi05 repo deleted even that), so a servable
-    LeRobot checkpoint needs a ``norm_stats.json`` supplied alongside it.
+    plus ``model.safetensors``. Current repositories serialize their processor
+    topology in ``policy_{pre,post}processor.json`` and, for fine-tunes, point to
+    normalization state in separate SafeTensors sidecars. Base repositories may
+    deliberately omit that state, in which case LeRobot uses identity transforms.
 
 The tensor names are **identical** between the two — 812 of them, exact set
 equality — so nothing about weight loading changes. Only the sidecar metadata
@@ -43,6 +43,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
+from .descriptor import IDENTITY_MISSING_STATS, NormalizationPlan, TokenizerSpec
+from .lerobot import LeRobotProcessorError, has_processor_layout, load_processor_plan
 from .metadata import MetadataError, read_metadata_pt, train_config_facts
 
 __all__ = [
@@ -118,6 +120,10 @@ class CheckpointLayout:
     openpi: Mapping[str, Any] = field(default_factory=dict)
     #: Human-readable observations worth surfacing but not worth failing on.
     notes: Tuple[str, ...] = ()
+    #: Layout-neutral processor facts. Present for a serialized LeRobot pipeline.
+    normalization: Optional[NormalizationPlan] = None
+    #: Upstream tokenizer identity, which an offline caller maps to a local file.
+    tokenizer: Optional[TokenizerSpec] = None
 
     def config_json_text(self) -> Optional[str]:
         """The ``config_json=`` string to hand ``apxinf_py.Model.load``.
@@ -150,6 +156,20 @@ class CheckpointLayout:
         if self.arch:
             rendered = ", ".join(f"{k}={v}" for k, v in sorted(self.arch.items()))
             lines.append(f"architecture: {rendered}")
+        if self.normalization is not None:
+            state = self.normalization.state
+            state_text = (
+                "(not declared)"
+                if state is None
+                else f"{state.mode}/{state.status} width={state.width}"
+            )
+            action = self.normalization.action
+            lines.append(f"state norm:   {state_text}")
+            lines.append(
+                f"action norm:  {action.mode}/{action.status} width={action.width}"
+            )
+        if self.tokenizer is not None:
+            lines.append(f"tokenizer id: {self.tokenizer.name}")
         for key in ("exp_name", "global_step", "image_keys", "state_key",
                     "adapt_to_pi", "use_delta_joint_actions", "default_prompt"):
             value = self.openpi.get(key)
@@ -211,17 +231,35 @@ def _resolve_norm_stats(
 
 
 def has_layout_metadata(model_dir) -> bool:
-    """True when the directory declares its own layout (``metadata.pt``/``config.json``).
+    """True when the directory declares a supported external checkpoint layout.
 
     Callers that must keep serving the hand-assembled flat directories that
-    predate this module — ``model.safetensors`` + ``norm_stats.json`` and nothing
-    that says what the checkpoint is — use this to decide whether
+    predate this module — including those with ApxInf's native architecture-only
+    ``config.json`` — use this to decide whether
     :func:`detect_checkpoint` has anything to work with. Detection itself refuses
     to guess, which is right for a real checkpoint and wrong as a hard regression
     for a directory that used to load.
     """
     root = Path(model_dir)
-    return (root / METADATA_NAME).is_file() or (root / CONFIG_NAME).is_file()
+    if (root / METADATA_NAME).is_file():
+        return True
+    config_path = root / CONFIG_NAME
+    if not config_path.is_file():
+        return False
+    try:
+        document = json.loads(config_path.read_text())
+    except (OSError, ValueError):
+        # Let detect_checkpoint produce the actionable parse error.
+        return True
+    if not isinstance(document, dict):
+        return True
+    if document.get("type") == "pi05":
+        return True
+    # Before layout adapters existed, ApxInf exports wrote this compact Rust
+    # architecture config next to model.safetensors. It is still consumed by
+    # Model.load itself and must not be reinterpreted as a LeRobot manifest.
+    native_markers = {"action_dim", "action_horizon", "paligemma_variant"}
+    return not native_markers.issubset(document)
 
 
 def detect_checkpoint(
@@ -268,13 +306,15 @@ def detect_checkpoint(
                 f"{root} matches neither checkpoint layout apxinf can load:\n"
                 f"  {OPENPI_PYTORCH}: needs {METADATA_NAME} "
                 f"(+ assets/<asset_id>/{NORM_STATS_NAME})\n"
-                f"  {LEROBOT}: needs {CONFIG_NAME} (+ {NORM_STATS_NAME})\n"
+                f"  {LEROBOT}: needs {CONFIG_NAME} (processor sidecars are optional)\n"
                 f"the directory holds: {present}"
             )
 
     notes = []
     arch: Dict[str, Any] = {}
     facts: Dict[str, Any] = {}
+    normalization = None
+    tokenizer = None
 
     if resolved == OPENPI_PYTORCH:
         if not has_metadata:
@@ -301,6 +341,16 @@ def detect_checkpoint(
             raise CheckpointError(
                 f"checkpoint_format={LEROBOT!r} but {config_json} does not exist"
             )
+        try:
+            config_document = json.loads(config_json.read_text())
+        except (OSError, ValueError) as exc:
+            raise CheckpointError(f"{config_json}: {exc}") from exc
+        if not isinstance(config_document, dict) or config_document.get("type") != "pi05":
+            declared = config_document.get("type") if isinstance(config_document, dict) else None
+            raise CheckpointError(
+                f"{config_json} is not a supported LeRobot PI0.5 config "
+                f"(expected type='pi05', got {declared!r})"
+            )
         if has_metadata:
             notes.append(
                 f"{metadata_pt} is present but ignored because checkpoint_format="
@@ -308,6 +358,20 @@ def detect_checkpoint(
             )
         # arch stays empty on purpose: the Rust loader reads config.json itself,
         # which is the behaviour LeRobot checkpoints already had.
+        if has_processor_layout(root) and norm_stats is None:
+            try:
+                normalization, tokenizer = load_processor_plan(root, config_document)
+            except LeRobotProcessorError as exc:
+                raise CheckpointError(str(exc)) from exc
+            if any(
+                spec is not None and spec.status == IDENTITY_MISSING_STATS
+                for spec in (normalization.state, normalization.action)
+            ):
+                notes.append(
+                    "LeRobot processor state is absent for one or more transforms; "
+                    "matching upstream identity passthrough for those transforms. "
+                    "This is not checkpoint-equivalent to an embodiment with stats."
+                )
 
     effective_asset_id = asset_id or facts.get("asset_id")
     asset_id_source = (
@@ -350,6 +414,8 @@ def detect_checkpoint(
         arch=arch,
         openpi={k: v for k, v in facts.items() if k != "arch"},
         notes=tuple(notes),
+        normalization=normalization,
+        tokenizer=tokenizer,
     )
 
 
@@ -375,11 +441,11 @@ def require_norm_stats(layout: CheckpointLayout) -> Path:
     else:
         example = '{"actions": {"q01": [...], "q99": [...]}, "state": {...}}'
         hint = (
-            f"LeRobot does not ship a {NORM_STATS_NAME}: it keeps the statistics inside "
-            f"policy_preprocessor_step_<N>_normalizer_processor.safetensors — and the "
-            f"official pi05 repo deleted even that on 2025-09-24 — or in the source "
-            f"dataset's meta/stats.json. apxinf parses neither. Convert them into "
-            f"{example} and put it in the checkpoint root, or pass --norm-stats."
+            f"This legacy LeRobot directory has no serialized policy processor. Current "
+            f"LeRobot repositories put statistics in a state_file referenced by "
+            f"policy_preprocessor.json; older repositories may keep them in the model "
+            f"state or the source dataset's meta/stats.json. Convert them into {example} "
+            f"and put it in the checkpoint root, or pass --norm-stats."
         )
     raise CheckpointError(
         f"no {NORM_STATS_NAME} for {layout.root}; tried:\n{tried}\n{hint}"
@@ -430,8 +496,9 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         prog="python -m apxinf.checkpoints",
         description=(
             "Report how apxinf will read a checkpoint directory: which layout it is, "
-            "which norm_stats.json will actually be used, and what architecture the "
-            "loader will be given. Reads no weights and needs neither torch nor CUDA."
+            "which normalization source will actually be used, and what architecture "
+            "the loader will be given. Reads no model weights and needs neither torch "
+            "nor CUDA."
         ),
     )
     parser.add_argument("model_dir", type=Path)
@@ -458,7 +525,10 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
 
     status = 0
     for label, resolve in (
-        ("norm_stats", lambda: require_norm_stats(layout)),
+        (
+            "normalization",
+            lambda: layout.normalization or require_norm_stats(layout),
+        ),
         ("tokenizer", lambda: resolve_tokenizer(args.model_dir, args.tokenizer)),
     ):
         try:

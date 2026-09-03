@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import pathlib
 import pickle
+import struct
 import sys
 import tempfile
 import unittest
@@ -104,6 +105,82 @@ class CheckpointFixture:
         target.write_text(json.dumps({"norm_stats": entries}))
         return self
 
+    def write_lerobot_processors(self, *, state_files: bool) -> "CheckpointFixture":
+        """Write a current LeRobot PI0.5 processor layout for LIBERO."""
+        self.write_weights()
+        (self.path / "config.json").write_text(
+            json.dumps(
+                {
+                    "type": "pi05",
+                    "input_features": {
+                        "observation.state": {"type": "STATE", "shape": [8]},
+                    },
+                    "output_features": {"action": {"type": "ACTION", "shape": [7]}},
+                }
+            )
+        )
+        features = (
+            {
+                "observation.state": {"type": "STATE", "shape": [8]},
+                "action": {"type": "ACTION", "shape": [7]},
+            }
+            if state_files
+            else {}
+        )
+        pre = {
+            "registry_name": "normalizer_processor",
+            "config": {
+                "features": features,
+                "norm_map": {"STATE": "QUANTILES", "ACTION": "QUANTILES"},
+            },
+        }
+        post = {
+            "registry_name": "unnormalizer_processor",
+            "config": {
+                "features": {"action": features["action"]} if state_files else {},
+                "norm_map": {"ACTION": "QUANTILES"},
+            },
+        }
+        if state_files:
+            pre["state_file"] = "pre.safetensors"
+            post["state_file"] = "post.safetensors"
+            self._write_safetensors(
+                "pre.safetensors",
+                {
+                    "observation.state.q01": [-1.0] * 8,
+                    "observation.state.q99": [1.0] * 8,
+                    "action.q01": [-1.0] * 7,
+                    "action.q99": [1.0] * 7,
+                },
+            )
+            self._write_safetensors(
+                "post.safetensors",
+                {"action.q01": [-1.0] * 7, "action.q99": [1.0] * 7},
+            )
+        (self.path / "policy_preprocessor.json").write_text(
+            json.dumps({"steps": [pre]})
+        )
+        (self.path / "policy_postprocessor.json").write_text(
+            json.dumps({"steps": [post]})
+        )
+        return self
+
+    def _write_safetensors(self, name: str, tensors: dict) -> None:
+        header = {}
+        payload = bytearray()
+        for tensor_name, values in tensors.items():
+            start = len(payload)
+            payload.extend(struct.pack(f"<{len(values)}f", *values))
+            header[tensor_name] = {
+                "dtype": "F32",
+                "shape": [len(values)],
+                "data_offsets": [start, len(payload)],
+            }
+        encoded = json.dumps(header, separators=(",", ":")).encode()
+        (self.path / name).write_bytes(
+            struct.pack("<Q", len(encoded)) + encoded + payload
+        )
+
 
 def _levels(findings, check_prefix: str) -> list:
     return [f.level for f in findings if f.check.startswith(check_prefix)]
@@ -137,7 +214,9 @@ class NormStatsWidthTest(unittest.TestCase):
 
         findings = check_checkpoint(ckpt.path, "unitree_g1")
 
-        self.assertEqual([f for f in findings if f.level == FAIL], [], format_findings(findings))
+        self.assertEqual(
+            [f for f in findings if f.level == FAIL], [], format_findings(findings)
+        )
         self.assertEqual([f for f in findings if f.level == WARN], [])
 
     def test_libero_preset_checks_its_own_asymmetric_widths(self) -> None:
@@ -167,7 +246,9 @@ class NormStatsWidthTest(unittest.TestCase):
 
         findings = check_checkpoint(ckpt.path, "unitree_g1")
 
-        self.assertEqual([f for f in findings if f.level == FAIL], [], format_findings(findings))
+        self.assertEqual(
+            [f for f in findings if f.level == FAIL], [], format_findings(findings)
+        )
 
     def test_missing_quantiles_are_fatal_for_pi05(self) -> None:
         """pi05 always unnormalizes with q01/q99 regardless of any config field."""
@@ -390,6 +471,25 @@ class CheckpointLayoutTest(unittest.TestCase):
         )
 
         self.assertEqual(_levels(findings, "norm_stats.json"), [FAIL])
+
+    def test_lerobot_base_identity_is_warned_but_not_rejected(self) -> None:
+        ckpt = CheckpointFixture(self).write_lerobot_processors(state_files=False)
+        ckpt.write_tokenizer()
+
+        findings = check_checkpoint(ckpt.path, "franka_libero")
+
+        self.assertEqual([f for f in findings if f.level == FAIL], [], format_findings(findings))
+        self.assertEqual(_levels(findings, "action normalization"), [WARN])
+
+    def test_lerobot_finetune_sidecars_are_reported_as_resolved(self) -> None:
+        ckpt = CheckpointFixture(self).write_lerobot_processors(state_files=True)
+        ckpt.write_tokenizer()
+
+        findings = check_checkpoint(ckpt.path, "franka_libero", discrete_state=True)
+
+        self.assertEqual([f for f in findings if f.level == FAIL], [], format_findings(findings))
+        self.assertEqual(_levels(findings, "action normalization"), [INFO])
+        self.assertEqual(_levels(findings, "state normalization"), [INFO])
 
 
 if __name__ == "__main__":

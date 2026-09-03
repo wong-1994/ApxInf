@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import pickle
+import struct
 import zipfile
 from collections import Counter, OrderedDict
 from pathlib import Path
@@ -29,8 +30,28 @@ from apxinf.checkpoints import (
     resolve_tokenizer,
     train_config_facts,
 )
+from apxinf.checkpoints.descriptor import IDENTITY_MISSING_STATS, MEAN_STD, QUANTILE
 
 STATS = {"actions": {"q01": [-1.0] * 16, "q99": [1.0] * 16}, "state": {"q01": [0.0] * 16, "q99": [1.0] * 16}}
+
+
+def write_safetensors(path: Path, tensors) -> Path:
+    """Write the small float32 subset LeRobot processor state uses."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = {}
+    payload = bytearray()
+    for name, values in tensors.items():
+        flat = tuple(float(value) for value in values)
+        start = len(payload)
+        payload.extend(struct.pack(f"<{len(flat)}f", *flat))
+        header[name] = {
+            "dtype": "F32",
+            "shape": [len(flat)],
+            "data_offsets": [start, len(payload)],
+        }
+    encoded = json.dumps(header, separators=(",", ":")).encode()
+    path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + payload)
+    return path
 
 
 def write_metadata_pt(path: Path, payload) -> Path:
@@ -104,6 +125,91 @@ def lerobot_dir(root: Path, *, stats=True) -> Path:
     (root / "config.json").write_text(json.dumps({"type": "pi05", "chunk_size": 50}))
     if stats:
         (root / "norm_stats.json").write_text(json.dumps(STATS))
+    return root
+
+
+def lerobot_processor_dir(root: Path, *, mode="QUANTILES", state_files=True) -> Path:
+    """A current LeRobot PI0.5 policy directory, without model-weight contents."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "model.safetensors").write_bytes(b"")
+    (root / "config.json").write_text(
+        json.dumps(
+            {
+                "type": "pi05",
+                "chunk_size": 50,
+                "input_features": {
+                    "observation.images.image": {"type": "VISUAL", "shape": [3, 256, 256]},
+                    "observation.state": {"type": "STATE", "shape": [8]},
+                },
+                "output_features": {"action": {"type": "ACTION", "shape": [7]}},
+            }
+        )
+    )
+    norm_map = {"VISUAL": "IDENTITY", "STATE": mode, "ACTION": mode}
+    features = (
+        {
+            "observation.state": {"type": "STATE", "shape": [8]},
+            "action": {"type": "ACTION", "shape": [7]},
+        }
+        if state_files
+        else {}
+    )
+    pre_step = {
+        "registry_name": "normalizer_processor",
+        "config": {"eps": 1e-8, "features": features, "norm_map": norm_map},
+    }
+    post_step = {
+        "registry_name": "unnormalizer_processor",
+        "config": {
+            "eps": 1e-8,
+            "features": ({"action": features["action"]} if state_files else {}),
+            "norm_map": norm_map,
+        },
+    }
+    if state_files:
+        pre_step["state_file"] = "policy_preprocessor_step_2_normalizer_processor.safetensors"
+        post_step["state_file"] = "policy_postprocessor_step_0_unnormalizer_processor.safetensors"
+
+    (root / "policy_preprocessor.json").write_text(
+        json.dumps(
+            {
+                "name": "policy_preprocessor",
+                "steps": [
+                    pre_step,
+                    {
+                        "registry_name": "tokenizer_processor",
+                        "config": {
+                            "tokenizer_name": "google/paligemma-3b-pt-224",
+                            "max_length": 200,
+                        },
+                    },
+                ],
+            }
+        )
+    )
+    (root / "policy_postprocessor.json").write_text(
+        json.dumps({"name": "policy_postprocessor", "steps": [post_step]})
+    )
+
+    if state_files:
+        if mode == "QUANTILES":
+            state_stats = {
+                "observation.state.q01": [-2.0] * 8,
+                "observation.state.q99": [2.0] * 8,
+                "action.q01": [-1.0] * 7,
+                "action.q99": [1.0] * 7,
+            }
+            action_stats = {"action.q01": [-1.0] * 7, "action.q99": [1.0] * 7}
+        else:
+            state_stats = {
+                "observation.state.mean": [0.25] * 8,
+                "observation.state.std": [0.5] * 8,
+                "action.mean": [0.1] * 7,
+                "action.std": [0.2] * 7,
+            }
+            action_stats = {"action.mean": [0.1] * 7, "action.std": [0.2] * 7}
+        write_safetensors(root / pre_step["state_file"], state_stats)
+        write_safetensors(root / post_step["state_file"], action_stats)
     return root
 
 
@@ -249,6 +355,67 @@ def test_lerobot_directory_is_detected_from_config_json(tmp_path):
     assert layout.config_json_text() is None
 
 
+def test_lerobot_base_processor_declares_identity_fallback(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt", state_files=False)
+
+    layout = detect_checkpoint(root)
+
+    assert layout.format == LEROBOT
+    assert layout.normalization is not None
+    assert layout.normalization.state.mode == "identity"
+    assert layout.normalization.state.status == IDENTITY_MISSING_STATS
+    assert layout.normalization.state.width == 8
+    assert layout.normalization.action.mode == "identity"
+    assert layout.normalization.action.status == IDENTITY_MISSING_STATS
+    assert layout.normalization.action.width == 7
+    assert layout.tokenizer is not None
+    assert layout.tokenizer.name == "google/paligemma-3b-pt-224"
+
+
+@pytest.mark.parametrize(
+    ("serialized_mode", "mode", "names"),
+    [
+        ("QUANTILES", QUANTILE, ("q01", "q99")),
+        ("MEAN_STD", MEAN_STD, ("mean", "std")),
+    ],
+)
+def test_lerobot_processor_state_becomes_canonical_transforms(
+    tmp_path, serialized_mode, mode, names
+):
+    root = lerobot_processor_dir(tmp_path / "ckpt", mode=serialized_mode)
+
+    layout = detect_checkpoint(root)
+
+    plan = layout.normalization
+    assert plan is not None
+    assert plan.state.mode == mode
+    assert plan.state.width == 8
+    assert set(plan.state.values) == set(names)
+    assert plan.action.mode == mode
+    assert plan.action.width == 7
+    assert set(plan.action.values) == set(names)
+    assert "policy_preprocessor_step_2" in plan.state.source
+    assert "policy_postprocessor_step_0" in plan.action.source
+
+
+def test_lerobot_declared_state_file_missing_is_corrupt(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    (root / "policy_preprocessor_step_2_normalizer_processor.safetensors").unlink()
+
+    with pytest.raises(CheckpointError, match="state_file.*does not exist"):
+        detect_checkpoint(root)
+
+
+def test_an_unrelated_hf_config_is_not_called_lerobot(tmp_path):
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    (root / "model.safetensors").write_bytes(b"")
+    (root / "config.json").write_text(json.dumps({"model_type": "qwen3_vl"}))
+
+    with pytest.raises(CheckpointError, match="not a supported LeRobot PI0.5"):
+        detect_checkpoint(root)
+
+
 def test_metadata_pt_outranks_a_stale_config_json(tmp_path):
     """A shipped directory shape: real metadata.pt, hand-added config.json."""
     root = openpi_dir(tmp_path / "ckpt", stats_at="assets/example-asset/norm_stats.json")
@@ -371,8 +538,113 @@ def test_lerobot_error_explains_where_lerobot_keeps_statistics(tmp_path):
     with pytest.raises(CheckpointError) as excinfo:
         require_norm_stats(detect_checkpoint(root))
     message = str(excinfo.value)
-    assert "normalizer_processor.safetensors" in message
+    assert "state_file" in message
     assert "meta/stats.json" in message
+
+
+def test_lerobot_state_file_cannot_escape_checkpoint(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt", state_files=False)
+    preprocessor = root / "policy_preprocessor.json"
+    document = json.loads(preprocessor.read_text())
+    document["steps"][0]["state_file"] = "../outside.safetensors"
+    preprocessor.write_text(json.dumps(document))
+
+    with pytest.raises(CheckpointError, match="unsafe state_file"):
+        detect_checkpoint(root)
+
+
+def test_lerobot_rejects_pre_post_action_stats_that_disagree(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    write_safetensors(
+        root / "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
+        {"action.q01": [-0.5] * 7, "action.q99": [0.5] * 7},
+    )
+
+    with pytest.raises(CheckpointError, match="disagree about action normalization"):
+        detect_checkpoint(root)
+
+
+def test_lerobot_rejects_non_finite_processor_statistics(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    write_safetensors(
+        root / "policy_preprocessor_step_2_normalizer_processor.safetensors",
+        {
+            "observation.state.q01": [float("nan")] * 8,
+            "observation.state.q99": [1.0] * 8,
+            "action.q01": [-1.0] * 7,
+            "action.q99": [1.0] * 7,
+        },
+    )
+
+    with pytest.raises(CheckpointError, match="non-finite"):
+        detect_checkpoint(root)
+
+
+def test_lerobot_rejects_processor_statistics_with_wrong_width(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    write_safetensors(
+        root / "policy_preprocessor_step_2_normalizer_processor.safetensors",
+        {
+            "observation.state.q01": [-1.0] * 7,
+            "observation.state.q99": [1.0] * 7,
+            "action.q01": [-1.0] * 7,
+            "action.q99": [1.0] * 7,
+        },
+    )
+
+    with pytest.raises(CheckpointError, match="width 7, expected 8"):
+        detect_checkpoint(root)
+
+
+def test_lerobot_rejects_malformed_processor_safetensors(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    (root / "policy_preprocessor_step_2_normalizer_processor.safetensors").write_bytes(
+        b"broken"
+    )
+
+    with pytest.raises(CheckpointError, match="truncated SafeTensors header"):
+        detect_checkpoint(root)
+
+
+def test_lerobot_rejects_declared_but_empty_processor_state(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    write_safetensors(
+        root / "policy_preprocessor_step_2_normalizer_processor.safetensors", {}
+    )
+
+    with pytest.raises(CheckpointError, match="no tensor observation.state.q01"):
+        detect_checkpoint(root)
+
+
+def test_lerobot_rejects_resolved_preprocessor_with_stateless_postprocessor(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    postprocessor = root / "policy_postprocessor.json"
+    document = json.loads(postprocessor.read_text())
+    del document["steps"][0]["state_file"]
+    postprocessor.write_text(json.dumps(document))
+
+    with pytest.raises(CheckpointError, match="disagree about action normalization"):
+        detect_checkpoint(root)
+
+
+def test_lerobot_rejects_processor_feature_that_disagrees_with_policy_config(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    preprocessor = root / "policy_preprocessor.json"
+    document = json.loads(preprocessor.read_text())
+    document["steps"][0]["config"]["features"]["observation.state"]["shape"] = [9]
+    preprocessor.write_text(json.dumps(document))
+    write_safetensors(
+        root / "policy_preprocessor_step_2_normalizer_processor.safetensors",
+        {
+            "observation.state.q01": [-1.0] * 9,
+            "observation.state.q99": [1.0] * 9,
+            "action.q01": [-1.0] * 7,
+            "action.q99": [1.0] * 7,
+        },
+    )
+
+    with pytest.raises(CheckpointError, match="disagrees with config.json"):
+        detect_checkpoint(root)
 
 
 # --- tokenizer --------------------------------------------------------------
@@ -442,16 +714,20 @@ def _load_with_fake_binding(monkeypatch, model_dir, **kwargs):
         def __getitem__(self, name):
             raise KeyError(name)
 
+    def fake_default_pipelines(cls, *args, **pipeline_kwargs):
+        captured["pipeline_kwargs"] = pipeline_kwargs
+        return FakePipeline(), FakePipeline()
+
     monkeypatch.setitem(sys.modules, "apxinf_py", types.SimpleNamespace(Model=FakeBindingModel))
     monkeypatch.setattr(pi05, "resolve_pi05_tactics", lambda *a, **k: None)
     monkeypatch.setattr(pi05, "PromptTokenizer", lambda *a, **k: object())
     monkeypatch.setattr(
-        pi05.Pi05Policy, "default_pipelines", classmethod(
-            lambda cls, *a, **k: (FakePipeline(), FakePipeline())
-        )
+        pi05.Pi05Policy, "default_pipelines", classmethod(fake_default_pipelines)
     )
     (Path(model_dir) / "paligemma_tokenizer.model").write_bytes(b"sp")
-    pi05.Pi05Policy.from_pretrained(model_dir, device="cuda:0", precision="bf16", **kwargs)
+    captured["policy"] = pi05.Pi05Policy.from_pretrained(
+        model_dir, device="cuda:0", precision="bf16", **kwargs
+    )
     return captured
 
 
@@ -477,6 +753,97 @@ def test_a_lerobot_directory_still_lets_the_loader_read_config_json(tmp_path, mo
     captured = _load_with_fake_binding(monkeypatch, root, action_dim=16, discrete_state=False)
 
     assert "config_json" not in captured
+
+
+def test_lerobot_base_policy_uses_explicit_identity_processors(tmp_path, monkeypatch):
+    root = lerobot_processor_dir(tmp_path / "ckpt", state_files=False)
+
+    captured = _load_with_fake_binding(
+        monkeypatch,
+        root,
+        discrete_state=True,
+        state_key="observation.state",
+    )
+
+    pipeline = captured["pipeline_kwargs"]
+    assert pipeline["state_normalizer"] is None
+    values = [[-0.75] * 7]
+    assert pipeline["unnormalizer"](values).tolist() == values
+    normalization = captured["policy"].metadata["normalization"]
+    assert normalization == {
+        "state": "identity/identity_missing_stats",
+        "action": "identity/identity_missing_stats",
+    }
+
+
+def test_lerobot_sidecars_build_existing_apxinf_processors(tmp_path, monkeypatch):
+    root = lerobot_processor_dir(tmp_path / "ckpt", mode="MEAN_STD")
+
+    captured = _load_with_fake_binding(
+        monkeypatch,
+        root,
+        discrete_state=True,
+        state_key="observation.state",
+    )
+
+    pipeline = captured["pipeline_kwargs"]
+    assert pipeline["state_normalizer"]([0.75] * 8).tolist() == pytest.approx([1.0] * 8)
+    assert pipeline["unnormalizer"]([[1.0] * 7]).tolist()[0] == pytest.approx([0.3] * 7)
+
+
+def test_lerobot_quantile_epsilon_only_guards_zero_ranges(tmp_path, monkeypatch):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    for name in ("policy_preprocessor.json", "policy_postprocessor.json"):
+        path = root / name
+        document = json.loads(path.read_text())
+        document["steps"][0]["config"]["eps"] = 0.25
+        path.write_text(json.dumps(document))
+    write_safetensors(
+        root / "policy_preprocessor_step_2_normalizer_processor.safetensors",
+        {
+            "observation.state.q01": [0.0] * 8,
+            "observation.state.q99": [1.0] * 8,
+            "action.q01": [0.0] * 7,
+            "action.q99": [1.0] * 7,
+        },
+    )
+    write_safetensors(
+        root / "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
+        {"action.q01": [0.0] * 7, "action.q99": [1.0] * 7},
+    )
+
+    captured = _load_with_fake_binding(
+        monkeypatch,
+        root,
+        discrete_state=True,
+        state_key="observation.state",
+    )
+
+    pipeline = captured["pipeline_kwargs"]
+    assert pipeline["state_normalizer"]([0.5] * 8).tolist() == pytest.approx([0.0] * 8)
+    assert pipeline["unnormalizer"]([[0.0] * 7]).tolist()[0] == pytest.approx([0.5] * 7)
+
+
+def test_lerobot_mean_std_epsilon_applies_only_when_normalizing(tmp_path, monkeypatch):
+    root = lerobot_processor_dir(tmp_path / "ckpt", mode="MEAN_STD")
+    for name in ("policy_preprocessor.json", "policy_postprocessor.json"):
+        path = root / name
+        document = json.loads(path.read_text())
+        document["steps"][0]["config"]["eps"] = 0.25
+        path.write_text(json.dumps(document))
+
+    captured = _load_with_fake_binding(
+        monkeypatch,
+        root,
+        discrete_state=True,
+        state_key="observation.state",
+    )
+
+    pipeline = captured["pipeline_kwargs"]
+    assert pipeline["state_normalizer"]([0.75] * 8).tolist() == pytest.approx(
+        [2.0 / 3.0] * 8
+    )
+    assert pipeline["unnormalizer"]([[1.0] * 7]).tolist()[0] == pytest.approx([0.3] * 7)
 
 
 def test_the_asset_path_statistics_are_the_ones_loaded(tmp_path, monkeypatch):
@@ -506,6 +873,30 @@ def test_a_flat_directory_loads_with_no_layout_at_all(tmp_path, monkeypatch):
     root = tmp_path / "flat"
     root.mkdir()
     (root / "model.safetensors").write_bytes(b"")
+    (root / "norm_stats.json").write_text(json.dumps(STATS))
+
+    captured = _load_with_fake_binding(monkeypatch, root, discrete_state=False)
+
+    assert "config_json" not in captured
+
+
+def test_a_legacy_native_pi05_config_does_not_get_misclassified_as_lerobot(
+    tmp_path, monkeypatch
+):
+    """ApxInf's pre-layout config.json is architecture input, not an HF marker."""
+    root = tmp_path / "flat"
+    root.mkdir()
+    (root / "model.safetensors").write_bytes(b"")
+    (root / "config.json").write_text(
+        json.dumps(
+            {
+                "action_dim": 32,
+                "action_horizon": 10,
+                "paligemma_variant": "gemma_2b",
+                "action_expert_variant": "gemma_300m",
+            }
+        )
+    )
     (root / "norm_stats.json").write_text(json.dumps(STATS))
 
     captured = _load_with_fake_binding(monkeypatch, root, discrete_state=False)

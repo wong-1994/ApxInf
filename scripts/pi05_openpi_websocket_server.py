@@ -142,8 +142,10 @@ def parse_args() -> argparse.Namespace:
         "--norm-stats",
         type=pathlib.Path,
         default=None,
-        help="explicit norm_stats.json, outranking every path convention. Required "
-        "for a LeRobot checkpoint, which ships no such file of its own.",
+        help="explicit OpenPI-style norm_stats.json, outranking every path convention. "
+        "LeRobot processor state is discovered from policy_preprocessor.json and "
+        "policy_postprocessor.json instead; a base checkpoint with no declared "
+        "processor state uses LeRobot-compatible identity transforms.",
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(

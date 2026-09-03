@@ -157,7 +157,11 @@ mod tests {
         // string for a state that is, by NumPy's reckoning, in bin 64.
         let v = f32::from_bits((-0.4921875f32).to_bits() + 1);
         assert!(v < -0.4921875, "one ulp below the edge");
-        assert_eq!(((v + 1.0) * 128.0).floor() as i32, 65, "the trap this guards");
+        assert_eq!(
+            ((v + 1.0) * 128.0).floor() as i32,
+            65,
+            "the trap this guards"
+        );
         assert_eq!(discretize_state(&[v]), vec![64]);
     }
 

@@ -44,6 +44,7 @@ from ..checkpoints import (
     has_layout_metadata,
     require_norm_stats,
 )
+from ..checkpoints.descriptor import IDENTITY_MISSING_STATS
 
 __all__ = ["Finding", "FAIL", "WARN", "INFO", "check_checkpoint", "format_findings"]
 
@@ -124,6 +125,59 @@ def _check_norm_stats(
     is what :meth:`Pi05Policy.from_pretrained` does in the same situation.
     """
     findings: List[Finding] = []
+    if layout is not None and layout.normalization is not None:
+        plan = layout.normalization
+        for label, spec, expected in (
+            ("action normalization", plan.action, preset.action_width),
+            (
+                "state normalization",
+                plan.state,
+                preset.state_dim if discrete_state else None,
+            ),
+        ):
+            if expected is None:
+                continue
+            if spec is None:
+                findings.append(
+                    Finding(
+                        FAIL,
+                        label,
+                        "not declared by the LeRobot processor pipeline",
+                        f"{preset.name} needs a {expected}-wide transform",
+                    )
+                )
+                continue
+            if spec.width != expected:
+                findings.append(
+                    Finding(
+                        FAIL,
+                        f"{label} width",
+                        f"{spec.width}, but preset {preset.name!r} is {expected}-dimensional",
+                        "use a checkpoint and robot preset with the same feature contract",
+                    )
+                )
+                continue
+            if spec.status == IDENTITY_MISSING_STATS:
+                findings.append(
+                    Finding(
+                        WARN,
+                        label,
+                        f"identity passthrough at width {spec.width}; processor state is absent",
+                        "this matches LeRobot's load behavior but does not establish "
+                        "embodiment-level parity; supply a fine-tuned checkpoint with "
+                        "processor state for deployment claims",
+                    )
+                )
+            else:
+                findings.append(
+                    Finding(
+                        INFO,
+                        label,
+                        f"{spec.mode}, width {spec.width}, from {spec.source}",
+                    )
+                )
+        return findings
+
     if layout is not None:
         try:
             path = require_norm_stats(layout)
