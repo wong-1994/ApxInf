@@ -24,7 +24,14 @@ IDENTITY_MISSING_STATS = "identity_missing_stats"
 
 @dataclass(frozen=True)
 class TransformSpec:
-    """One feature transform, independent of its source layout."""
+    """One feature transform, independent of its source layout.
+
+    ``eps`` has canonical ApxInf semantics: quantile transforms add it to every
+    ``q99 - q01`` span, while mean/std transforms add it only to the input-side
+    normalization denominator.  A family with a different rule must encode the
+    equivalent values before constructing this descriptor; transform
+    materializers never branch on :attr:`source`.
+    """
 
     feature_key: str
     mode: str

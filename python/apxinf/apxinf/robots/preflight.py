@@ -125,7 +125,11 @@ def _check_norm_stats(
     is what :meth:`Pi05Policy.from_pretrained` does in the same situation.
     """
     findings: List[Finding] = []
-    if layout is not None and layout.normalization is not None:
+    if (
+        layout is not None
+        and layout.normalization is not None
+        and layout.norm_stats is None
+    ):
         plan = layout.normalization
         for label, spec, expected in (
             ("action normalization", plan.action, preset.action_width),
@@ -398,6 +402,8 @@ def check_checkpoint(
                 checkpoint_format=checkpoint_format,
                 asset_id=asset_id,
                 norm_stats=norm_stats,
+                norm_key=norm_key,
+                state_norm_key="state" if discrete else None,
             )
         except CheckpointError as exc:
             layout_findings.append(

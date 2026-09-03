@@ -251,12 +251,23 @@ def _transform_from_step(
             )
         flat = np.asarray(tensor).reshape(-1)
         values[name] = tuple(float(value) for value in flat)
+    # Canonical TransformSpec quantiles use ApxInf/OpenPI's "add eps to every
+    # span" rule.  LeRobot instead substitutes eps only for a zero span.  Apply
+    # that family-specific rule here so consumers never need to know which
+    # exporter produced the plan.
+    canonical_eps = eps
+    if mode == QUANTILE:
+        q01, q99 = values["q01"], values["q99"]
+        values["q99"] = tuple(
+            low + eps if high == low else high for low, high in zip(q01, q99)
+        )
+        canonical_eps = 0.0
     try:
         return TransformSpec(
             feature_key=key,
             mode=mode,
             width=width,
-            eps=eps,
+            eps=canonical_eps,
             values=values,
             source=source,
             status=RESOLVED,

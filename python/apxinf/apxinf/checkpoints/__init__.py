@@ -7,7 +7,9 @@ so a directory convention is written down once rather than guessed three times.
     from apxinf.checkpoints import detect_checkpoint, require_norm_stats
 
     layout = detect_checkpoint(model_dir)
-    normalization = layout.normalization or require_norm_stats(layout)
+    normalization = layout.normalization
+    if normalization is None:
+        require_norm_stats(layout)
     config_json = layout.config_json_text() # -> apxinf_py.Model.load(config_json=...)
 
 Run ``python -m apxinf.checkpoints <dir>`` to see the same answer as a report.
@@ -15,6 +17,8 @@ Nothing here loads weights, imports torch, or touches the network.
 """
 
 from __future__ import annotations
+
+from .descriptor import NormalizationPlan, TokenizerSpec, TransformSpec
 
 from .layout import (
     FORMATS,
@@ -43,8 +47,11 @@ __all__ = [
     "LEROBOT",
     "MetadataError",
     "NORM_STATS_NAME",
+    "NormalizationPlan",
     "OPENPI_PYTORCH",
     "TOKENIZER_NAMES",
+    "TokenizerSpec",
+    "TransformSpec",
     "detect_checkpoint",
     "has_layout_metadata",
     "read_metadata_pt",

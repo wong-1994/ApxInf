@@ -114,8 +114,13 @@ def _normalizer_from_transform(spec: TransformSpec, *, dtype=None) -> Optional[N
     if spec.mode == IDENTITY:
         return None
     if spec.mode == QUANTILE:
-        q01, q99 = _lerobot_quantile_bounds(spec)
-        return Normalizer(q01=q01, q99=q99, mode=QUANTILE, eps=0.0, dtype=dtype)
+        return Normalizer(
+            q01=spec.values["q01"],
+            q99=spec.values["q99"],
+            mode=QUANTILE,
+            eps=spec.eps,
+            dtype=dtype,
+        )
     if spec.mode == MEAN_STD:
         std = np.asarray(spec.values["std"], dtype=np.float64) + spec.eps
         return Normalizer(
@@ -147,31 +152,17 @@ def _unnormalizer_from_transform(
         )
     common = {"mode": spec.mode, "dims": width, "eps": spec.eps, "dtype": dtype}
     if spec.mode == QUANTILE:
-        q01, q99 = _lerobot_quantile_bounds(spec)
         return Unnormalizer(
-            q01=q01,
-            q99=q99,
+            q01=spec.values["q01"],
+            q99=spec.values["q99"],
             mode=QUANTILE,
             dims=width,
-            eps=0.0,
+            eps=spec.eps,
             dtype=dtype,
         )
     if spec.mode == MEAN_STD:
         return Unnormalizer(mean=spec.values["mean"], std=spec.values["std"], **common)
     raise ValueError(f"unsupported action transform mode {spec.mode!r}")
-
-
-def _lerobot_quantile_bounds(spec: TransformSpec) -> Tuple[np.ndarray, np.ndarray]:
-    """Encode LeRobot's zero-only epsilon guard for existing processors.
-
-    ApxInf's OpenPI quantile processor adds ``eps`` to every range. LeRobot only
-    substitutes ``eps`` where ``q01 == q99``. Pre-adjusting those entries and
-    constructing the processor with ``eps=0`` preserves LeRobot's exact rule
-    without changing the established OpenPI processor behavior.
-    """
-    q01 = np.asarray(spec.values["q01"], dtype=np.float64)
-    q99 = np.asarray(spec.values["q99"], dtype=np.float64)
-    return q01, np.where(q99 == q01, q01 + spec.eps, q99)
 
 
 def _normalization_metadata(plan) -> Mapping[str, str]:
@@ -393,7 +384,10 @@ class Pi05Policy:
         shape/plumbing run on a stand-in checkpoint whose statistics belong to a
         different robot (pass a full-width identity), where reading the file would
         silently apply the wrong scale. It is mutually exclusive with
-        ``action_dim``, since an injected map already fixes the width.
+        ``action_dim``, since an injected map already fixes the width. For a
+        detected checkpoint layout, sidecar metadata is still parsed into its
+        descriptor; the no-statistics escape hatch applies to legacy flat
+        directories that have no layout metadata.
         ``action_horizon`` overrides
         the checkpoint's chunk length: ``None`` runs the native ``config.json``
         value, an explicit value outranks it (the horizon is a sequence length,
@@ -480,6 +474,8 @@ class Pi05Policy:
                 checkpoint_format=checkpoint_format,
                 asset_id=asset_id,
                 norm_stats=norm_stats,
+                norm_key=norm_key,
+                state_norm_key=state_norm_key if discrete_state else None,
             )
             for note in layout.notes:
                 _LOGGER.info("checkpoint %s: %s", model_dir, note)
@@ -556,13 +552,16 @@ class Pi05Policy:
             max_token_len=model.max_token_len if hasattr(model, "max_token_len") else 200,
             discrete_state=discrete_state,
         )
-        # Resolved once, and only when a file is actually read: an injected
-        # unnormalizer with state dropped is a deliberate no-statistics path, and
-        # demanding the file there would break a stand-in checkpoint run. An
-        # explicit path still works with no layout at all, which is the flat
-        # directory whose statistics were handed over separately.
+        # Detected layouts already carry canonical normalization facts. The
+        # fallback below exists only for hand-assembled flat directories that
+        # predate checkpoint descriptors; an explicit path also works there.
         plan = layout.normalization if layout is not None else None
         if plan is not None:
+            if discrete_state and plan.state is None:
+                raise CheckpointError(
+                    f"{plan.action.source} has no entry {state_norm_key!r}; "
+                    "discrete_state=True requires state normalization"
+                )
             unnormalizer = (
                 unnormalizer
                 if unnormalizer is not None

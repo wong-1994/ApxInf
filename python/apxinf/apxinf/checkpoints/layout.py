@@ -46,6 +46,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 from .descriptor import IDENTITY_MISSING_STATS, NormalizationPlan, TokenizerSpec
 from .lerobot import LeRobotProcessorError, has_processor_layout, load_processor_plan
 from .metadata import MetadataError, read_metadata_pt, train_config_facts
+from .openpi import OpenPINormalizationError, load_normalization_plan
 
 __all__ = [
     "CheckpointError",
@@ -106,8 +107,9 @@ class CheckpointLayout:
     #: openpi's ``data.assets.asset_id or data.repo_id``; ``None`` for LeRobot.
     asset_id: Optional[str] = None
     asset_id_source: str = ""
-    #: The statistics file, or ``None`` when nothing matched — see
-    #: :func:`require_norm_stats` for the error a caller should raise.
+    #: The selected OpenPI-style statistics file. ``None`` when a serialized
+    #: processor is authoritative or when nothing matched — see
+    #: :func:`require_norm_stats` for the latter case.
     norm_stats: Optional[Path] = None
     #: Every candidate considered, in order, whether or not it existed.
     norm_stats_tried: Tuple[Path, ...] = ()
@@ -268,13 +270,17 @@ def detect_checkpoint(
     checkpoint_format: Optional[str] = None,
     asset_id: Optional[str] = None,
     norm_stats=None,
+    norm_key: str = "actions",
+    state_norm_key: Optional[str] = "state",
 ) -> CheckpointLayout:
     """Identify ``model_dir``'s layout and resolve every file it implies.
 
     ``checkpoint_format`` pins the answer instead of sniffing it (``"auto"`` and
     ``None`` both sniff). ``asset_id`` overrides what ``metadata.pt`` says, for a
     checkpoint whose assets were reorganized after export. ``norm_stats`` is an
-    explicit path that outranks every convention.
+    explicit path that outranks every convention. ``norm_key`` and
+    ``state_norm_key`` select the OpenPI feature entries translated into the
+    canonical :class:`NormalizationPlan`; ``None`` omits the state transform.
 
     Raises :class:`CheckpointError` when the directory matches neither layout, or
     when a pinned format's authoritative file is absent. A **missing
@@ -378,10 +384,26 @@ def detect_checkpoint(
         "explicit override" if asset_id else facts.get("asset_id_source", "") or ""
     )
 
-    stats, tried, is_fallback, stats_notes = _resolve_norm_stats(
-        root, effective_asset_id, norm_stats
-    )
+    if normalization is None:
+        stats, tried, is_fallback, stats_notes = _resolve_norm_stats(
+            root, effective_asset_id, norm_stats
+        )
+    else:
+        # The LeRobot processor sidecars already selected and serialized their
+        # own state. A stray root norm_stats.json is not an alternative source.
+        stats, tried, is_fallback, stats_notes = None, (), False, ()
     notes.extend(stats_notes)
+
+    # A serialized LeRobot processor is authoritative for that family.  Every
+    # other PI0.5 norm_stats.json uses OpenPI's quantile semantics and becomes
+    # the same canonical plan before any policy sees it.
+    if normalization is None and stats is not None:
+        try:
+            normalization = load_normalization_plan(
+                stats, action_key=norm_key, state_key=state_norm_key
+            )
+        except OpenPINormalizationError as exc:
+            raise CheckpointError(str(exc)) from exc
 
     if is_fallback:
         LOGGER.warning(

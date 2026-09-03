@@ -24,6 +24,7 @@ from apxinf.checkpoints import (
     OPENPI_PYTORCH,
     CheckpointError,
     MetadataError,
+    NormalizationPlan,
     detect_checkpoint,
     read_metadata_pt,
     require_norm_stats,
@@ -343,6 +344,68 @@ def test_openpi_export_is_detected_from_metadata_pt(tmp_path):
     assert layout.norm_stats == root / "assets/example-asset/norm_stats.json"
     assert layout.norm_stats_is_fallback is False
     assert json.loads(layout.config_json_text())["num_views"] == 3
+    assert isinstance(layout.normalization, NormalizationPlan)
+    assert layout.normalization.state.feature_key == "state"
+    assert layout.normalization.action.feature_key == "actions"
+    assert layout.normalization.action.mode == QUANTILE
+    assert layout.normalization.action.eps == 1e-6
+    assert layout.normalization.action.source == str(layout.norm_stats)
+
+
+def test_openpi_nested_norm_stats_become_the_same_canonical_plan(tmp_path):
+    root = openpi_dir(tmp_path / "ckpt")
+    path = root / "assets" / "example-asset" / "norm_stats.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"norm_stats": STATS}))
+
+    plan = detect_checkpoint(root).normalization
+
+    assert plan.action.values["q01"] == tuple(STATS["actions"]["q01"])
+    assert plan.state.values["q99"] == tuple(STATS["state"]["q99"])
+
+
+def test_openpi_flat_stats_ignore_unrelated_serialized_metadata(tmp_path):
+    root = openpi_dir(tmp_path / "ckpt")
+    path = root / "assets" / "example-asset" / "norm_stats.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({**STATS, "generated_at_step": 14002}))
+
+    plan = detect_checkpoint(root).normalization
+
+    assert plan.action.width == 16
+
+
+def test_openpi_normalization_keys_are_part_of_the_public_resolver(tmp_path):
+    root = openpi_dir(tmp_path / "ckpt")
+    path = root / "assets" / "example-asset" / "norm_stats.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "libero_all": {"q01": [-1.0] * 7, "q99": [1.0] * 7},
+                "proprio": {"q01": [0.0] * 8, "q99": [1.0] * 8},
+            }
+        )
+    )
+
+    plan = detect_checkpoint(
+        root, norm_key="libero_all", state_norm_key="proprio"
+    ).normalization
+
+    assert plan.action.feature_key == "libero_all"
+    assert plan.action.width == 7
+    assert plan.state.feature_key == "proprio"
+    assert plan.state.width == 8
+
+
+def test_openpi_plan_rejects_non_quantile_action_statistics(tmp_path):
+    root = openpi_dir(tmp_path / "ckpt")
+    path = root / "assets" / "example-asset" / "norm_stats.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"actions": {"mean": [0.0], "std": [1.0]}}))
+
+    with pytest.raises(CheckpointError, match=r"actions\.q01 must be a numeric vector"):
+        detect_checkpoint(root)
 
 
 def test_lerobot_directory_is_detected_from_config_json(tmp_path):
@@ -396,6 +459,45 @@ def test_lerobot_processor_state_becomes_canonical_transforms(
     assert set(plan.action.values) == set(names)
     assert "policy_preprocessor_step_2" in plan.state.source
     assert "policy_postprocessor_step_0" in plan.action.source
+
+
+def test_lerobot_quantile_epsilon_is_canonicalized_in_the_adapter(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    for name in ("policy_preprocessor.json", "policy_postprocessor.json"):
+        path = root / name
+        document = json.loads(path.read_text())
+        document["steps"][0]["config"]["eps"] = 0.25
+        path.write_text(json.dumps(document))
+    write_safetensors(
+        root / "policy_preprocessor_step_2_normalizer_processor.safetensors",
+        {
+            "observation.state.q01": [0.0] * 8,
+            "observation.state.q99": [0.0] + [1.0] * 7,
+            "action.q01": [0.0] * 7,
+            "action.q99": [0.0] + [1.0] * 6,
+        },
+    )
+    write_safetensors(
+        root / "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
+        {"action.q01": [0.0] * 7, "action.q99": [0.0] + [1.0] * 6},
+    )
+
+    plan = detect_checkpoint(root).normalization
+
+    assert plan.action.eps == 0.0
+    assert plan.action.values["q99"] == (0.25,) + (1.0,) * 6
+
+
+def test_lerobot_processor_sidecars_ignore_a_stray_root_norm_stats(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    (root / "norm_stats.json").write_text(
+        json.dumps({"actions": {"q01": [-10.0] * 7, "q99": [10.0] * 7}})
+    )
+
+    layout = detect_checkpoint(root)
+
+    assert layout.norm_stats is None
+    assert "policy_postprocessor_step_0" in layout.normalization.action.source
 
 
 def test_lerobot_declared_state_file_missing_is_corrupt(tmp_path):
@@ -850,22 +952,24 @@ def test_the_asset_path_statistics_are_the_ones_loaded(tmp_path, monkeypatch):
     """A wrong root file next to correct asset statistics — the delivered shape."""
     root = openpi_dir(tmp_path / "ckpt", stats_at="assets/example-asset/norm_stats.json")
     (root / "norm_stats.json").write_text(
-        json.dumps({"actions": {"q01": [-1.0] * 7, "q99": [1.0] * 7}})
+        json.dumps({"actions": {"q01": [-10.0] * 7, "q99": [10.0] * 7}})
     )
 
     from apxinf.policies.impls import pi05
 
-    seen = {}
-    original = pi05.Unnormalizer.from_norm_stats
+    monkeypatch.setattr(
+        pi05.Unnormalizer,
+        "from_norm_stats",
+        lambda *args, **kwargs: pytest.fail("policy bypassed checkpoint descriptor"),
+    )
+    captured = _load_with_fake_binding(
+        monkeypatch, root, action_dim=7, discrete_state=False
+    )
 
-    def spy(*args, **kwargs):
-        seen.update(kwargs)
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(pi05.Unnormalizer, "from_norm_stats", spy)
-    _load_with_fake_binding(monkeypatch, root, discrete_state=False)
-
-    assert seen["path"] == root / "assets" / "example-asset" / "norm_stats.json"
+    # The selected asset stats map normalized 1 to ~1; the ignored root file
+    # would map it to ~10.
+    result = captured["pipeline_kwargs"]["unnormalizer"]([[1.0] * 7])
+    assert result.tolist()[0] == pytest.approx([1.000001] * 7)
 
 
 def test_a_flat_directory_loads_with_no_layout_at_all(tmp_path, monkeypatch):
@@ -912,18 +1016,16 @@ def test_explicit_norm_stats_needs_no_layout(tmp_path, monkeypatch):
     elsewhere = tmp_path / "stats.json"
     elsewhere.write_text(json.dumps(STATS))
 
-    from apxinf.policies.impls import pi05
-
-    seen = {}
-    original = pi05.Unnormalizer.from_norm_stats
-    monkeypatch.setattr(
-        pi05.Unnormalizer,
-        "from_norm_stats",
-        lambda *a, **k: (seen.update(k), original(*a, **k))[1],
+    captured = _load_with_fake_binding(
+        monkeypatch,
+        root,
+        action_dim=7,
+        discrete_state=False,
+        norm_stats=elsewhere,
     )
-    _load_with_fake_binding(monkeypatch, root, discrete_state=False, norm_stats=elsewhere)
 
-    assert seen["path"] == elsewhere
+    result = captured["pipeline_kwargs"]["unnormalizer"]([[1.0] * 7])
+    assert result.tolist()[0] == pytest.approx([1.000001] * 7)
 
 
 def test_a_missing_explicit_norm_stats_path_is_refused(tmp_path, monkeypatch):
