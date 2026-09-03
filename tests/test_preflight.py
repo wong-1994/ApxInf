@@ -262,22 +262,22 @@ class NormStatsWidthTest(unittest.TestCase):
 
         self.assertEqual(_levels(findings, "norm_stats['actions'] quantiles"), [FAIL])
 
-    def test_missing_state_entry_is_fatal_only_when_state_is_used(self) -> None:
+    def test_missing_state_entry_warns_only_when_state_is_used(self) -> None:
         ckpt = CheckpointFixture(self, actions=_stats(G1_DIM)).write_tokenizer()
 
         used = check_checkpoint(ckpt.path, "unitree_g1")
-        self.assertEqual(_levels(used, "norm_stats['state']"), [FAIL])
+        self.assertEqual(_levels(used, "norm_stats['state']"), [WARN])
 
         dropped = check_checkpoint(ckpt.path, "unitree_g1", discrete_state=False)
         self.assertEqual(_levels(dropped, "norm_stats['state']"), [])
 
-    def test_missing_file_is_fatal(self) -> None:
+    def test_missing_file_warns_about_identity_passthrough(self) -> None:
         ckpt = CheckpointFixture(self)
         ckpt.write_tokenizer()
 
         findings = check_checkpoint(ckpt.path, "unitree_g1")
 
-        self.assertEqual(_levels(findings, "norm_stats.json"), [FAIL])
+        self.assertEqual(_levels(findings, "norm_stats.json"), [WARN])
 
 
 class TokenizerTest(unittest.TestCase):
@@ -417,9 +417,9 @@ class CheckpointLayoutTest(unittest.TestCase):
 
         findings = check_checkpoint(ckpt.path, "unitree_g1")
 
-        fatal = [f for f in findings if f.check == "norm_stats.json"]
-        self.assertEqual([f.level for f in fatal], [FAIL])
-        self.assertIn("assets/example-asset/norm_stats.json", fatal[0].detail)
+        warned = [f for f in findings if f.check == "norm_stats.json"]
+        self.assertEqual([f.level for f in warned], [WARN])
+        self.assertIn("identity passthrough", warned[0].detail)
 
     def test_the_layout_and_asset_id_are_reported(self) -> None:
         ckpt = CheckpointFixture(self, actions=_stats(G1_DIM), state=_stats(G1_DIM))

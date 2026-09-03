@@ -57,9 +57,10 @@ from ...calibration import CalibrationContext, CalibrationPlan
 from ..._tactics import resolve_pi05_tactics
 from ...checkpoints import (
     CheckpointError,
+    OpenPINormalizationError,
     detect_checkpoint,
     has_layout_metadata,
-    require_norm_stats,
+    load_normalization_plan,
     resolve_tokenizer,
 )
 from ...checkpoints.descriptor import (
@@ -67,6 +68,7 @@ from ...checkpoints.descriptor import (
     IDENTITY_MISSING_STATS,
     MEAN_STD,
     QUANTILE,
+    NormalizationPlan,
     TransformSpec,
 )
 from ..base import VIEW_SLOTS, BareModel
@@ -556,12 +558,42 @@ class Pi05Policy:
         # fallback below exists only for hand-assembled flat directories that
         # predate checkpoint descriptors; an explicit path also works there.
         plan = layout.normalization if layout is not None else None
+        if plan is None:
+            stats_path = (
+                Path(norm_stats)
+                if norm_stats is not None
+                else model_dir / "norm_stats.json"
+            )
+            if stats_path.is_file():
+                try:
+                    plan = load_normalization_plan(
+                        stats_path,
+                        action_key=norm_key,
+                        state_key=state_norm_key if discrete_state else None,
+                    )
+                except OpenPINormalizationError as exc:
+                    raise CheckpointError(str(exc)) from exc
+            elif norm_stats is not None:
+                raise CheckpointError(f"norm_stats path {stats_path} does not exist")
+        if plan is None:
+            # Missing statistics are load-compatible. This mirrors LeRobot's
+            # stateless base checkpoints: preserve normalized model actions and
+            # raw state rather than guessing another embodiment's statistics.
+            width = (
+                unnormalizer.width
+                if unnormalizer is not None
+                else int(action_dim) if action_dim is not None else int(model.action_dim)
+            )
+            plan = NormalizationPlan(
+                state=None,
+                action=TransformSpec.identity(
+                    norm_key,
+                    width,
+                    source=str(layout.root if layout is not None else model_dir),
+                    status=IDENTITY_MISSING_STATS,
+                ),
+            )
         if plan is not None:
-            if discrete_state and plan.state is None:
-                raise CheckpointError(
-                    f"{plan.action.source} has no entry {state_norm_key!r}; "
-                    "discrete_state=True requires state normalization"
-                )
             unnormalizer = (
                 unnormalizer
                 if unnormalizer is not None
@@ -577,40 +609,14 @@ class Pi05Policy:
             if any(
                 spec is not None and spec.status == IDENTITY_MISSING_STATS
                 for spec in (plan.state, plan.action)
-            ):
+            ) or (discrete_state and plan.state is None):
                 _LOGGER.warning(
-                    "checkpoint %s lacks LeRobot processor statistics for one or "
-                    "more transforms; using identity for those transforms to match "
-                    "upstream. This is load-compatible, not evidence of "
+                    "checkpoint %s lacks statistics for one or more transforms; "
+                    "using identity passthrough for those transforms. This is "
+                    "load-compatible, not evidence of "
                     "embodiment-level parity.",
                     model_dir,
                 )
-        else:
-            needs_stats = unnormalizer is None or discrete_state
-            if not needs_stats:
-                stats_path = None
-            elif layout is not None:
-                stats_path = require_norm_stats(layout)
-            elif norm_stats is not None:
-                stats_path = Path(norm_stats)
-                if not stats_path.is_file():
-                    raise CheckpointError(f"norm_stats path {stats_path} does not exist")
-            else:
-                stats_path = None
-            unnormalizer = (
-                unnormalizer
-                if unnormalizer is not None
-                else Unnormalizer.from_norm_stats(
-                    model_dir, key=norm_key, dims=action_dim, dtype=norm_dtype, path=stats_path
-                )
-            )
-            state_normalizer = (
-                Normalizer.from_norm_stats(
-                    model_dir, key=state_norm_key, dtype=norm_dtype, path=stats_path
-                )
-                if discrete_state
-                else None
-            )
         reset_sampling = getattr(model, "reset_sampling", None)
         if callable(reset_sampling):
             reset_sampling(int(seed))

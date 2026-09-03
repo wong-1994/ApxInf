@@ -22,12 +22,12 @@ are the robot's width, the model emits its padded width), while
 from __future__ import annotations
 
 import copy
-import json
 from pathlib import Path
 from typing import Optional, Sequence
 
 import numpy as np
 
+from ..checkpoints.norm_stats import read_norm_stats
 from .base import ProcessorStep
 
 __all__ = ["Normalizer", "Unnormalizer", "load_norm_stats"]
@@ -52,8 +52,7 @@ def load_norm_stats(model_dir=None, key: str = "actions", *, path=None) -> dict:
             raise TypeError("load_norm_stats needs either model_dir or path")
         path = Path(model_dir) / "norm_stats.json"
     path = Path(path)
-    document = json.loads(path.read_text())
-    stats = document.get("norm_stats", document)
+    stats = read_norm_stats(path)
     if key not in stats:
         raise KeyError(f"{path} has no entry {key!r}; keys: {sorted(stats)}")
     return stats[key]

@@ -30,7 +30,6 @@ places to keep in step.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
@@ -42,7 +41,7 @@ from ..checkpoints import (
     TOKENIZER_NAMES,
     detect_checkpoint,
     has_layout_metadata,
-    require_norm_stats,
+    read_norm_stats,
 )
 from ..checkpoints.descriptor import IDENTITY_MISSING_STATS
 
@@ -125,11 +124,21 @@ def _check_norm_stats(
     is what :meth:`Pi05Policy.from_pretrained` does in the same situation.
     """
     findings: List[Finding] = []
-    if (
-        layout is not None
-        and layout.normalization is not None
-        and layout.norm_stats is None
-    ):
+    if layout is not None and layout.normalization is not None:
+        if layout.norm_stats is not None:
+            if layout.norm_stats_is_fallback:
+                findings.append(
+                    Finding(
+                        WARN,
+                        "norm_stats.json",
+                        f"using the checkpoint root {layout.norm_stats} because "
+                        f"{layout.norm_stats_tried[0]} (openpi's path for "
+                        f"asset_id={layout.asset_id!r}) does not exist",
+                        "verify these statistics belong to this robot",
+                    )
+                )
+            else:
+                findings.append(Finding(INFO, "norm_stats.json", str(layout.norm_stats)))
         plan = layout.normalization
         for label, spec, expected in (
             ("action normalization", plan.action, preset.action_width),
@@ -144,10 +153,11 @@ def _check_norm_stats(
             if spec is None:
                 findings.append(
                     Finding(
-                        FAIL,
+                        WARN,
                         label,
-                        "not declared by the LeRobot processor pipeline",
-                        f"{preset.name} needs a {expected}-wide transform",
+                        "identity passthrough; no statistics were declared",
+                        "this is load-compatible but does not establish embodiment-level "
+                        "parity; supply matching statistics for deployment claims",
                     )
                 )
                 continue
@@ -183,18 +193,17 @@ def _check_norm_stats(
         return findings
 
     if layout is not None:
-        try:
-            path = require_norm_stats(layout)
-        except CheckpointError as exc:
+        if layout.norm_stats is None:
             return [
                 Finding(
-                    FAIL,
+                    WARN,
                     "norm_stats.json",
-                    str(exc),
-                    "unnormalization has no statistics to use; ship the file with the "
-                    "checkpoint or point --norm-stats at it",
+                    "missing; state and actions will use identity passthrough",
+                    "this matches stateless checkpoint loading but does not establish "
+                    "embodiment-level parity; supply matching statistics for deployment claims",
                 )
             ]
+        path = layout.norm_stats
         if layout.norm_stats_is_fallback:
             findings.append(
                 Finding(
@@ -226,18 +235,16 @@ def _check_norm_stats(
         if not path.exists():
             return [
                 Finding(
-                    FAIL,
+                    WARN,
                     "norm_stats.json",
-                    f"missing from {model_dir}",
-                    "unnormalization has no statistics to use; ship the file with the checkpoint",
+                    f"missing from {model_dir}; state and actions will use identity passthrough",
+                    "this is load-compatible but does not establish embodiment-level parity",
                 )
             ]
     try:
-        document = json.loads(path.read_text())
-    except (OSError, ValueError) as exc:
+        stats = read_norm_stats(path)
+    except ValueError as exc:
         return [Finding(FAIL, "norm_stats.json", f"unreadable: {exc}", "fix or re-export the file")]
-
-    stats = document.get("norm_stats", document)
 
     # Width per key against what the preset says the robot is. This is the check
     # that catches a G1 checkpoint carrying LIBERO statistics: 16-dim robot,
@@ -252,13 +259,19 @@ def _check_norm_stats(
             continue
         entry = stats.get(key)
         if not isinstance(entry, dict):
+            is_action = key == norm_key
             findings.append(
                 Finding(
-                    FAIL,
+                    FAIL if is_action else WARN,
                     f"norm_stats[{key!r}]",
-                    f"absent; file has {sorted(stats)}",
-                    f"{preset.name} needs {key!r} statistics"
-                    + ("" if key == norm_key else " because state is discretized into the prompt"),
+                    f"absent; file has {sorted(stats)}"
+                    + ("" if is_action else "; state will use identity passthrough"),
+                    (
+                        f"{preset.name} needs {key!r} action statistics"
+                        if is_action
+                        else "this is load-compatible but does not establish "
+                        "embodiment-level parity"
+                    ),
                 )
             )
             continue

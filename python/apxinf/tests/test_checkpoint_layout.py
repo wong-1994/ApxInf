@@ -500,6 +500,30 @@ def test_lerobot_processor_sidecars_ignore_a_stray_root_norm_stats(tmp_path):
     assert "policy_postprocessor_step_0" in layout.normalization.action.source
 
 
+def test_explicit_stats_override_keeps_lerobot_tokenizer_metadata(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    override = tmp_path / "override.json"
+    override.write_text(
+        json.dumps(
+            {
+                "action": {"q01": [-3.0] * 7, "q99": [3.0] * 7},
+                "observation.state": {"q01": [-2.0] * 8, "q99": [2.0] * 8},
+            }
+        )
+    )
+
+    layout = detect_checkpoint(
+        root,
+        norm_stats=override,
+        norm_key="action",
+        state_norm_key="observation.state",
+    )
+
+    assert layout.tokenizer.name == "google/paligemma-3b-pt-224"
+    assert layout.normalization.action.source == str(override)
+    assert layout.normalization.action.values["q99"] == (3.0,) * 7
+
+
 def test_lerobot_declared_state_file_missing_is_corrupt(tmp_path):
     root = lerobot_processor_dir(tmp_path / "ckpt")
     (root / "policy_preprocessor_step_2_normalizer_processor.safetensors").unlink()
@@ -876,6 +900,53 @@ def test_lerobot_base_policy_uses_explicit_identity_processors(tmp_path, monkeyp
         "state": "identity/identity_missing_stats",
         "action": "identity/identity_missing_stats",
     }
+
+
+def test_openpi_missing_stats_loads_with_identity_passthrough(
+    tmp_path, monkeypatch, caplog
+):
+    root = openpi_dir(tmp_path / "ckpt")
+
+    with caplog.at_level(logging.WARNING, logger="apxinf.policies.pi05"):
+        captured = _load_with_fake_binding(
+            monkeypatch,
+            root,
+            action_dim=16,
+            discrete_state=True,
+            state_key="observation.state",
+        )
+
+    pipeline = captured["pipeline_kwargs"]
+    assert pipeline["state_normalizer"] is None
+    values = [[-0.75] * 16]
+    assert pipeline["unnormalizer"](values).tolist() == values
+    assert captured["policy"].metadata["normalization"] == {
+        "state": "absent",
+        "action": "identity/identity_missing_stats",
+    }
+    assert "identity passthrough" in caplog.text
+
+
+def test_action_only_stats_leave_state_unnormalized(tmp_path, monkeypatch, caplog):
+    root = openpi_dir(tmp_path / "ckpt")
+    stats = root / "assets" / "example-asset" / "norm_stats.json"
+    stats.parent.mkdir(parents=True)
+    stats.write_text(
+        json.dumps({"actions": {"q01": [-1.0] * 16, "q99": [1.0] * 16}})
+    )
+
+    with caplog.at_level(logging.WARNING, logger="apxinf.policies.pi05"):
+        captured = _load_with_fake_binding(
+            monkeypatch,
+            root,
+            action_dim=16,
+            discrete_state=True,
+            state_key="observation.state",
+        )
+
+    assert captured["pipeline_kwargs"]["state_normalizer"] is None
+    assert captured["policy"].metadata["normalization"]["state"] == "absent"
+    assert "identity passthrough" in caplog.text
 
 
 def test_lerobot_sidecars_build_existing_apxinf_processors(tmp_path, monkeypatch):

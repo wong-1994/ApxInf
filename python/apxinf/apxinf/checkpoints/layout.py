@@ -364,20 +364,25 @@ def detect_checkpoint(
             )
         # arch stays empty on purpose: the Rust loader reads config.json itself,
         # which is the behaviour LeRobot checkpoints already had.
-        if has_processor_layout(root) and norm_stats is None:
+        if has_processor_layout(root):
             try:
-                normalization, tokenizer = load_processor_plan(root, config_document)
+                processor_normalization, tokenizer = load_processor_plan(root, config_document)
             except LeRobotProcessorError as exc:
                 raise CheckpointError(str(exc)) from exc
-            if any(
-                spec is not None and spec.status == IDENTITY_MISSING_STATS
-                for spec in (normalization.state, normalization.action)
-            ):
-                notes.append(
-                    "LeRobot processor state is absent for one or more transforms; "
-                    "matching upstream identity passthrough for those transforms. "
-                    "This is not checkpoint-equivalent to an embodiment with stats."
-                )
+            # An explicit norm_stats path overrides normalization only. The
+            # processor manifests remain authoritative for independent facts
+            # such as tokenizer identity and must still be validated.
+            if norm_stats is None:
+                normalization = processor_normalization
+                if any(
+                    spec is not None and spec.status == IDENTITY_MISSING_STATS
+                    for spec in (normalization.state, normalization.action)
+                ):
+                    notes.append(
+                        "LeRobot processor state is absent for one or more transforms; "
+                        "matching upstream identity passthrough for those transforms. "
+                        "This is not checkpoint-equivalent to an embodiment with stats."
+                    )
 
     effective_asset_id = asset_id or facts.get("asset_id")
     asset_id_source = (
@@ -546,11 +551,13 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"config_json:  {layout.config_json_text() or '(read config.json in the loader)'}")
 
     status = 0
+    if layout.normalization is None:
+        print(
+            "\nWARN [normalization]: no statistics found; state and actions use "
+            "identity passthrough. This is load-compatible, not evidence of "
+            "embodiment-level parity."
+        )
     for label, resolve in (
-        (
-            "normalization",
-            lambda: layout.normalization or require_norm_stats(layout),
-        ),
         ("tokenizer", lambda: resolve_tokenizer(args.model_dir, args.tokenizer)),
     ):
         try:
