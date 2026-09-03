@@ -435,6 +435,25 @@ def test_lerobot_base_processor_declares_identity_fallback(tmp_path):
     assert layout.tokenizer.name == "google/paligemma-3b-pt-224"
 
 
+def test_lerobot_processor_without_state_uses_legacy_root_norm_stats(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt", state_files=False)
+    stats = {
+        "state": {"q01": [-2.0] * 8, "q99": [2.0] * 8},
+        "actions": {"q01": [-1.0] * 7, "q99": [1.0] * 7},
+    }
+    (root / "norm_stats.json").write_text(json.dumps({"norm_stats": stats}))
+
+    layout = detect_checkpoint(root)
+
+    assert layout.norm_stats == root / "norm_stats.json"
+    assert layout.normalization.state.mode == QUANTILE
+    assert layout.normalization.state.status == "resolved"
+    assert layout.normalization.action.mode == QUANTILE
+    assert layout.normalization.action.status == "resolved"
+    assert layout.tokenizer.name == "google/paligemma-3b-pt-224"
+    assert "using legacy statistics" in "\n".join(layout.notes)
+
+
 @pytest.mark.parametrize(
     ("serialized_mode", "mode", "names"),
     [

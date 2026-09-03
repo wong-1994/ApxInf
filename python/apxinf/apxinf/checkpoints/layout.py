@@ -320,6 +320,7 @@ def detect_checkpoint(
     arch: Dict[str, Any] = {}
     facts: Dict[str, Any] = {}
     normalization = None
+    processor_identity_fallback = None
     tokenizer = None
 
     if resolved == OPENPI_PYTORCH:
@@ -373,16 +374,21 @@ def detect_checkpoint(
             # processor manifests remain authoritative for independent facts
             # such as tokenizer identity and must still be validated.
             if norm_stats is None:
-                normalization = processor_normalization
-                if any(
+                missing_processor_stats = any(
                     spec is not None and spec.status == IDENTITY_MISSING_STATS
-                    for spec in (normalization.state, normalization.action)
-                ):
-                    notes.append(
-                        "LeRobot processor state is absent for one or more transforms; "
-                        "matching upstream identity passthrough for those transforms. "
-                        "This is not checkpoint-equivalent to an embodiment with stats."
+                    for spec in (
+                        processor_normalization.state,
+                        processor_normalization.action,
                     )
+                )
+                if missing_processor_stats:
+                    # Older LeRobot PI0.5 exports include processor topology but
+                    # leave state_file unset and keep their usable statistics in
+                    # the legacy root norm_stats.json. Only a processor with
+                    # serialized state is authoritative over that file.
+                    processor_identity_fallback = processor_normalization
+                else:
+                    normalization = processor_normalization
 
     effective_asset_id = asset_id or facts.get("asset_id")
     asset_id_source = (
@@ -409,6 +415,18 @@ def detect_checkpoint(
             )
         except OpenPINormalizationError as exc:
             raise CheckpointError(str(exc)) from exc
+        if processor_identity_fallback is not None:
+            notes.append(
+                "LeRobot processor state is absent for one or more transforms; "
+                f"using legacy statistics from {stats}."
+            )
+    elif normalization is None and processor_identity_fallback is not None:
+        normalization = processor_identity_fallback
+        notes.append(
+            "LeRobot processor state is absent for one or more transforms; "
+            "matching upstream identity passthrough for those transforms. "
+            "This is not checkpoint-equivalent to an embodiment with stats."
+        )
 
     if is_fallback:
         LOGGER.warning(
