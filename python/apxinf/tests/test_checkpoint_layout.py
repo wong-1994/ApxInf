@@ -27,11 +27,11 @@ from apxinf.checkpoints import (
     NormalizationPlan,
     detect_checkpoint,
     read_metadata_pt,
-    require_norm_stats,
     resolve_tokenizer,
     train_config_facts,
 )
 from apxinf.checkpoints.descriptor import IDENTITY_MISSING_STATS, MEAN_STD, QUANTILE
+from apxinf.checkpoints.layout import _main as inspect_checkpoint
 
 STATS = {"actions": {"q01": [-1.0] * 16, "q99": [1.0] * 16}, "state": {"q01": [0.0] * 16, "q99": [1.0] * 16}}
 
@@ -435,6 +435,18 @@ def test_lerobot_base_processor_declares_identity_fallback(tmp_path):
     assert layout.tokenizer.name == "google/paligemma-3b-pt-224"
 
 
+def test_inspector_warns_when_processor_stats_are_missing(tmp_path, capsys):
+    root = lerobot_processor_dir(tmp_path / "ckpt", state_files=False)
+    tokenizer = root / "tokenizer.model"
+    tokenizer.write_bytes(b"sp")
+
+    assert inspect_checkpoint([str(root), "--tokenizer", str(tokenizer)]) == 0
+
+    output = capsys.readouterr().out
+    assert "WARN [normalization]" in output
+    assert "review the normalization warning" in output
+
+
 @pytest.mark.parametrize(
     ("serialized_mode", "mode", "names"),
     [
@@ -649,25 +661,6 @@ def test_missing_stats_is_deferred_not_raised_by_detection(tmp_path):
     assert len(layout.norm_stats_tried) == 3
 
 
-def test_require_norm_stats_names_every_path_and_the_asset_id(tmp_path):
-    root = openpi_dir(tmp_path / "ckpt")
-    with pytest.raises(CheckpointError) as excinfo:
-        require_norm_stats(detect_checkpoint(root))
-    message = str(excinfo.value)
-    for candidate in ("assets/example-asset/norm_stats.json", "example-asset/norm_stats.json"):
-        assert str(root / candidate) in message
-    assert "train_pytorch.py" in message  # where the file comes from
-
-
-def test_lerobot_error_explains_where_lerobot_keeps_statistics(tmp_path):
-    root = lerobot_dir(tmp_path / "ckpt", stats=False)
-    with pytest.raises(CheckpointError) as excinfo:
-        require_norm_stats(detect_checkpoint(root))
-    message = str(excinfo.value)
-    assert "state_file" in message
-    assert "meta/stats.json" in message
-
-
 def test_lerobot_state_file_cannot_escape_checkpoint(tmp_path):
     root = lerobot_processor_dir(tmp_path / "ckpt", state_files=False)
     preprocessor = root / "policy_preprocessor.json"
@@ -679,15 +672,17 @@ def test_lerobot_state_file_cannot_escape_checkpoint(tmp_path):
         detect_checkpoint(root)
 
 
-def test_lerobot_rejects_pre_post_action_stats_that_disagree(tmp_path):
+def test_lerobot_uses_postprocessor_action_stats(tmp_path):
     root = lerobot_processor_dir(tmp_path / "ckpt")
     write_safetensors(
         root / "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
         {"action.q01": [-0.5] * 7, "action.q99": [0.5] * 7},
     )
 
-    with pytest.raises(CheckpointError, match="disagree about action normalization"):
-        detect_checkpoint(root)
+    plan = detect_checkpoint(root).normalization
+
+    assert plan.action.values["q01"] == (-0.5,) * 7
+    assert plan.action.values["q99"] == (0.5,) * 7
 
 
 def test_lerobot_rejects_non_finite_processor_statistics(tmp_path):
@@ -738,19 +733,62 @@ def test_lerobot_rejects_declared_but_empty_processor_state(tmp_path):
         root / "policy_preprocessor_step_2_normalizer_processor.safetensors", {}
     )
 
-    with pytest.raises(CheckpointError, match="no tensor observation.state.q01"):
+    with pytest.raises(CheckpointError, match="state_file contains no tensors"):
         detect_checkpoint(root)
 
 
-def test_lerobot_rejects_resolved_preprocessor_with_stateless_postprocessor(tmp_path):
+def test_lerobot_stateless_postprocessor_means_identity_actions(tmp_path):
     root = lerobot_processor_dir(tmp_path / "ckpt")
     postprocessor = root / "policy_postprocessor.json"
     document = json.loads(postprocessor.read_text())
     del document["steps"][0]["state_file"]
     postprocessor.write_text(json.dumps(document))
 
-    with pytest.raises(CheckpointError, match="disagree about action normalization"):
+    plan = detect_checkpoint(root).normalization
+
+    assert plan.action.mode == "identity"
+    assert plan.action.status == IDENTITY_MISSING_STATS
+
+
+def test_lerobot_rejects_postprocessor_state_without_action_tensors(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    write_safetensors(
+        root / "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
+        {"unrelated.q01": [-1.0] * 7, "unrelated.q99": [1.0] * 7},
+    )
+
+    with pytest.raises(CheckpointError, match="no tensors for action ACTION"):
         detect_checkpoint(root)
+
+
+def test_lerobot_action_only_sidecars_leave_state_as_identity(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    write_safetensors(
+        root / "policy_preprocessor_step_2_normalizer_processor.safetensors",
+        {"action.q01": [-1.0] * 7, "action.q99": [1.0] * 7},
+    )
+
+    plan = detect_checkpoint(root).normalization
+
+    assert plan.state.mode == "identity"
+    assert plan.state.status == IDENTITY_MISSING_STATS
+    assert plan.action.mode == QUANTILE
+    assert plan.action.status == "resolved"
+
+
+def test_lerobot_missing_preprocessor_state_keeps_postprocessor_action_stats(tmp_path):
+    root = lerobot_processor_dir(tmp_path / "ckpt")
+    preprocessor = root / "policy_preprocessor.json"
+    document = json.loads(preprocessor.read_text())
+    del document["steps"][0]["state_file"]
+    preprocessor.write_text(json.dumps(document))
+
+    plan = detect_checkpoint(root).normalization
+
+    assert plan.state.mode == "identity"
+    assert plan.state.status == IDENTITY_MISSING_STATS
+    assert plan.action.mode == QUANTILE
+    assert plan.action.status == "resolved"
 
 
 def test_lerobot_rejects_processor_feature_that_disagrees_with_policy_config(tmp_path):
@@ -900,6 +938,30 @@ def test_lerobot_base_policy_uses_explicit_identity_processors(tmp_path, monkeyp
     }
 
 
+def test_injected_unnormalizer_is_the_published_action_transform(
+    tmp_path, monkeypatch, caplog
+):
+    from apxinf.processors import Unnormalizer
+
+    root = lerobot_processor_dir(tmp_path / "ckpt", state_files=False)
+    injected = Unnormalizer(q01=[0.0] * 7, q99=[2.0] * 7)
+
+    with caplog.at_level(logging.WARNING, logger="apxinf.policies.pi05"):
+        captured = _load_with_fake_binding(
+            monkeypatch,
+            root,
+            discrete_state=False,
+            unnormalizer=injected,
+        )
+
+    assert captured["pipeline_kwargs"]["unnormalizer"] is injected
+    assert captured["policy"].metadata["normalization"] == {
+        "state": "identity/identity_missing_stats",
+        "action": "custom/injected",
+    }
+    assert "identity passthrough" not in caplog.text
+
+
 def test_openpi_missing_stats_loads_with_identity_passthrough(
     tmp_path, monkeypatch, caplog
 ):
@@ -1042,7 +1104,7 @@ def test_the_asset_path_statistics_are_the_ones_loaded(tmp_path, monkeypatch):
 
 
 def test_a_flat_directory_loads_with_no_layout_at_all(tmp_path, monkeypatch):
-    """The hand-assembled layout that predates this module must keep working."""
+    """Native flat checkpoint directories remain supported."""
     root = tmp_path / "flat"
     root.mkdir()
     (root / "model.safetensors").write_bytes(b"")

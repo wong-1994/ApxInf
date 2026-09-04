@@ -273,12 +273,8 @@ impl Model {
     /// * `autotune` — tune missing exact GEMM keys from the first real request.
     /// * `sampling_seed` — seed for the implicit device-side noise stream used
     ///   when inference is called without `noise`.
-    /// * `config_json` — the architecture, as a `config.json`-shaped string,
-    ///   for a checkpoint that has no `config.json`. An openpi PyTorch export
-    ///   never carries one: its constants live in `metadata.pt`, which the
-    ///   Python side reads (`apxinf.checkpoints`) and passes through here.
-    ///   `None` reads `config.json` from the checkpoint directory and falls back
-    ///   to `Pi05Config::default()` when the file is absent.
+    /// * `config_json` — optional `config.json`-shaped architecture JSON.
+    ///   `None` delegates config loading to AutoModel.
     /// * `action_horizon` — override the checkpoint's chunk length. `None`
     ///   (default) runs the native `config.json` value; an explicit value wins
     ///   over it. The horizon is a sequence length, not a weight dimension, so
@@ -310,10 +306,7 @@ impl Model {
         sampling_seed: u64,
     ) -> PyResult<Self> {
         let device = parse_device(device)?;
-        // These are PI0.5 deployment overrides. Unless one is present (including
-        // an architecture recovered from OpenPI metadata.pt), the binding does
-        // not inspect a concrete model config at all: AutoModel and the selected
-        // loader own detection and parsing, which keeps non-PI0.5 loaders viable.
+        // Only explicit PI0.5 overrides bypass AutoModel's config loading.
         let needs_pi05_config = config_json.is_some()
             || action_horizon.is_some()
             || num_views.is_some()

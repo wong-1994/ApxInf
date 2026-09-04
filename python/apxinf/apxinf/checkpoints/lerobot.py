@@ -69,14 +69,6 @@ def load_processor_plan(
         tensors=pre_stats,
         source=pre_source,
     )
-    pre_action = _transform_from_step(
-        pre_step,
-        feature_type="ACTION",
-        fallback_key=action_key,
-        fallback_width=action_width,
-        tensors=pre_stats,
-        source=pre_source,
-    )
     action = _transform_from_step(
         post_step,
         feature_type="ACTION",
@@ -85,18 +77,6 @@ def load_processor_plan(
         tensors=post_stats,
         source=post_source,
     )
-    pre_resolved = pre_action.status == RESOLVED
-    post_resolved = action.status == RESOLVED
-    disagree = pre_action.mode != action.mode or pre_action.width != action.width
-    disagree = disagree or pre_resolved != post_resolved
-    if pre_resolved and post_resolved:
-        disagree = disagree or pre_action.eps != action.eps
-        disagree = disagree or dict(pre_action.values) != dict(action.values)
-    if disagree:
-        raise LeRobotProcessorError(
-            "LeRobot preprocessor and postprocessor disagree about action normalization"
-        )
-
     tokenizer = _tokenizer_spec(pre, pre_path)
     return NormalizationPlan(state=state, action=action), tokenizer
 
@@ -151,7 +131,10 @@ def _load_step_state(
             f"{manifest}: declared state_file {value!r} does not exist at {path}"
         )
     try:
-        return load_state_file(path), str(path)
+        state = load_state_file(path)
+        if not state:
+            raise LeRobotProcessorError(f"{path}: state_file contains no tensors")
+        return state, str(path)
     except SafeTensorStateError as exc:
         raise LeRobotProcessorError(str(exc)) from exc
 
@@ -236,16 +219,23 @@ def _transform_from_step(
 
     names = ("mean", "std") if mode == MEAN_STD else ("q01", "q99")
     values: Dict[str, Tuple[float, ...]] = {}
+    present = () if tensors is None else tuple(
+        name for name in names if f"{key}.{name}" in tensors
+    )
+    if not present:
+        if tensors is not None and feature_type == "ACTION":
+            raise LeRobotProcessorError(
+                f"{source}: no tensors for {key!s} ACTION {mode} normalization"
+            )
+        return TransformSpec.identity(
+            key,
+            width,
+            source=source,
+            status=IDENTITY_MISSING_STATS,
+        )
     for name in names:
         tensor = None if tensors is None else tensors.get(f"{key}.{name}")
         if tensor is None:
-            if tensors is None:
-                return TransformSpec.identity(
-                    key,
-                    width,
-                    source=source,
-                    status=IDENTITY_MISSING_STATS,
-                )
             raise LeRobotProcessorError(
                 f"{source}: no tensor {key}.{name!s} for {feature_type} {mode} normalization"
             )

@@ -59,9 +59,7 @@ def load_norm_stats(model_dir=None, key: str = "actions", *, path=None) -> dict:
 
 
 def _as_vector(values: Sequence[float], name: str, dims: Optional[int]) -> np.ndarray:
-    # Kept at float64 (the dtype norm_stats.json parses to). The compute dtype is
-    # decided per call in :meth:`_AffineStats._check`, which downcasts these to
-    # float32 for float32 inputs -- bit-identical to storing them as float32.
+    # Store parsed values in float64; each call casts them to its compute dtype.
     vector = np.asarray(values, dtype=np.float64)
     if vector.ndim != 1:
         raise ValueError(f"{name} must be rank 1, got shape {vector.shape}")
@@ -110,10 +108,9 @@ class _AffineStats:
     def _check(self, array: np.ndarray, who: str, *, allow_wider: bool = False) -> tuple:
         """Coerce ``array`` and the stats to a common compute dtype, checking width.
 
-        The default dtype is ``result_type(array, float32)``: float32 in stays
-        float32 (bit-identical to the previous float32-only implementation,
-        because the stats are downcast *before* the arithmetic), while float64 in
-        stays float64. That matters for the pi05 prompt path -- openpi's numpy
+        The default dtype is ``result_type(array, float32)``: float32 inputs use
+        float32 statistics, while float64 inputs retain float64 computation.
+        That matters for the pi05 prompt path -- openpi's numpy
         input chain runs in float64, so a float32 state would discretize to a
         different bin whenever a normalized value lands within ~1e-7 of a bin
         edge. An explicit ``dtype=`` pins the compute dtype regardless of the

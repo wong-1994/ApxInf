@@ -232,13 +232,7 @@ class Pi05Policy:
         output_pipeline: Pipeline,
         state_normalized: bool,
     ) -> dict:
-        """The part of ``metadata`` this policy computes from its own wiring.
-
-        Split out because :meth:`with_adapter` inherits the caller-supplied half
-        of ``metadata`` but must let the rewired policy recompute this half —
-        carrying the old ``action_dim`` or pipeline names forward would publish a
-        wire contract the new policy does not serve.
-        """
+        """Return metadata derived from the policy's active model and pipelines."""
         return {
             "model_type": "pi05",
             "action_horizon": model.action_horizon,
@@ -319,9 +313,7 @@ class Pi05Policy:
             ("image_stack", ImageStack(image_pipeline, image_keys, model.image_size)),
             ("tokenize", Tokenize(tokenizer, state_normalizer, state_key)),
         ]
-        # The default leaves noise absent so the binding fills the stable latent
-        # buffer with its backend-native generator. Supplying an explicit sampler
-        # preserves the old host-generated/custom-processor path.
+        # Without an explicit sampler, the binding uses its backend-native RNG.
         if noise is not None:
             input_steps.append(("sample_noise", SampleNoise(noise)))
         input_pipeline = Pipeline(input_steps)
@@ -377,16 +369,10 @@ class Pi05Policy:
         disk* (``norm_key``/``action_dim``/``discrete_state``/``tokenizer_path``/
         ``state_norm_key``) — only this method knows ``model_dir``.
 
-        ``action_dim`` trims the unnormalizer to the task's action width (e.g. 7
-        for LIBERO); ``None`` keeps the full vector. ``unnormalizer`` supplies the
-        quantile map directly instead of reading ``norm_stats`` from disk — for a
-        shape/plumbing run on a stand-in checkpoint whose statistics belong to a
-        different robot (pass a full-width identity), where reading the file would
-        silently apply the wrong scale. It is mutually exclusive with
-        ``action_dim``, since an injected map already fixes the width. For a
-        detected checkpoint layout, sidecar metadata is still parsed into its
-        descriptor; the no-statistics escape hatch applies to legacy flat
-        directories that have no layout metadata.
+        ``action_dim`` trims the checkpoint's action transform to the deployable
+        width; ``None`` uses the transform's full width. ``unnormalizer`` replaces
+        that action transform and determines the width, so it cannot be combined
+        with ``action_dim``.
         ``action_horizon`` overrides
         the checkpoint's chunk length: ``None`` runs the native ``config.json``
         value, an explicit value outranks it (the horizon is a sequence length,
@@ -457,15 +443,8 @@ class Pi05Policy:
                 "already sets the deployable width, so pass only one"
             )
 
-        # Read the directory's own account of itself before touching a weight.
-        # A hand-assembled flat directory (model.safetensors + norm_stats.json,
-        # nothing that says what it is) predates this layer and still loads:
-        # detection has nothing to work with there, so it is skipped rather than
-        # turned into a hard failure. Naming a format or an asset_id does assert
-        # a real layout, so detection runs and its errors propagate. ``norm_stats``
-        # deliberately does not: it names one file, not a directory shape, and it
-        # is exactly what a flat directory needs when its statistics live
-        # elsewhere.
+        # Declared layouts are validated before loading weights. Flat native
+        # directories remain valid and may supply ``norm_stats`` directly.
         layout = None
         if checkpoint_format or asset_id or has_layout_metadata(model_dir):
             layout = detect_checkpoint(
@@ -551,10 +530,10 @@ class Pi05Policy:
             max_token_len=model.max_token_len if hasattr(model, "max_token_len") else 200,
             discrete_state=discrete_state,
         )
-        # Detected layouts already carry canonical normalization facts. The
-        # fallback below exists only for hand-assembled flat directories that
-        # predate checkpoint descriptors; an explicit path also works there.
+        # Declared layouts carry canonical normalization facts. Flat native
+        # directories may use a root or explicitly named norm_stats file.
         plan = layout.normalization if layout is not None else None
+        injected_unnormalizer = unnormalizer is not None
         if plan is None:
             stats_path = (
                 Path(norm_stats)
@@ -603,10 +582,14 @@ class Pi05Policy:
                 if discrete_state and plan.state is not None
                 else None
             )
-            if any(
-                spec is not None and spec.status == IDENTITY_MISSING_STATS
-                for spec in (plan.state, plan.action)
-            ) or (discrete_state and plan.state is None):
+            missing_state_stats = discrete_state and (
+                plan.state is None or plan.state.status == IDENTITY_MISSING_STATS
+            )
+            missing_action_stats = (
+                not injected_unnormalizer
+                and plan.action.status == IDENTITY_MISSING_STATS
+            )
+            if missing_state_stats or missing_action_stats:
                 _LOGGER.warning(
                     "checkpoint %s lacks statistics for one or more transforms; "
                     "using identity passthrough for those transforms. This is "
@@ -628,6 +611,10 @@ class Pi05Policy:
             state_key=state_key,
         )
 
+        normalization_metadata = dict(_normalization_metadata(plan))
+        if injected_unnormalizer:
+            normalization_metadata["action"] = "custom/injected"
+
         return cls(
             model,
             input_pipeline=input_pipeline,
@@ -637,7 +624,8 @@ class Pi05Policy:
             state_key=state_key,
             action_dim=unnormalizer.width,
             metadata={
-                **({"normalization": _normalization_metadata(plan)} if plan is not None else {}),
+                "normalization": normalization_metadata,
+                **({"state_dim": plan.state.width} if plan.state is not None else {}),
                 **(dict(metadata) if metadata else {}),
             },
         )

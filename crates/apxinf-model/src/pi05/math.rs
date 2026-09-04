@@ -28,22 +28,9 @@ pub fn sinusoidal_time_embedding(
 
 /// Match NumPy `digitize(state, linspace(-1, 1, 257)[:-1]) - 1`.
 ///
-/// `digitize` returns `0` for `v < -1`, so the bin is `-1`, and openpi writes
-/// that straight into the prompt (`models/tokenizer.py`) — it is a value the
-/// model saw during training, so it must not be clamped to `0`. The return type
-/// is therefore signed. Values `>= 1` do saturate, to `255`.
-///
-/// Implemented as a search over the edges, which is what `digitize` does, rather
-/// than the arithmetic `floor((v + 1.0) * 128.0)`. The two are not equal: adding
-/// `1.0` to a value just below an edge in `[-0.5, -0.25)` moves it into a binade
-/// with twice the ulp, the sum rounds *up* onto the edge, and the floor lands one
-/// bin high. `-0.4921875` (edge 65) is the one f32 value where this happens, and
-/// one bin is a different prompt string, different token ids, different rollout.
-///
-/// Every edge is `-1 + i/128` with `i <= 255`, i.e. `(i - 128)/128` — at most
-/// eight significant bits — so it is exact in f32 and each comparison below is
-/// exact. NaN falls out as `-1` here (all comparisons false); NaN state is
-/// rejected upstream and is not a supported input on either side.
+/// The signed result preserves NumPy's `-1` bin below `-1`; values at or above
+/// `1` saturate to `255`. Searching exact f32 edges avoids arithmetic rounding
+/// onto the next bin. Non-finite state is rejected by the caller.
 pub fn discretize_state(state: &[f32]) -> Vec<i16> {
     state
         .iter()
@@ -130,9 +117,7 @@ mod tests {
 
     #[test]
     fn discretization_matches_digitize_at_every_bin_edge() {
-        // Each edge and both of its f32 neighbours: the edge itself opens its own
-        // bin, one ulp below stays in the previous one. The arithmetic form
-        // `floor((v + 1.0) * 128.0)` gets exactly one of these 768 cases wrong.
+        // The edge opens its bin; one ulp below remains in the preceding bin.
         for i in 0..256i32 {
             let edge = -1.0 + i as f32 / 128.0;
             assert_eq!(discretize_state(&[edge]), vec![i as i16], "edge {i}");
@@ -151,10 +136,7 @@ mod tests {
 
     #[test]
     fn discretization_does_not_round_up_onto_an_edge() {
-        // One ulp below edge 65 (-0.4921875). Adding 1.0 lands the value in a
-        // binade with twice the ulp, so the sum rounds up to exactly 0.5078125
-        // and a floor-based index returns 65 instead of 64 -- a different prompt
-        // string for a state that is, by NumPy's reckoning, in bin 64.
+        // Arithmetic indexing rounds this value onto edge 65; NumPy keeps bin 64.
         let v = f32::from_bits((-0.4921875f32).to_bits() + 1);
         assert!(v < -0.4921875, "one ulp below the edge");
         assert_eq!(

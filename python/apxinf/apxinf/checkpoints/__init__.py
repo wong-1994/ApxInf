@@ -1,10 +1,6 @@
-"""Checkpoint-directory layout: which format, and where is each file.
+"""Checkpoint layout detection and canonical metadata descriptors.
 
-One place that answers "what shape is this checkpoint" for all three callers who
-need to know — the policy loader, the preflight checks, and the offline auditor —
-so a directory convention is written down once rather than guessed three times.
-
-    from apxinf.checkpoints import detect_checkpoint, require_norm_stats
+    from apxinf.checkpoints import detect_checkpoint
 
     layout = detect_checkpoint(model_dir)
     normalization = layout.normalization  # None means identity passthrough
@@ -28,7 +24,6 @@ from .layout import (
     CheckpointLayout,
     detect_checkpoint,
     has_layout_metadata,
-    require_norm_stats,
     resolve_tokenizer,
 )
 from .metadata import (
@@ -59,7 +54,6 @@ __all__ = [
     "read_metadata_pt",
     "read_norm_stats",
     "repack_structure",
-    "require_norm_stats",
     "resolve_tokenizer",
     "train_config_facts",
     "load_normalization_plan",

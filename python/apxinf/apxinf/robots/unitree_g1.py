@@ -18,13 +18,6 @@ The model policy owns tokenization, state encoding, and model-specific steps.
 
 The adapter supports the three-camera serving path with optional
 ``adapt_to_pi`` and delta-to-absolute processing.
-
-.. note::
-   With a stand-in checkpoint (no real G1 weights / norm_stats) this adapter
-   validates *plumbing and shape* (G1 obs -> ``[action_horizon, 16]``), not G1
-   action values. Numeric parity needs the integrator's real gripper limits
-   **and** the G1 checkpoint/norm_stats; the same adapter code then runs
-   unchanged.
 """
 
 from __future__ import annotations
@@ -61,13 +54,10 @@ def build_unitree_g1_policy(
 
     The checkpoint is loaded through :class:`~apxinf.policies.auto.AutoPolicy`, so
     the model type comes from ``config.json`` (or an explicit ``model_type=``)
-    rather than from this file. It is loaded at **full model width**
-    (``action_dim=None``) because the delta->absolute step must see the whole
-    action before ``UnitreeG1EncodeActions`` truncates it to 16. The model's own
-    unnormalizer therefore comes from the checkpoint's ``norm_stats["actions"]``
-    at its native width, so a real deployment needs G1 norm_stats at least ``16``
-    wide; pass ``unnormalizer=`` through to inject one instead (e.g. a full-width
-    identity for a shape/plumbing run on a stand-in checkpoint).
+    rather than from this file. ``action_dim=None`` lets the checkpoint's action
+    transform determine the intermediate width; ``UnitreeG1EncodeActions`` then
+    emits 16 channels. A deployment therefore needs action statistics at least
+    16 channels wide, or an injected ``unnormalizer`` with a compatible width.
 
     The resulting chain is the model's own, wrapped:
 
@@ -105,7 +95,7 @@ def build_unitree_g1_policy(
     base = AutoPolicy.from_pretrained(
         model_dir,
         image_keys=tuple(image_keys),
-        action_dim=None,  # keep full model width; the g1_encode step truncates to 16
+        action_dim=None,  # let checkpoint stats define the width before g1_encode
         state_key=state_key,
         prompt_key=prompt_key,
         discrete_state=discrete_state,

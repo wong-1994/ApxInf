@@ -30,6 +30,7 @@ from apxinf.serving import WebsocketPolicyServer
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", required=True, type=pathlib.Path)
+    parser.add_argument("--tokenizer", type=pathlib.Path)
     parser.add_argument("--precision", choices=("auto", "fp8", "bf16", "int8"), default="bf16")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
@@ -71,6 +72,8 @@ def main() -> None:
         action_dim=(args.action_dim or None),
         metadata={"protocol": "openpi.websocket_policy", "precision": args.precision},
     )
+    if getattr(args, "tokenizer", None) is not None:
+        options["tokenizer_path"] = args.tokenizer
     image_keys = getattr(args, "image_keys", None)
     if image_keys:
         options["image_keys"] = tuple(

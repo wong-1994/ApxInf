@@ -232,9 +232,9 @@ The adapter preserves these orderings:
 * the decode-state step goes **before** the model's whole input chain, so
   discretized state (when on) and the delta→absolute output step both see the
   decoded state;
-* unnormalize runs at **full model width**, before any truncation, so
-  delta→absolute sees the whole action. Pass `action_dim=None` into the loader
-  and let the encode step truncate.
+* the model pipeline resolves the checkpoint's deployable action width before
+  robot output steps run. Pass `action_dim=None` when the appended encode step
+  owns the final width.
 
 Declare `action_dim=` only for the width a step you appended actually produces.
 Without the truncating step there is nothing to claim — inherit the model's own
@@ -351,15 +351,13 @@ Run preflight before serving a checkpoint:
 python3 scripts/openpi_metadata_to_apxinf.py --model-dir "$CKPT" --robot <preset>
 ```
 
-It reads the checkpoint's `norm_stats.json` widths and tokenizer, and — when the
-checkpoint carries openpi's `metadata.pt` — cross-checks your preset field by
-field against openpi's own serialized `TrainConfig` (camera wire keys,
-`discrete_state_input`, `adapt_to_pi`, `use_delta_joint_actions`,
-`action_horizon`, `max_token_len`). Exit status is 1 on any fatal finding, so it
-can gate a deployment. The same directory checks run inside
-`pi05_openpi_websocket_server.py` **before** the weights load, and refuse to
-start; `--skip-preflight` overrides that, and exists only to reproduce a
-known-bad configuration deliberately.
+It validates normalization metadata from OpenPI `norm_stats.json` or LeRobot
+processor sidecars. Missing optional statistics are reported as identity
+passthrough; declared but unreadable or incompatible statistics are fatal. When
+the checkpoint carries OpenPI `metadata.pt`, preflight also checks the preset
+against its serialized `TrainConfig` (camera keys, state routing, action mode,
+horizon, and token length). The server runs the same checks before loading
+weights and refuses fatal mismatches.
 
 Add cases to `tests/test_preflight.py` for embodiment-specific width rules. A
 valid checkpoint and preset pairing must produce no fatal findings.

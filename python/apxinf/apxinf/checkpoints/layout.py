@@ -1,6 +1,6 @@
-"""What shape is this checkpoint directory, and where is each file?
+"""Detect supported checkpoint layouts and resolve their assets.
 
-Five directory layouts turn up in the field and only two of them matter here:
+Supported layouts:
 
 ``openpi_pytorch``
     What ``scripts/train_pytorch.py`` writes and what ships to a customer:
@@ -16,9 +16,7 @@ Five directory layouts turn up in the field and only two of them matter here:
     normalization state in separate SafeTensors sidecars. Base repositories may
     deliberately omit that state, in which case LeRobot uses identity transforms.
 
-The tensor names are identical between the layouts; only sidecar metadata and
-asset locations differ. The resolver is shared by policy loading, preflight,
-and offline inspection, and reports every candidate path it considered.
+The resolver is shared by policy loading, preflight, and offline inspection.
 """
 
 from __future__ import annotations
@@ -43,7 +41,6 @@ __all__ = [
     "TOKENIZER_NAMES",
     "detect_checkpoint",
     "has_layout_metadata",
-    "require_norm_stats",
     "resolve_tokenizer",
 ]
 
@@ -94,8 +91,7 @@ class CheckpointLayout:
     asset_id: Optional[str] = None
     asset_id_source: str = ""
     #: The selected OpenPI-style statistics file. ``None`` when a serialized
-    #: processor is authoritative or when nothing matched — see
-    #: :func:`require_norm_stats` for the latter case.
+    #: processor is authoritative or when no statistics were found.
     norm_stats: Optional[Path] = None
     #: Every candidate considered, in order, whether or not it existed.
     norm_stats_tried: Tuple[Path, ...] = ()
@@ -264,9 +260,8 @@ def detect_checkpoint(
 
     Raises :class:`CheckpointError` when the directory matches neither layout, or
     when a pinned format's authoritative file is absent. A **missing
-    norm_stats.json is not raised here** — the layout records what was tried and
-    :func:`require_norm_stats` turns it into an error, so preflight can report it
-    alongside its other findings instead of one crash at a time.
+    norm_stats.json is not raised here** — the layout records what was tried so
+    policy loading and preflight can apply their own missing-statistics policy.
     """
     root = Path(model_dir)
     if not root.is_dir():
@@ -316,8 +311,6 @@ def detect_checkpoint(
             raise CheckpointError(f"{metadata_pt}: {exc}") from exc
         arch = dict(facts["arch"])
         if has_config:
-            # A shipped directory can be exactly this: a hand-added config.json
-            # from a *different* training run sitting next to the real metadata.
             notes.append(
                 f"{config_json} is ignored — for an openpi export metadata.pt is the "
                 f"authority for the architecture"
@@ -426,39 +419,6 @@ def detect_checkpoint(
     )
 
 
-def require_norm_stats(layout: CheckpointLayout) -> Path:
-    """The statistics path, or a :class:`CheckpointError` naming every candidate."""
-    if layout.norm_stats is not None:
-        return layout.norm_stats
-
-    tried = "\n".join(f"  {path}" for path in layout.norm_stats_tried)
-    if layout.format == OPENPI_PYTORCH:
-        asset = layout.asset_id or "<unknown>"
-        where = layout.openpi.get("assets_dir")
-        origin = f" (openpi computed them under {where}{asset}/ on the training machine)" if where else ""
-        hint = (
-            f"openpi writes this file to assets/<asset_id>/{NORM_STATS_NAME} when "
-            f"training finishes (scripts/train_pytorch.py). This checkpoint's asset_id "
-            f"is {asset!r}, from {layout.asset_id_source or 'metadata.pt'}{origin}. Ask "
-            f"whoever exported it for assets/{asset}/{NORM_STATS_NAME}, place it there, "
-            f"or point --norm-stats at it. Do not substitute another run's file: the "
-            f"statistics are what map the model's output into the robot's physical "
-            f"range, so a wrong one produces in-range, meaningless actions and no error."
-        )
-    else:
-        example = '{"actions": {"q01": [...], "q99": [...]}, "state": {...}}'
-        hint = (
-            f"This LeRobot directory has no serialized policy processor. LeRobot "
-            f"repositories may store statistics in a state_file referenced by "
-            f"policy_preprocessor.json, in model state, or in the source dataset's "
-            f"meta/stats.json. Convert them into {example} "
-            f"and put it in the checkpoint root, or pass --norm-stats."
-        )
-    raise CheckpointError(
-        f"no {NORM_STATS_NAME} for {layout.root}; tried:\n{tried}\n{hint}"
-    )
-
-
 def resolve_tokenizer(model_dir, tokenizer_path=None, *, env: Optional[Mapping[str, str]] = None) -> Path:
     """Locate the SentencePiece model: explicit path, then env, then the directory.
 
@@ -531,10 +491,18 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"config_json:  {layout.config_json_text() or '(read config.json in the loader)'}")
 
     status = 0
-    if layout.normalization is None:
+    missing_normalization = layout.normalization is None or any(
+        spec is not None and spec.status == IDENTITY_MISSING_STATS
+        for spec in (
+            None if layout.normalization is None else layout.normalization.state,
+            None if layout.normalization is None else layout.normalization.action,
+        )
+    )
+    if missing_normalization:
         print(
-            "\nWARN [normalization]: no statistics found; state and actions use "
-            "identity passthrough. This is load-compatible, not evidence of "
+            "\nWARN [normalization]: statistics are missing for one or more "
+            "transforms; those values use identity passthrough. This is "
+            "load-compatible, not evidence of "
             "embodiment-level parity."
         )
     for label, resolve in (
@@ -546,7 +514,10 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"\nFAIL [{label}]: {exc}")
             status = 1
     if status == 0:
-        print("\nOK: this checkpoint has everything apxinf needs to serve it.")
+        if missing_normalization:
+            print("\nOK: checkpoint is loadable; review the normalization warning above.")
+        else:
+            print("\nOK: this checkpoint has everything apxinf needs to serve it.")
     return status
 
 

@@ -63,12 +63,7 @@ def _width(stats: dict, key: str) -> Optional[int]:
 
 
 def _check_layout(layout: CheckpointLayout) -> List[Finding]:
-    """Report what the directory says it is, before anything reads it.
-
-    The layout decides which ``norm_stats.json`` gets used, so an operator who
-    can see the chosen path can spot the wrong-statistics failure by eye — which
-    is the one failure mode this whole module exists for.
-    """
+    """Report the detected layout and selected checkpoint assets."""
     findings = [Finding(INFO, "checkpoint layout", f"{layout.format} ({layout.root})")]
     if layout.asset_id:
         findings.append(
@@ -375,13 +370,8 @@ def check_checkpoint(
     discrete = preset.discrete_state if discrete_state is None else bool(discrete_state)
     keys = preset.image_keys if image_keys is None else tuple(image_keys)
 
-    # A directory that declares nothing about itself is the hand-assembled flat
-    # layout that predates this check; it still loads, so it is still checked,
-    # just against <model_dir>/norm_stats.json (or --norm-stats, which names one
-    # file rather than asserting a directory shape). A detection failure is
-    # reported rather than raised: preflight's whole contract is to list every
-    # problem. This mirrors Pi05Policy.from_pretrained exactly — a preflight that
-    # resolves a different file than the load would is worse than none.
+    # Match policy loading: declared layouts are detected; flat native
+    # directories use a root or explicitly named norm_stats file.
     layout: Optional[CheckpointLayout] = None
     layout_findings: List[Finding] = []
     if checkpoint_format or asset_id or has_layout_metadata(model_dir):

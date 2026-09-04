@@ -3,10 +3,8 @@
 The delivered configuration that motivated :mod:`apxinf.robots.preflight` was a
 Unitree G1 checkpoint (16-DoF, three cameras, delta joint actions) served with a
 LIBERO ``norm_stats.json`` (8-dim state, 7-dim action) and ``--action-dim 7``.
-Every layer accepted it. These tests pin the checks that refuse it, and — just as
-importantly — pin that a *correct* checkpoint produces no fatal finding, so the
-preflight cannot become a thing operators route around with
-``--skip-preflight``.
+Every layer accepted it. These tests cover both rejection of incompatible
+checkpoints and acceptance of compatible ones.
 
 Runs offline against synthesised checkpoint directories; no CUDA, no weights.
 """

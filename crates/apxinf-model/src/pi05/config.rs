@@ -591,13 +591,7 @@ mod tests {
 
     #[test]
     fn parses_the_config_json_synthesised_from_an_openpi_metadata_pt() {
-        // An openpi PyTorch export ships no config.json at all, so the Python
-        // side reads metadata.pt and hands the loader this string through
-        // `Model.load(config_json=...)`. Without it the loader fell back to
-        // `Pi05Config::default()` in silence, serving a 3-view/50-step default
-        // whatever the checkpoint actually was. This is the exact spelling
-        // `apxinf.checkpoints.train_config_facts` emits, so a change on either
-        // side that breaks the handshake fails here rather than on a robot.
+        // Shape emitted by `apxinf.checkpoints.train_config_facts`.
         let cfg = Pi05Config::from_json_str(
             r#"{"action_dim": 32, "action_horizon": 50, "discrete_state_input": true,
                 "max_token_len": 200, "num_views": 3}"#,

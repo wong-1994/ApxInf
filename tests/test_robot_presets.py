@@ -654,9 +654,7 @@ class UnitreeG1AdapterTest(unittest.TestCase):
         self.assertIsNone(stub.wrapped["action_dim"])
 
     def test_the_wire_keys_are_required_arguments(self) -> None:
-        # They are a recording convention, not a fact about this body. A default
-        # here would rebuild the robot<->dataset coupling one layer up: the same
-        # G1 re-recorded under different keys would silently serve the old ones.
+        # Wire keys belong to the recording convention, not the robot body.
         with self._patched_loader({}, _StubComposable()):
             with self.assertRaises(TypeError):
                 build_unitree_g1_policy("/nowhere", image_keys=G1_CAMERAS)
@@ -737,9 +735,7 @@ class ModelLayerHoldsNoWireKeysTest(unittest.TestCase):
         self.assertEqual(len(set(policy.image_keys)), len(policy.image_keys))
 
     def test_no_constructor_defaults_a_camera_key(self) -> None:
-        # Asserted on the signatures rather than by grepping the source, so the
-        # prose explaining the old LIBERO default does not trip the check. Every
-        # entry point that takes image_keys must leave them unnamed.
+        # Every generic entry point must leave camera keys unnamed.
         for func in (
             pi05_module.Pi05Policy.__init__,
             pi05_module.Pi05Policy.default_pipelines,
@@ -1164,27 +1160,7 @@ class StateKeyIsRequiredWhenItIsReadTest(unittest.TestCase):
 
 
 class NormalizationDtypeTest(unittest.TestCase):
-    """A G1 checkpoint has to be normalized in float64, the way openpi does it.
-
-    openpi parses ``norm_stats.json`` with the stdlib JSON decoder and keeps the
-    result in float64. Subtracting a float64 ``q01`` from a robot's float32 state
-    promotes, so openpi's whole G1 chain -- normalize the state, discretize it
-    into the prompt, unnormalize the action -- runs in float64 whatever the robot
-    sent. Ours follows the input dtype unless told otherwise.
-
-    The gap is ~3e-7. On the output side that is nothing: a joint angle nobody
-    can measure. On the *input* side the very next operation compares the
-    normalized state against bin edges 1/128 apart, so an element sitting near
-    one lands in a different bin, writes a different number into the prompt
-    string, produces different token ids, and sends the rollout somewhere else.
-
-    Under the robot/model split the pin is not something the adapter reaches in
-    and applies -- it is a load flag the body declares (``norm_dtype`` in
-    :attr:`Embodiment.builder_kwargs`) and the model's loader honours. These
-    tests cover that as two links plus the reason it is load-bearing:
-    the preset asks for it, ``from_pretrained`` applies it, and float32 really
-    does cross a bin edge.
-    """
+    """G1 uses float64 normalization to preserve OpenPI state-token parity."""
 
     # --- link 1: the body declares it, and the loader accepts the keyword -----
 

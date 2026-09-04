@@ -1,47 +1,9 @@
 """Named robot presets for deployable inference contracts.
 
-OpenPI keeps this information in a Python registry of ``TrainConfig``s: which
-``DataTransformFn`` pair runs, and therefore which **wire keys** the client must
-send. ``serve_policy.py --policy.config pi05_UnitreeG1_...`` selects an entry;
-the client cannot negotiate it and must match by hand.
-
-The matching ApxInf preset is selected with ``--robot``:
-
-    openpi:  serve_policy.py --policy.config pi05_UnitreeG1_groundwire
-    apxinf:  pi05_openpi_websocket_server.py --robot unitree_g1
-
-``image_keys`` is order-significant: entry ``i`` is stacked
-into model view slot ``i``, which the checkpoint trained as openpi's
-``base_0_rgb`` / ``left_wrist_0_rgb`` / ``right_wrist_0_rgb``. A tuple written in
-the wrong order still stacks, still has the right shape, and silently feeds the
-wrong camera to each slot. Pairing every wire key with the slot it fills makes
-that order reviewable instead of positional. The slot vocabulary itself is a
-*model* fact, so it is imported from :mod:`apxinf.policies.base` rather than
-restated here.
-
-Preset names follow ``<arm>_<convention>``. The arm alone does not determine the
-contract — LIBERO and DROID are both Franka Panda, yet LIBERO sends
-``observation/image`` with a 7-dim EEF-delta action while DROID sends
-``observation/exterior_image_1_left`` with a different action space. So a preset
-is named for the arm *and* the dataset convention whose keys it implements:
-``franka_libero``, not ``libero`` (a benchmark, not a robot) and not ``franka``
-(ambiguous). Single-embodiment robots that own their convention need no suffix —
-``unitree_g1``.
-
-An :class:`Embodiment` is the body (camera count, action width, which
-pre/post steps its actions need) and a
-:class:`~apxinf.conventions.Convention` is a dataset's recording dialect (the
-wire keys, and whether state was recorded into the prompt). Conventions live in
-:mod:`apxinf.conventions` and do not depend on robot implementations.
-
-A :class:`RobotPreset` names one *pairing*, and only the pairing is deployable.
-``--robot`` selects a registered pairing. The pairing is validated when the
-module loads; a convention naming three cameras cannot be attached to a
-two-camera body.
-
-**Registering from outside.** :func:`register_robot_preset` adds an entry from
-another package, so a third-party robot does not have to patch this file to
-become ``--robot <name>``.
+A preset pairs an :class:`Embodiment` (camera/action geometry and robot
+processing) with a :class:`~apxinf.conventions.Convention` (wire keys and state
+routing). ``image_keys`` order maps directly to model :data:`VIEW_SLOTS`.
+External packages may add pairings with :func:`register_robot_preset`.
 """
 
 from __future__ import annotations
@@ -77,12 +39,7 @@ def _build_generic(model_dir, **kwargs) -> Policy:
 
 @dataclass(frozen=True)
 class Embodiment:
-    """A robot body: how many cameras it has, and what its actions mean.
-
-    Everything here is a fact about hardware. It survives a change of dataset:
-    re-record the G1 under a different key convention and this is unchanged.
-    Nothing here is a string that goes on the network.
-    """
+    """Robot camera/action geometry and its optional processing builder."""
 
     #: Robot name, used in the served metadata and in preset names.
     name: str
@@ -131,30 +88,13 @@ class Embodiment:
 
     @property
     def has_robot_steps(self) -> bool:
-        """Whether this body needs pre/post arithmetic beyond naming its keys.
-
-        ``False`` for a body the generic builder serves, whose entire contract is
-        its wire keys and action width. A caller that *cannot* run :attr:`builder`
-        — the checkpoint-free synthetic path — uses this to say what it dropped
-        rather than publishing the preset name unqualified.
-        """
+        """Whether this body adds robot-specific pre/post processing."""
         return self.builder is not _build_generic
 
 
 @dataclass(frozen=True)
 class RobotPreset:
-    """One deployable pairing: a body recorded under a convention.
-
-    The two halves are separable because they vary independently — the same
-    Franka arm under LIBERO's and DROID's keys is one :class:`Embodiment` and two
-    :class:`Convention`\\ s — but they are validated *together*, because only the
-    pair is deployable: a convention naming three cameras cannot serve a two-camera
-    body, and nothing else in the system will notice if it tries.
-
-    This stays one ``--robot`` flag. Splitting the flag too would let an operator
-    spell combinations that were never recorded, which is the silent mismatch the
-    flag exists to prevent; the registry below decides which pairings are real.
-    """
+    """A validated, deployable pairing of an embodiment and wire convention."""
 
     #: Registry name, used as ``--robot <name>``. Spelled ``<arm>_<convention>``
     #: when the arm is shared, bare when the body owns its convention.
@@ -175,11 +115,7 @@ class RobotPreset:
                 "convention can only be paired with a body it was recorded on"
             )
 
-    # --- the pairing's flat contract ---------------------------------------
-    #
-    # Delegating properties rather than a rename: this is what the server, the
-    # metadata and the tests read, and which half a field came from is not their
-    # business. They also keep every existing caller working unchanged.
+    # Flat accessors expose the combined serving contract.
 
     @property
     def image_keys(self) -> Tuple[str, ...]:
@@ -236,15 +172,7 @@ class RobotPreset:
     def synthetic_gaps(
         self, *, discrete_state: bool, served_action_dim: int
     ) -> Tuple[str, ...]:
-        """What a checkpoint-free (random-weights) server cannot honour here.
-
-        The synthetic path reproduces this preset's wire keys and view count
-        exactly and nothing else: its tokenizer emits a fixed token stream and
-        never reads state, and :attr:`builder` never runs. Each returned string
-        names one gap, for a startup warning — a synthetic server publishing this
-        preset's name unqualified would be the silent embodiment mismatch
-        ``--robot`` exists to prevent.
-        """
+        """Describe preset behavior unavailable to a random-weight server."""
         gaps = []
         if discrete_state:
             gaps.append(
@@ -274,18 +202,11 @@ class RobotPreset:
 
 #: --- bodies -----------------------------------------------------------------
 
-#: Franka Emika Panda, 7-DoF arm + parallel gripper, 2-camera rig. Its whole port
-#: is a table row: the checkpoint already emits absolute actions at the deployable
-#: width, so no robot pre/post step is needed and the generic builder serves it.
-#: ``state_dim`` is 8 rather than 7 — LIBERO records EEF pose + gripper on the
-#: state side and 6 EEF deltas + gripper on the action side.
+#: Franka Emika Panda under LIBERO: 2 cameras, 8 state values, 7 actions.
 FRANKA = Embodiment(name="franka", num_cameras=2, action_dim=7, state_dim=8, action_width=7)
 
-#: Unitree G1 humanoid: dual-arm + 2 dexterous hands, 16 DoF laid out
-#: ``[L-arm 7, L-gripper 1, R-arm 7, R-gripper 1]``, 3 cameras. ``action_dim``
-#: stays ``None`` because ``UnitreeG1EncodeActions`` does the 32→16 truncation
-#: after delta→absolute has seen the full-width action; ``action_width`` is still
-#: 16, because that is how wide the body's actions and its statistics are.
+#: Unitree G1: 3 cameras and 16 state/action values. The encode step owns output
+#: selection, so ``action_dim`` remains ``None`` while ``action_width`` is 16.
 UNITREE_G1_BODY = Embodiment(
     name="unitree_g1",
     num_cameras=3,
@@ -312,8 +233,7 @@ FRANKA_LIBERO = RobotPreset(
     summary="Franka Panda, LIBERO keys: 2 cameras, 7-dim action (6 EEF deltas + gripper)",
 )
 
-#: Unitree G1 under its own convention — a single-embodiment robot that owns its
-#: keys, so body and convention share a name and the preset needs no suffix.
+#: Unitree G1 under its native wire convention.
 UNITREE_G1 = RobotPreset(
     name="unitree_g1",
     embodiment=UNITREE_G1_BODY,
@@ -321,15 +241,10 @@ UNITREE_G1 = RobotPreset(
     summary="Unitree G1: 3 cameras, 16-DoF state, delta joint actions, 32->16 encode",
 )
 
-#: Name -> preset. Add an embodiment here once its steps and factory exist; that
-#: is the whole registration step (openpi's ``training/config.py`` equivalent).
-#: A preset defined outside this package joins the same dict through
-#: :func:`register_robot_preset`.
+#: Canonical preset registry; external packages use :func:`register_robot_preset`.
 ROBOT_PRESETS: Dict[str, RobotPreset] = {p.name: p for p in (FRANKA_LIBERO, UNITREE_G1)}
 
-#: Accepted spellings that are not canonical names. ``libero`` names a benchmark
-#: rather than a robot, but it is what the deployed launch commands and docs say,
-#: so it keeps resolving instead of failing a running deployment on a rename.
+#: Accepted non-canonical preset names.
 ROBOT_ALIASES: Dict[str, str] = {"libero": "franka_libero"}
 
 
@@ -357,24 +272,17 @@ def register_robot_preset(
     aliases: Iterable[str] = (),
     replace: bool = False,
 ) -> RobotPreset:
-    """Add ``preset`` to the registry and return it, for use at module scope.
+    """Register and return ``preset`` for use at module scope.
 
-    The registry above is this repository's table; a robot that lives in someone
-    else's package should not have to patch it to become ``--robot <name>``.
-    Importing that package is enough::
+    External packages can register during import::
 
         MY_ROBOT = register_robot_preset(
             RobotPreset(name="myarm_mydataset", embodiment=MY_ARM, convention=MY_KEYS),
             aliases=("myarm",),
         )
 
-    Re-registering a name is an error unless ``replace=True``: a silent overwrite
-    would change what a launch command already in production resolves to, which
-    is the same class of invisible failure ``--robot`` exists to prevent. An alias
-    may never shadow a canonical name, for the same reason.
-
-    Registration is process-local and not persisted — ``--robot`` on the shipped
-    server only sees presets whose module was imported.
+    Re-registering needs ``replace=True``; aliases cannot shadow canonical names.
+    Registration is process-local.
     """
     if not isinstance(preset, RobotPreset):
         raise TypeError(f"expected a RobotPreset, got {type(preset).__name__}")
@@ -442,6 +350,7 @@ def build_robot_policy(
             "robot": preset.name,
             "robot_steps": preset.has_robot_steps,
             "robot_slots": [list(pair) for pair in zip(VIEW_SLOTS, keys)],
+            "state_dim": preset.state_dim,
             **(dict(metadata) if metadata else {}),
         },
         **dict(preset.builder_kwargs),

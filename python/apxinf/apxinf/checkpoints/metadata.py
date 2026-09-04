@@ -70,7 +70,7 @@ _ALLOWED = frozenset(
 
 
 class _Opaque:
-    """Inert stand-in for a class we refuse to import.
+    """Inert placeholder for a class the restricted unpickler does not import.
 
     Must be a **class**, not a factory function: the ``NEWOBJ`` opcode calls
     ``cls.__new__(cls, *args)`` and rejects a non-type. The reduce arguments are

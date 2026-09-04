@@ -47,7 +47,7 @@ policy = build_robot_policy("franka_libero", "<path-to-model>", precision="bf16"
 result = policy.infer({
     "observation/image":       np.zeros((256, 256, 3), np.uint8),
     "observation/wrist_image": np.zeros((256, 256, 3), np.uint8),
-    "observation/state":       np.zeros(policy.action_dim, np.float32),
+    "observation/state":       np.zeros(8, np.float32),
     "prompt":                  "put both moka pots on the stove",
 })
 
@@ -251,7 +251,7 @@ a mismatch produces wrong actions, not an error.
 `--help` lists every preset. If an installed client uses different keys, pass
 the concrete policy fields through `--policy-options` (for example
 `{"image_keys":[...],"state_key":"state"}`) or register a named preset; do not
-edit the generic server. See [Adding an embodiment](../../doc/adding-an-embodiment.md).
+edit the generic server. See [Adding an embodiment](doc/adding-an-embodiment.md).
 
 The server keeps the checkpoint's native action width unless the user supplies
 `--action-dim` or selects a preset with a deployable width. It publishes the
