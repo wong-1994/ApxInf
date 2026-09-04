@@ -40,16 +40,19 @@ Reported latency is P50 over 30 samples after 10 warm-up iterations
 
 ```python
 import numpy as np
-from apxinf import build_robot_policy
+from apxinf import AutoPolicy
 
-policy = build_robot_policy("franka_libero", "<path-to-model>", precision="bf16")
+policy = AutoPolicy.from_pretrained("<path-to-model>", precision="bf16")
 
-result = policy.infer({
-    "observation/image":       np.zeros((256, 256, 3), np.uint8),
-    "observation/wrist_image": np.zeros((256, 256, 3), np.uint8),
-    "observation/state":       np.zeros(8, np.float32),
-    "prompt":                  "put both moka pots on the stove",
-})
+observation = {
+    key: np.zeros((256, 256, 3), np.uint8)
+    for key in policy.metadata["image_keys"]
+}
+observation[policy.metadata["prompt_key"]] = "put both moka pots on the stove"
+if state_key := policy.metadata.get("state_key"):
+    observation[state_key] = np.zeros(policy.metadata["state_dim"], np.float32)
+
+result = policy.infer(observation)
 
 result["actions"]   # (H, policy.action_dim) float32, unnormalized
 result["timing"]    # model_ms / total_ms
