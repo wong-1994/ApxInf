@@ -1,15 +1,13 @@
 # Adding an Embodiment to ApxInf
 
-A guide for serving a new robot through the OpenPI-compatible websocket API, and
-for launching a server against an embodiment that already exists. Written after
-the Unitree G1 port; every claim here is grounded in code that runs.
+A guide for serving a robot through the OpenPI-compatible websocket API.
 
 The companion doc for the *model* side is
 [`doc/adding-a-new-model.md`](adding-a-new-model.md). That one is about weights
 and kernels. This one is about the **wire contract**: which keys the client
 sends, how state is routed, and what the action vector means when it comes back.
 
-## Why this is a table and not a default
+## Wire contracts and presets
 
 A pi05 checkpoint does not carry its wire contract. The weights fix the view
 count and the action width; they say nothing about whether the base camera
@@ -17,26 +15,16 @@ arrives as `observation/image` or as `obs["images"]["cam_high"]`, whether the
 state vector is discretized into the prompt or dropped, or whether the 32-wide
 model output should be truncated to 7 or to 16.
 
-Before presets, `Pi05Policy` defaulted `image_keys` to LIBERO's two, so that
-contract applied to *every* checkpoint. A G1 checkpoint served with no extra
-arguments ran LIBERO's keys, dropped state, and skipped the G1 delta→absolute and
-32→16 steps. Nothing failed. Nothing logged. It looked exactly like a "model
-accuracy problem."
-
-The model layer now names no wire keys at all — construct a policy without them
-and it falls back to its own view slots, which no client sends, so a mismatch is
-a `KeyError` naming both sides. The embodiment is a named, explicit launch flag
-on both sides — the same shape OpenPI uses, so the two line up one-to-one:
+The model layer does not define dataset wire keys. A robot preset selects the
+wire keys, state routing, action width, and robot processing steps as one
+deployable contract:
 
 ```
 openpi:  serve_policy.py --policy.config pi05_UnitreeG1_groundwire
 apxinf:  pi05_openpi_websocket_server.py --robot unitree_g1
 ```
 
-## Three namespaces, kept separate
-
-Most confusion in this area comes from collapsing these. They are different
-things and they never need to be equal.
+## Contract namespaces
 
 | | what it is | where it lives | on the wire? |
 |---|---|---|---|
@@ -50,12 +38,10 @@ in the wrong order still stacks, still has the right shape, and silently feeds
 the wrong camera to each slot — pairing every key with its slot makes that
 reviewable instead of positional.
 
-The slot names live in `policies/base.py`, not in the preset table: they are
-*model* vocabulary, so the robot layer reads them rather than restating them. The
-policy layer holds **no** wire keys at all. Construct a policy without naming
-cameras and it names them after its own view slots — a client sending
-`observation/image` then gets a `KeyError` naming both sides, instead of the old
-behaviour where LIBERO's two keys were the built-in default for every checkpoint.
+View slots are model vocabulary defined in `policies/base.py`. Dataset wire keys
+are defined by conventions. A policy without explicit camera keys uses its view
+slot names, and a request with different keys raises a `KeyError` that reports
+the expected and received contracts.
 
 ## Launching a server for an existing embodiment
 
@@ -127,8 +113,7 @@ Nested layouts are written as a slash path: `--image-keys
 'images/cam_high,images/cam_left_wrist'`. `--discrete-state` /
 `--no-discrete-state` and `--action-dim` override the remaining fields.
 
-If you find yourself passing the same overrides twice, that is the signal to add
-a preset.
+Register a preset for a contract used by multiple deployments.
 
 ### Serving fewer cameras than the checkpoint declares
 
@@ -145,15 +130,13 @@ masked tokens consume no RoPE position (`positions = cumsum(input_mask) - 1`),
 are excluded from attention (`valid_mask = mask[:, None, :] * mask[:, :, None]`),
 and `embed_prefix` runs the same `PaliGemma.img` encoder per view with no
 per-slot learned embedding. `num_views` only sizes the prefix; nothing
-weight-shaped depends on it. The difference is that we skip the ~256 patch tokens
-per absent view instead of computing and discarding them (measured 1.38× on a
+weight-shaped depends on it. ApxInf skips the ~256 patch tokens
+per absent view (measured 1.38× on a
 2-view LIBERO checkpoint served with one camera, on Orin).
 
-**`--num-views` is deliberately required to be explicit.** A short `--image-keys`
-list on its own is an error, not an inference. Forgetting a camera key should
-fail at startup, not quietly cost accuracy — which is the exact failure mode this
-whole mechanism exists to prevent. It is a server-side launch flag, not part of
-the wire protocol, so an unmodified openpi client is unaffected.
+`--num-views` must be specified when loading fewer views. A shorter
+`--image-keys` list alone is invalid. This is a server-side loading option and
+does not change the OpenPI wire protocol.
 
 ## Adding a new embodiment
 
@@ -181,8 +164,7 @@ Facts 1–5 are just a table row. Facts 6–7 are the only ones that need code.
 | needs a fixed truncation only | a preset row with `action_dim=N` |
 | emits deltas, or needs a sign/gripper convention | processing steps + an adapter (Steps 2–3) |
 
-Take the cheap path when it is available. `franka_libero` is a table row and
-nothing else.
+`franka_libero` requires only a preset row.
 
 ### Step 2 — robot processing steps
 
@@ -221,9 +203,7 @@ through `AutoPolicy` — so `config.json` decides which model it is, not this fi
 from ..policies.auto import AutoPolicy
 from ..policies.base import ComposablePolicy, Policy
 
-# state_key / image_keys are required and have no defaults — they belong to the
-# dataset (Step 4), not to this body. A default here would mean the same arm,
-# re-recorded under new keys, silently keeps serving the old ones.
+# state_key and image_keys come from the selected convention.
 def build_<robot>_policy(model_dir, *, state_key, image_keys, **load_kwargs):
     base = AutoPolicy.from_pretrained(
         model_dir,
@@ -243,17 +223,11 @@ def build_<robot>_policy(model_dir, *, state_key, image_keys, **load_kwargs):
     )
 ```
 
-The adapter names **no model class and no step inside the model's chain**. That
-is deliberate: a robot's requirement is an *ordering* — its steps run outside the
-model's, in both directions — not a claim about what those steps are called.
-`Pipeline.prepend`/`append` are the only editing verbs that express ordering
-without a name, and `with_adapter`
-([`ComposablePolicy`](../python/apxinf/apxinf/policies/base.py)) is how a policy
-exposes them. Reaching for `insert_before("tokenize", ...)` instead would make
-your robot depend on one model's private vocabulary, and on that model class by
-import.
+The adapter depends on the `ComposablePolicy` interface, not on a concrete model
+class or the names of model-specific processing steps. `with_adapter` prepends
+robot input steps and appends robot output steps around the model pipeline.
 
-Two orderings matter and are easy to get wrong:
+The adapter preserves these orderings:
 
 * the decode-state step goes **before** the model's whole input chain, so
   discretized state (when on) and the delta→absolute output step both see the
@@ -268,17 +242,12 @@ width instead of advertising one nothing emits.
 
 ### Step 4 — register the preset
 
-Two entries: a `Convention` in `python/apxinf/apxinf/conventions.py` and a body +
-pairing in `python/apxinf/apxinf/robots/presets.py`. That is the whole
-registration step — OpenPI's `training/config.py` equivalent.
+Register a `Convention` in `python/apxinf/apxinf/conventions.py` and an
+embodiment/preset pairing in `python/apxinf/apxinf/robots/presets.py`.
 
-A preset is two halves, because the arm and the key convention vary
-independently. An `Embodiment` is the **body**: camera count, deployable action
-width, which pre/post steps its actions need. It survives a change of dataset. A
-`Convention` is a **dataset's recording dialect**: the wire keys and the state
-routing that follows from how the data was recorded. It survives a change of
-robot, which is why it lives in its own module and not under `robots/` — a
-dialect that lived in one robot's file could only ever be that robot's.
+A preset pairs an `Embodiment` with a `Convention`. The embodiment defines the
+robot's camera count, action widths, and processing builder. The convention
+defines dataset wire keys and state routing.
 
 ```python
 # apxinf/conventions.py — the dialect, independent of any arm
@@ -310,21 +279,17 @@ MY_ROBOT = RobotPreset(
 ROBOT_PRESETS = {p.name: p for p in (FRANKA_LIBERO, UNITREE_G1, MY_ROBOT)}
 ```
 
-Serving the same arm under a second dataset's keys is then one more `Convention`
-and one more pairing — no builder edit, no duplicated action width.
+To serve the same embodiment with another supported dataset contract, register
+another convention and preset pairing.
 
-If your robot lives in **your own package**, do not patch either file. Call
+For a robot defined in another package, call
 `register_convention(...)` and `register_robot_preset(..., aliases=(...))` at
 your module scope; importing that module before the server starts is enough to
 make it `--robot <name>`. Re-registering an existing name needs an explicit
 `replace=True`, and an alias may never shadow a canonical preset name — a silent
 overwrite would change what a launch command already in production resolves to.
 
-Only the *pairing* is deployable, so `--robot` stays a single flag over
-`ROBOT_PRESETS` rather than becoming `--robot` + `--convention`. Separate flags
-would let an operator spell a combination nobody ever recorded, and a body served
-under a convention it was not recorded on is exactly the silent mismatch this
-mechanism exists to prevent.
+Only registered preset pairings are deployable through `--robot`.
 
 Validation runs when the module loads. `Convention.__post_init__` rejects
 duplicate wire keys and more keys than there are view slots;
@@ -334,28 +299,16 @@ with the body's. Slot names are *derived* from `image_keys` in order, so "base +
 right wrist" is not expressible at all — a checkpoint fills view slots from 0 up,
 and the only way to spell "wrist camera only" is to put it in slot 0.
 
-**Fill in `state_dim` and `action_width`.** They are the only thing that lets
-the startup preflight (Step 6) tell your robot's `norm_stats.json` from some
-other robot's — leave them `None` and that check silently does nothing. They are
-two fields rather than one because a robot's state and action spaces need not
-match: LIBERO is 8-dim state / 7-dim EEF-delta action. `action_width` exists
-separately from `action_dim` because the two answer different questions —
-`action_dim` is a *loading* knob ("trim the model down to this"), `action_width`
-is a fact about the body ("this is how many columns its actions have"). A preset
-whose encode step owns the 32→N truncation sets `action_dim=None`, and `None` is
-not a width: G1 declares `action_dim=None, action_width=16`.
+Set `state_dim` and `action_width` so preflight can validate normalization
+metadata. `action_dim` controls model-output trimming during loading;
+`action_width` records the robot action width. If a robot output step performs
+the truncation, set `action_dim=None` and declare the result in `action_width`.
 
-**Set `norm_dtype="float64"` in `builder_kwargs` if the checkpoint came from
-openpi.** openpi parses `norm_stats.json` into float64 and never demotes it, so
-its whole chain runs in float64 whatever dtype the robot sends. Ours follows the
-input. The difference is ~1e-7 and invisible on the output side, but a robot that
-discretizes state into its prompt compares the normalized value against bin edges
-1/128 apart, and an element near an edge crosses it — different prompt, different
-tokens, different rollout. It is a per-body flag rather than a global default so
-that presets nobody has re-benchmarked keep their existing numbers exactly.
+Set `norm_dtype="float64"` in `builder_kwargs` when matching an OpenPI
+checkpoint's normalization and state-discretization numerics. Otherwise the
+normalizers follow the input dtype.
 
-Add an entry to `ROBOT_ALIASES` if a deployment already says something else in
-its launch scripts; a rename should not break a running system.
+Add an entry to `ROBOT_ALIASES` for supported alternate launch names.
 
 ### Naming: `<arm>_<key convention>`
 
@@ -366,10 +319,6 @@ a preset is named for the arm **and** the dataset convention whose keys it
 implements: `franka_libero`, not `libero` (a benchmark, not a robot) and not
 `franka` (ambiguous). A single-embodiment robot that owns its convention needs no
 suffix — `unitree_g1`.
-
-The `Embodiment`/`Convention` split is that naming rule made structural: the two
-halves of the name are the two halves of the preset, and `franka_droid` would
-reuse `FRANKA` rather than restating its width and builder.
 
 ### Step 5 — tests
 
@@ -396,11 +345,7 @@ python3 tests/test_robot_presets.py          # no GPU needed
 
 ### Step 6 — check the preflight refuses the wrong checkpoint
 
-A preset and a checkpoint directory are two independent claims about the same
-robot, and until the preflight existed nothing compared them. `--robot myarm`
-pointed at another robot's checkpoint loads, serves, and returns well-shaped
-actions in a plausible numeric range that mean nothing; the only symptom is that
-the model "got worse". Run it against your checkpoint before you serve it:
+Run preflight before serving a checkpoint:
 
 ```bash
 python3 scripts/openpi_metadata_to_apxinf.py --model-dir "$CKPT" --robot <preset>
@@ -416,10 +361,8 @@ can gate a deployment. The same directory checks run inside
 start; `--skip-preflight` overrides that, and exists only to reproduce a
 known-bad configuration deliberately.
 
-Add cases to `tests/test_preflight.py` if your robot has a width rule the generic
-checks miss. The check that matters most is the boring one: a *correct*
-checkpoint must produce zero fatal findings, or operators will learn to pass
-`--skip-preflight` by reflex.
+Add cases to `tests/test_preflight.py` for embodiment-specific width rules. A
+valid checkpoint and preset pairing must produce no fatal findings.
 
 ## Verification recipe
 
@@ -459,7 +402,7 @@ That is all it serves: the actions are numerically meaningless, and the preset's
 skipped factory and the action width that came out of the model instead of out of
 the encode step.
 
-## Gotchas we hit
+## Operational constraints
 
 1. **`discrete_state=False` drops state; it does not pass it through raw.**
    There is no third state. A joint-space robot served with `discrete_state=False`

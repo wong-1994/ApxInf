@@ -1,4 +1,4 @@
-"""Unitree G1 adapter: wrap the G1 steps around whatever policy the checkpoint is.
+"""Unitree G1 policy adapter.
 
 This module is the *robot* half of the robot/model split. It knows the G1 body —
 16 DoF laid out ``[L-arm 7, L-gripper 1, R-arm 7, R-gripper 1]``, three cameras,
@@ -8,23 +8,16 @@ no model class, no step inside the model's chain, and no checkpoint layout:
 holds, and :meth:`~apxinf.policies.base.ComposablePolicy.with_adapter` wraps the
 G1 steps around that policy's own pre/post chain.
 
-It knows nothing about the *dataset* either: the wire keys arrive as required
-arguments from a :class:`~apxinf.conventions.Convention`, so the same body serves
-a re-recorded G1 without an edit here.
+Wire keys are supplied by a :class:`~apxinf.conventions.Convention`.
 
 The nesting is the entire coupling, and it is an ordering rule, not a naming one:
 
     decode G1 state  ->  [ whatever the model does ]  ->  delta->absolute -> 32->16
 
-which is openpi's ``data_transforms`` sitting outside its ``model_transforms``.
-Everything else — how the model tokenizes, whether it discretizes state, what its
-steps are called — stays the model's business, so a G1 checkpoint of a different
-architecture serves through this same adapter unchanged.
+The model policy owns tokenization, state encoding, and model-specific steps.
 
-Only the primary serving path (3 cameras, ``adapt_to_pi=True``, no fixed-hand
-override) is wired — that is what the shipped ``pi05_UnitreeG1_groundwire`` config
-uses; the integrator's ``_NoLeftCam`` / ``fixed_hand`` variants are training-data
-cleaning knobs, not serving paths, so they are intentionally omitted.
+The adapter supports the three-camera serving path with optional
+``adapt_to_pi`` and delta-to-absolute processing.
 
 .. note::
    With a stand-in checkpoint (no real G1 weights / norm_stats) this adapter
@@ -122,8 +115,7 @@ def build_unitree_g1_policy(
         raise TypeError(
             f"the Unitree G1 adapter has to run its steps around the model's, which "
             f"{type(base).__name__} (loaded from {model_dir}) does not allow: it has no "
-            "with_adapter(). Give that policy class a ComposablePolicy.with_adapter "
-            "rather than teaching this adapter about its internals."
+            "with_adapter(). The loaded policy must implement ComposablePolicy."
         )
 
     before: List[StepSpec] = []

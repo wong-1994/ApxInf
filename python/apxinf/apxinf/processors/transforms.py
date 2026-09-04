@@ -175,15 +175,12 @@ class ImageStack(ProcessorStep):
 class Tokenize(ProcessorStep):
     """Tokenize the prompt (optionally injecting discretized state) into ``token_ids``.
 
-    Mirrors the policy's old state routing: when the tokenizer runs in
-    ``discrete_state`` mode and a ``state_normalizer`` is set, the raw state is
+    When the tokenizer runs in ``discrete_state`` mode and a
+    ``state_normalizer`` is set, the raw state is
     first mapped to ``[-1, 1]`` before discretization; otherwise state is dropped.
 
-    ``state_key`` has no default. It names a *dataset's* wire key, and this layer
-    has no business guessing one: ``"observation/state"`` used to be the default,
-    which is LIBERO's dialect quietly applied to every robot. ``None`` is allowed
-    only when the tokenizer does not read state at all, and is rejected when it
-    does — dropping proprioception silently is the failure this guards.
+    ``state_key`` has no default because it names a dataset wire key. ``None`` is
+    allowed only when the tokenizer does not read state.
     """
 
     def __init__(

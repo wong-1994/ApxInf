@@ -1,31 +1,12 @@
-"""Startup checks: does this checkpoint actually match the preset serving it?
+"""Validate a checkpoint directory against its serving preset.
 
-A checkpoint directory and a ``--robot`` preset are two independent claims about
-the same robot, and nothing forces them to agree. Serve a Unitree G1 checkpoint
-with a LIBERO ``norm_stats.json`` and ``--action-dim 7`` and every layer accepts
-it: the weights load, the tokenizer runs, the unnormalizer finds ``q01``/``q99``
-of *some* width, the server publishes an action shape, and the robot receives 7
-plausible-looking floats per step that mean nothing. The only visible symptom is
-that the model "got worse" — which reads as a model problem, gets escalated as a
-model problem, and is not one.
+The checks cover checkpoint layout, normalization-stat paths and widths, and the
+tokenizer without loading weights or importing torch/CUDA. The offline metadata
+inspector adds OpenPI wire-key and action-convention checks.
 
-That exact combination shipped. This module is the check that would have refused
-it, phrased as a list of :class:`Finding` s rather than an exception, so a caller
-can report all of them at once instead of fixing them one crash at a time.
-
-**What is checked here** is what can be read from the checkpoint *directory* with
-the standard library: which layout it is, where its ``norm_stats.json`` actually
-lives, that file's widths and keys, and the tokenizer. Nothing loads a weight and
-nothing imports torch or the CUDA binding, so these checks run before the
-expensive part of startup — and on a laptop. The richer cross-check against the
-preset's own wire keys and delta convention lives in
-``scripts/openpi_metadata_to_apxinf.py``, which calls this module and adds to it.
-
-**What is deliberately not checked here** is anything already enforced elsewhere:
-``len(image_keys) == model.num_views`` raises inside
-:class:`~apxinf.policies.impls.pi05.Pi05Policy`, and the unnormalizer's own width
-rules live in :mod:`apxinf.processors.normalize`. Duplicating them would mean two
-places to keep in step.
+Model view-count validation remains in
+:class:`~apxinf.policies.impls.pi05.Pi05Policy`; normalization value validation
+remains in :mod:`apxinf.processors.normalize`.
 """
 
 from __future__ import annotations
@@ -116,12 +97,9 @@ def _check_norm_stats(
 ) -> List[Finding]:
     """Are the shipped statistics this robot's statistics?
 
-    ``layout`` supplies the resolved path. An openpi export keeps its statistics
-    under ``assets/<asset_id>/``, so reading ``<model_dir>/norm_stats.json``
-    unconditionally is how the wrong file got checked *and* served: whatever a
-    previous run happened to leave in the root. With no layout — a flat directory
-    that declares nothing — ``norm_stats`` still names the file directly, which
-    is what :meth:`Pi05Policy.from_pretrained` does in the same situation.
+    ``layout`` supplies the authoritative resolved path. For a flat directory
+    without layout metadata, ``norm_stats`` names the file directly, matching
+    :meth:`Pi05Policy.from_pretrained`.
     """
     findings: List[Finding] = []
     if layout is not None and layout.normalization is not None:
@@ -389,10 +367,8 @@ def check_checkpoint(
     actually run. Returns findings sorted most-severe first; an empty tuple is
     impossible because passing checks are reported as :data:`INFO`.
 
-    ``checkpoint_format`` / ``asset_id`` / ``norm_stats`` are the same knobs
-    :meth:`~apxinf.policies.impls.pi05.Pi05Policy.from_pretrained` takes, and must
-    be passed through identically — this is a preflight for *that* load, so
-    checking a different file than the one that will be served defeats the point.
+    ``checkpoint_format`` / ``asset_id`` / ``norm_stats`` must match the values
+    passed to :meth:`~apxinf.policies.impls.pi05.Pi05Policy.from_pretrained`.
     """
     model_dir = Path(model_dir)
     preset = get_robot_preset(robot)

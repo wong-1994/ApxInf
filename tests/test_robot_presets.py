@@ -184,9 +184,7 @@ class RobotPresetTest(unittest.TestCase):
         self.assertIsNone(preset.action_dim)
 
     def test_slots_are_derived_in_view_slot_order(self) -> None:
-        # A checkpoint fills view slots from 0 up, so "base + right wrist" is not
-        # expressible. The old table let you *write* the pairs and validated the
-        # order; deriving them removes the failure mode instead of checking it.
+        # A checkpoint fills view slots from 0 upward.
         convention = Convention(
             name="two_cam", image_keys=("a", "b"), state_key="state"
         )
@@ -385,13 +383,7 @@ class _Tag(ProcessorStep):
 
 
 class PipelineCompositionTest(unittest.TestCase):
-    """``prepend``/``append``: the only editing verbs that name no inner step.
-
-    Every other verb (``insert_before``, ``replace``, ...) needs a step name, so
-    an *outer* layer using them has to know the inner chain's private vocabulary.
-    A robot adapter's requirement is only "run outside the model's steps", and
-    these two say exactly that.
-    """
+    """``prepend`` and ``append`` wrap a pipeline without inner step names."""
 
     def _chain(self) -> Pipeline:
         return Pipeline([("a", _Tag("a")), ("b", _Tag("b"))])
@@ -685,21 +677,13 @@ class UnitreeG1AdapterTest(unittest.TestCase):
         self.assertIn("with_adapter", message)
 
     def test_the_adapter_names_no_model_class(self) -> None:
-        # The whole point of the split: this module knows a body, not a model.
-        # A concrete policy reappearing here is the regression to catch.
+        # Robot adapters depend on the composable policy interface.
         source = pathlib.Path(robot_adapter.__file__).read_text()
         self.assertNotIn("Pi05Policy", source)
 
 
 class ModelLayerHoldsNoWireKeysTest(unittest.TestCase):
-    """The policy layer must not carry any dataset's wire contract.
-
-    ``Pi05Policy`` used to default ``image_keys`` to LIBERO's
-    ``observation/image`` / ``observation/wrist_image``. As *the* default those
-    two keys silently applied to every checkpoint, so a G1 checkpoint served bare
-    ran LIBERO's contract and looked like an accuracy problem. The fallback is
-    now the model's own view slots, which cannot masquerade as anyone's keys.
-    """
+    """The policy layer must not carry a dataset wire contract."""
 
     def _policy(self, num_views: int) -> Pi05Policy:
         model = MockModel(num_views=num_views)
@@ -732,8 +716,7 @@ class ModelLayerHoldsNoWireKeysTest(unittest.TestCase):
             self.assertNotIn(key, policy.image_keys)
 
     def test_a_libero_client_against_the_fallback_fails_loudly(self) -> None:
-        # The point of dropping the default: a mismatch is an error naming both
-        # sides, not a silent run on the wrong cameras.
+        # A mismatch reports both the expected and received camera contracts.
         policy = self._policy(2)
         observation = {
             "observation/image": np.zeros((IMAGE_SIZE, IMAGE_SIZE, 3), np.uint8),
@@ -967,13 +950,7 @@ class ImageSlotOrderTest(unittest.TestCase):
 
 
 class ConventionsAreTheirOwnLayerTest(unittest.TestCase):
-    """A recording dialect is not a robot's property, so it has its own module.
-
-    The G1's wire keys used to live in ``processors/robots/unitree_g1.py`` — a
-    *dataset* fact defined inside a *body*'s processing steps, so re-recording the
-    same robot meant editing its steps. They now live in :mod:`apxinf.conventions`,
-    which depends on neither a body nor a policy implementation.
-    """
+    """Recording conventions are independent of robot and policy modules."""
 
     def test_the_shipped_conventions_are_registered_under_their_names(self) -> None:
         self.assertIs(get_convention("libero"), LIBERO_CONVENTION)
@@ -1116,20 +1093,10 @@ class RegistrationFromOutsideTest(unittest.TestCase):
 
 
 class StateKeyIsRequiredWhenItIsReadTest(unittest.TestCase):
-    """``state_key`` has no default, and is demanded exactly when state is read.
-
-    The model layer used to default it to LIBERO's ``observation/state``, the same
-    dataset-in-the-model coupling the camera keys had. Dropping the default leaves
-    an asymmetry with ``image_keys``: a wrong camera key raises ``KeyError`` on the
-    first inference, but a missing state key is silent — the tokenizer just
-    injects nothing and the policy publishes ``state_key=null`` while proprioception
-    quietly disappears. So it is required whenever the chain discretizes state, and
-    allowed to stay ``None`` only when state is deliberately dropped.
-    """
+    """``state_key`` is required exactly when the pipeline reads state."""
 
     def test_the_model_layer_defaults_no_state_key(self) -> None:
-        # Asserted on the signatures, not by grepping the source, so the prose
-        # explaining the old LIBERO default does not trip the check.
+        # Assert the public signatures directly.
         for func in (
             pi05_module.Pi05Policy.__init__,
             pi05_module.Pi05Policy.default_pipelines,

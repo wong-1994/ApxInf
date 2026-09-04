@@ -67,8 +67,8 @@ python scripts/pi05_openpi_websocket_server.py \
   absent view and masks it; a masked view is excluded from attention, occupies no
   RoPE position, and the vision tower has no per-slot parameters) while skipping
   that view's 256 patch tokens every step. It must equal the number of image
-  keys, and it is deliberately required rather than inferred, so a *forgotten*
-  camera key is an error instead of a quiet accuracy loss.
+  keys. The explicit value prevents a missing camera key from silently reducing
+  the loaded view count.
 - `--host 0.0.0.0` accepts remote clients (split deployment); `127.0.0.1` for a
   local-only test.
 - Health check: `curl http://<host>:8000/healthz` → `OK`.
@@ -253,18 +253,10 @@ Default pi05 pipelines: input `[image_stack, tokenize]`, output
 passes it explicitly; a custom host sampler can still be inserted as a pipeline
 step.
 
-`Pipeline` has two families of editing verbs, and picking the wrong one is what
-couples a robot to a model. `insert_before/insert_after/replace/override/remove/
-reorder` address a step **by name**, so they are for a caller who owns that
-chain. A robot adapter does not: its requirement is only "run outside the model's
-steps, in both directions". That is `prepend`/`append`, the two verbs that name
-nothing inside — and a policy exposes them as
-[`ComposablePolicy.with_adapter`](../policies/base.py). Every verb returns a new
-pipeline; none mutate.
-
-So the factory does two things: load full-width through `AutoPolicy`, then wrap.
-It names no model class, so a G1 checkpoint of a different architecture serves
-through the same file unchanged:
+Robot adapters use
+[`ComposablePolicy.with_adapter`](../policies/base.py) to prepend input steps
+and append output steps without depending on model-specific step names. The
+factory loads the full-width policy through `AutoPolicy` and wraps it:
 
 ```python
 from ..policies.auto import AutoPolicy
@@ -273,11 +265,7 @@ from ..processors.robots.my_robot import (
     MyRobotDecodeState, MyRobotAbsoluteActions, MyRobotEncodeActions, ROBOT_DIM,
 )
 
-# state_key / image_keys are **required and have no defaults**: they are a
-# recording convention, not a fact about this body. Defaulting them here would
-# rebuild the robot<->dataset coupling one layer up — the same arm re-recorded
-# under new keys would silently keep serving the old ones. They come from a
-# `Convention` (§5.6), which `build_robot_policy` reads off the preset for you.
+# state_key and image_keys come from the selected Convention (§5.6).
 def build_my_robot_policy(model_dir, *, state_key, image_keys,
                           use_delta_joint_actions=True, adapt_to_pi=True, **kw):
     base = AutoPolicy.from_pretrained(
@@ -300,8 +288,7 @@ def build_my_robot_policy(model_dir, *, state_key, image_keys,
     return base.with_adapter(
         before=before,
         after=after,
-        # Only the width a step you appended actually produces. Without `encode`
-        # there is nothing to claim: inherit the model's own width (None).
+        # Report the width produced by the appended encode step.
         action_dim=ROBOT_DIM if adapt_to_pi else None,
         metadata={"robot": "my_robot"},
     )
@@ -359,18 +346,12 @@ MY_ROBOT = RobotPreset(
 ROBOT_PRESETS = {p.name: p for p in (FRANKA_LIBERO, UNITREE_G1, MY_ROBOT)}
 ```
 
-The two halves are separate because they vary independently: the same arm
-recorded under a second key convention is a new `Convention`, not a new body, and
-re-recording changes no `Embodiment` field. That is also why they live in
-different modules — a `Convention` goes in
-[`apxinf/conventions.py`](../conventions.py), which imports no body and no policy
-implementation, so a dialect is never anyone's property. Only the *pairing* is
-deployable, and `--robot` stays one flag over the pairings — separate
-`--robot`/`--convention` flags would let an operator spell a combination nobody
-ever recorded, which is the silent mismatch the flag exists to prevent.
+An `Embodiment` defines the robot body and processing requirements. A
+`Convention` defines dataset wire keys and state routing. `RobotPreset` registers
+a supported pairing, which is selected with `--robot`.
 
-**From outside this repository.** A robot that lives in your own package does not
-have to patch either file. Importing your module is enough:
+For a robot implemented in another package, register the convention and preset
+when that package is imported:
 
 ```python
 from apxinf import Convention, Embodiment, RobotPreset
@@ -383,19 +364,14 @@ MY_ROBOT = register_robot_preset(
 )
 ```
 
-Re-registering a name needs an explicit `replace=True`, and an alias may never
-shadow a canonical preset name: a silent overwrite would change what a launch
-command already in production resolves to. Registration is process-local, so
-`--robot` only sees presets whose module the server imported.
+Re-registering a name requires `replace=True`; aliases cannot shadow canonical
+preset names. Registration is process-local, so `--robot` sees presets from
+modules imported by the server process.
 
 `image_keys` is order-significant: entry *i* becomes model view slot *i*
-(`base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb`), and a wrong order still
-stacks, still has the right shape, and silently feeds the wrong camera to each
-slot. `preset.slots` renders the pairing for logs and review; because the slot
-names are *derived* from the list rather than written by hand, a wrong slot order
-is not expressible at all. What is still checked: no duplicate wire keys, no more
-keys than there are view slots, and — on the pairing — the convention's camera
-count against the body's.
+(`base_0_rgb, left_wrist_0_rgb, right_wrist_0_rgb`). `preset.slots` renders this
+pairing for logs. Registration validates duplicate keys, view-count limits, and
+agreement between the convention and embodiment camera counts.
 
 Wire keys may be written **flat** (`"observation/image"` — the slash is part of
 the name, as LIBERO and DROID send it) or as a **nested path**

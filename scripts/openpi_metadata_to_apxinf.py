@@ -14,14 +14,6 @@ apxinf launch command it implies, and diffs every field against the preset the
 operator named. Then it runs the checkpoint-directory checks from
 :mod:`apxinf.robots.preflight` (norm_stats widths, tokenizer) on top.
 
-Why this exists: the delivered configuration was a Unitree G1 checkpoint served
-with LIBERO norm_stats and ``--action-dim 7``. Nothing errored. The weights
-loaded, the tokenizer ran, the unnormalizer found quantiles of *some* width, and
-the robot got seven plausible floats per step that meant nothing. Every one of
-those facts contradicts ``metadata.pt``, which says 16-dim G1, three cameras,
-delta joint actions, discretized state. This script prints that contradiction in
-one screen.
-
 It does *not* generate a config file. apxinf's counterpart to ``TrainConfig`` is
 ``robots/presets.py`` plus a builder — code, reviewed once, not generated per
 checkpoint. The value here is the assertion, not the transcription.

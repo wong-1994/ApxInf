@@ -277,11 +277,8 @@ impl Model {
     ///   for a checkpoint that has no `config.json`. An openpi PyTorch export
     ///   never carries one: its constants live in `metadata.pt`, which the
     ///   Python side reads (`apxinf.checkpoints`) and passes through here.
-    ///   Without it such a checkpoint silently loaded at `Pi05Config::default()`,
-    ///   so a chunk length or view count that differed from the default was
-    ///   wrong with no error anywhere. `None` keeps the old behaviour: read
-    ///   `config.json` from the checkpoint directory, else fall back to the
-    ///   default.
+    ///   `None` reads `config.json` from the checkpoint directory and falls back
+    ///   to `Pi05Config::default()` when the file is absent.
     /// * `action_horizon` — override the checkpoint's chunk length. `None`
     ///   (default) runs the native `config.json` value; an explicit value wins
     ///   over it. The horizon is a sequence length, not a weight dimension, so

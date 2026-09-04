@@ -7,8 +7,7 @@ points other layers code against:
 * :class:`BareModel` — the model-side contract (L1 bare inference) a policy
   consumes, i.e. the subset of a ``apxinf_py.Model`` handle it relies on.
 * :class:`Policy` — the L2 contract (``obs dict -> result dict``) every
-  model-specific policy satisfies (``Pi05Policy`` today; e.g. a future
-  ``GrootPolicy``). Downstream consumers (the websocket server, the
+  model-specific policy satisfies. Downstream consumers (the websocket server, the
   :class:`~apxinf.policies.auto.AutoPolicy` registry, a lerobot adaptor) code
   against this, never a concrete class.
 * :class:`ComposablePolicy` — the narrow extra capability a policy needs before
@@ -17,11 +16,6 @@ points other layers code against:
 * :data:`VIEW_SLOTS` — the camera slot names a checkpoint's weights consume, in
   order. Model vocabulary, kept here so a policy and a robot preset can both
   name a slot without importing each other.
-
-It exists to pin these contracts *now*, before a second model lands, so the
-layout is set for whoever adds one. They intentionally stay tiny: extract richer
-shared structure when a second model actually teaches us what is common, not by
-guessing from one example.
 
 The ``Policy.infer`` result is a plain dict. Two keys are guaranteed across all
 policies: ``actions`` (deployable, unnormalized-domain ``float32``
@@ -115,28 +109,7 @@ class Policy(Protocol):
 
 @runtime_checkable
 class ComposablePolicy(Protocol):
-    """A :class:`Policy` an outer layer can wrap without knowing its internals.
-
-    This is the seam between the **robot** layer and the **model** layer. A robot
-    adapter (``apxinf.robots.unitree_g1``) has to run its own steps around the
-    model's — decode the wire state before anything model-specific reads it, turn
-    the model's delta actions into absolute joint targets after unnormalization.
-    That is an *ordering* requirement and nothing more: outside, in both
-    directions, exactly the way openpi's ``data_transforms`` sit outside its
-    ``model_transforms``.
-
-    Without this method the only way to express it is to reach into the concrete
-    policy — import ``Pi05Policy``, address its steps by name
-    (``insert_before("tokenize", ...)``), and rebuild it. That makes every robot
-    adapter depend on one model class and on that class's private step names.
-    :meth:`with_adapter` states the ordering instead, so the robot layer imports
-    no model and the model layer knows about no robot.
-
-    Only this one method is promoted, and only because real code calls it. The
-    rest of the composition surface (``input_pipeline``, ``output_pipeline``,
-    ``model``) stays private to the concrete class until a second model shows
-    what is genuinely shared.
-    """
+    """A :class:`Policy` that accepts outer input and output processing steps."""
 
     def with_adapter(
         self,

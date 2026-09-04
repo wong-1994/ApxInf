@@ -375,12 +375,7 @@ class ReportTest(unittest.TestCase):
 
 
 class CheckpointLayoutTest(unittest.TestCase):
-    """An openpi export keeps its statistics under ``assets/<asset_id>/``.
-
-    Reading ``<model_dir>/norm_stats.json`` unconditionally is how a file left
-    behind by an unrelated run got both checked and served. These pin that the
-    preflight now checks the file the loader will actually open.
-    """
+    """OpenPI statistics are resolved from ``assets/<asset_id>/``."""
 
     def test_the_asset_path_is_checked_not_the_root_file(self) -> None:
         # The failure shape: correct statistics where openpi puts them, a

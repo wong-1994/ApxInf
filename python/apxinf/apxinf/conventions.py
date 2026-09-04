@@ -1,18 +1,8 @@
-"""Recording conventions: what a dataset's client calls things on the wire.
+"""Dataset recording conventions used on the inference wire.
 
-The third axis of the robot / dataset / model split, and the one that had no
-home. A **convention** is a dialect: the camera wire keys in model view-slot
-order, the state key, the prompt key, and whether state was recorded into the
-prompt. It is a property of *how data was recorded*, not of the arm that
-recorded it and not of the weights that consume it.
-
-Keeping it here rather than in :mod:`apxinf.robots` is the point. LIBERO's keys
-describe a Franka today and would describe any arm recorded the same way; the
-same Franka under DROID's keys is a second convention, not a second body. A
-convention that lived in a robot's module could only ever be that robot's, and
-the G1's keys used to live in ``processors/robots/unitree_g1.py`` — a *dataset*
-fact defined inside a *body*'s processing steps, which is exactly the coupling
-this module removes.
+A :class:`Convention` defines camera keys in model view-slot order, the state
+key, the prompt key, and whether state is encoded into the prompt. Conventions
+are independent of robot bodies and model implementations.
 
 What a convention may depend on:
 
@@ -20,8 +10,7 @@ What a convention may depend on:
   which slot each camera key fills. That is a one-way read of a naming table; no
   policy class is imported and no model is loaded.
 
-What it must not depend on: any robot body (an action width, a camera count, a
-builder) and any policy implementation. Nothing in this module imports either.
+This module does not depend on robot bodies or policy implementations.
 
 A convention alone is not deployable — pairing it with an
 :class:`~apxinf.robots.presets.Embodiment` is, and

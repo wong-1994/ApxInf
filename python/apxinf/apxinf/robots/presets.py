@@ -1,27 +1,16 @@
-"""Robot presets: the wire contract of one embodiment, as a named table entry.
+"""Named robot presets for deployable inference contracts.
 
 OpenPI keeps this information in a Python registry of ``TrainConfig``s: which
 ``DataTransformFn`` pair runs, and therefore which **wire keys** the client must
 send. ``serve_policy.py --policy.config pi05_UnitreeG1_...`` selects an entry;
 the client cannot negotiate it and must match by hand.
 
-This module is the same idea with the same shape, so switching embodiments is a
-launch flag on both sides rather than a code edit on ours:
+The matching ApxInf preset is selected with ``--robot``:
 
     openpi:  serve_policy.py --policy.config pi05_UnitreeG1_groundwire
     apxinf:  pi05_openpi_websocket_server.py --robot unitree_g1
 
-**Why a table and not a default.** ``Pi05Policy`` used to default ``image_keys``
-to ``("observation/image", "observation/wrist_image")`` — LIBERO's wire contract,
-living in the model layer as *the* default for every checkpoint. A G1 checkpoint
-served without extra arguments therefore ran LIBERO's keys, dropped state, and
-skipped the G1 delta→absolute and 32→16 steps — every symptom of a "model
-accuracy problem" with nothing in the logs. The policy now names its cameras
-after its own :data:`~apxinf.policies.base.VIEW_SLOTS` when the caller names
-none, so no dataset's convention can pass for a model default; a preset makes the
-embodiment an explicit, named choice.
-
-**Why slot names.** ``image_keys`` is order-significant: entry ``i`` is stacked
+``image_keys`` is order-significant: entry ``i`` is stacked
 into model view slot ``i``, which the checkpoint trained as openpi's
 ``base_0_rgb`` / ``left_wrist_0_rgb`` / ``right_wrist_0_rgb``. A tuple written in
 the wrong order still stacks, still has the right shape, and silently feeds the
@@ -30,7 +19,7 @@ that order reviewable instead of positional. The slot vocabulary itself is a
 *model* fact, so it is imported from :mod:`apxinf.policies.base` rather than
 restated here.
 
-**Naming rule: ``<arm>_<convention>``.** The arm alone does not determine the
+Preset names follow ``<arm>_<convention>``. The arm alone does not determine the
 contract — LIBERO and DROID are both Franka Panda, yet LIBERO sends
 ``observation/image`` with a 7-dim EEF-delta action while DROID sends
 ``observation/exterior_image_1_left`` with a different action space. So a preset
@@ -39,24 +28,16 @@ is named for the arm *and* the dataset convention whose keys it implements:
 (ambiguous). Single-embodiment robots that own their convention need no suffix —
 ``unitree_g1``.
 
-**Two halves, one flag.** That naming rule is an admission, so the dataclasses
-follow it: an :class:`Embodiment` is the body (camera count, action width, which
+An :class:`Embodiment` is the body (camera count, action width, which
 pre/post steps its actions need) and a
 :class:`~apxinf.conventions.Convention` is a dataset's recording dialect (the
-wire keys, and whether state was recorded into the prompt). Neither knows the
-other; they vary independently, which is the point — the same Franka under
-DROID's keys is a second convention, not a second body, and re-recording the G1
-changes no :class:`Embodiment` field. Conventions live in
-:mod:`apxinf.conventions` rather than here, because a dialect is not a robot's
-property: this module imports them, never the reverse.
+wire keys, and whether state was recorded into the prompt). Conventions live in
+:mod:`apxinf.conventions` and do not depend on robot implementations.
 
 A :class:`RobotPreset` names one *pairing*, and only the pairing is deployable.
-``--robot`` stays a single flag over that registry rather than becoming
-``--robot`` + ``--convention``: separate flags would let an operator spell a
-combination nobody ever recorded, and a body served under a convention it was not
-recorded on is exactly the silent mismatch this whole mechanism exists to
-prevent. The pairing is validated when the module loads — a convention naming
-three cameras cannot be attached to a two-camera body.
+``--robot`` selects a registered pairing. The pairing is validated when the
+module loads; a convention naming three cameras cannot be attached to a
+two-camera body.
 
 **Registering from outside.** :func:`register_robot_preset` adds an entry from
 another package, so a third-party robot does not have to patch this file to
@@ -315,15 +296,8 @@ UNITREE_G1_BODY = Embodiment(
     builder_kwargs={
         "use_delta_joint_actions": True,
         "adapt_to_pi": True,
-        # openpi parses norm_stats.json into float64 and never demotes it, so its
-        # whole G1 chain — normalize state, discretize it into the prompt,
-        # unnormalize the action — runs in float64. Ours follows the input dtype
-        # (float32) unless told otherwise. The output-side gap is ~2e-7 rad and
-        # harmless, but on the input side the very next thing after normalizing
-        # is a comparison against bin edges 1/128 apart: an element sitting near
-        # an edge lands in a different bin, which changes the prompt text, the
-        # token ids, and the whole rollout. Match openpi rather than explain the
-        # divergence later.
+        # Match OpenPI's float64 normalization. State values near a discretization
+        # bin edge can otherwise produce different token ids.
         "norm_dtype": "float64",
     },
 )

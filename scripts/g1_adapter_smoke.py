@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Functional smoke test for the Unitree G1 pi05 adapter.
+"""Functional smoke test for the Unitree G1 policy adapter.
 
-Runs the integrator's ``pi05_UnitreeG1`` serving config through our interface: a
-G1-style observation (3 cameras ``cam_high`` / ``cam_left_wrist`` /
+A G1-style observation (3 cameras ``cam_high`` / ``cam_left_wrist`` /
 ``cam_right_wrist``, 16-DoF state, a prompt) is fed to a
 :func:`~apxinf.robots.build_unitree_g1_policy` policy and must come back
 as a ``[action_horizon, 16]`` action chunk — exercising every adapter step
@@ -12,7 +11,7 @@ Since we hold no G1 checkpoint/norm_stats, this validates **plumbing and shape**
 on a stand-in pi05 checkpoint: the action unnormalizer is a full-model-width
 identity, so values are not G1-calibrated (that needs the integrator's gripper
 limits + the G1 weights). It proves the config runs end-to-end through the
-interface, which is the compatibility question.
+adapter.
 """
 
 from __future__ import annotations

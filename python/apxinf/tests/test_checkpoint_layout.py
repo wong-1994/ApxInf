@@ -801,10 +801,8 @@ def test_tokenizer_error_says_where_to_get_the_file(tmp_path):
 
 # --- the wiring into Pi05Policy.from_pretrained -----------------------------
 #
-# Detection is only worth anything if what it resolves reaches the loader. An
-# openpi export has no config.json, so before this the Rust side fell back to
-# Pi05Config::default() without a word — a checkpoint with a 50-step horizon
-# would have been served at whatever the default happened to be.
+# An openpi export has no config.json, so resolved architecture values must reach
+# the Rust loader through config_json.
 
 
 class _FakeModel:

@@ -2,9 +2,8 @@
 
 External checkpoint layouts describe the same policy facts in incompatible
 ways.  Adapters translate those files into these small immutable values; policy
-construction consumes the values and never needs to know which exporter wrote
-the directory.  Values are tuples rather than numpy arrays on purpose so this
-interface can become a JSON/Rust contract without changing its meaning.
+construction consumes the values without depending on the source layout. Values
+use serialization-friendly Python types.
 """
 
 from __future__ import annotations

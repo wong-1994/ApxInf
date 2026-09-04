@@ -16,23 +16,9 @@ Five directory layouts turn up in the field and only two of them matter here:
     normalization state in separate SafeTensors sidecars. Base repositories may
     deliberately omit that state, in which case LeRobot uses identity transforms.
 
-The tensor names are **identical** between the two — 812 of them, exact set
-equality — so nothing about weight loading changes. Only the sidecar metadata
-differs, which is the entire job of this module.
-
-Why this is its own layer rather than a few lines in ``Pi05Policy.from_pretrained``:
-three callers need the same answer and only one of them may import the CUDA
-binding. :mod:`apxinf.robots.preflight` runs *before* anything heavy loads, and
-``scripts/openpi_metadata_to_apxinf.py`` runs on a laptop. Previously each of
-them hard-coded its own guess at the layout — ``norm_stats.json`` alone was
-spelled out in three places and ``metadata.pt`` was read in none of the serving
-ones.
-
-The failure this exists to prevent: a checkpoint directory that contains a
-*syntactically valid but semantically wrong* ``norm_stats.json`` loads without a
-single error and unnormalizes every action through the wrong physical range. So
-the resolver names every path it tried, logs the one it settled on, and refuses
-to guess when nothing matches.
+The tensor names are identical between the layouts; only sidecar metadata and
+asset locations differ. The resolver is shared by policy loading, preflight,
+and offline inspection, and reports every candidate path it considered.
 """
 
 from __future__ import annotations
@@ -130,8 +116,7 @@ class CheckpointLayout:
     def config_json_text(self) -> Optional[str]:
         """The ``config_json=`` string to hand ``apxinf_py.Model.load``.
 
-        ``None`` means "let the Rust loader read ``config.json`` as before",
-        which is exactly right for a LeRobot directory.
+        ``None`` lets the Rust loader read ``config.json``.
         """
         return json.dumps(dict(self.arch), sort_keys=True) if self.arch else None
 
@@ -235,12 +220,8 @@ def _resolve_norm_stats(
 def has_layout_metadata(model_dir) -> bool:
     """True when the directory declares a supported external checkpoint layout.
 
-    Callers that must keep serving the hand-assembled flat directories that
-    predate this module — including those with ApxInf's native architecture-only
-    ``config.json`` — use this to decide whether
-    :func:`detect_checkpoint` has anything to work with. Detection itself refuses
-    to guess, which is right for a real checkpoint and wrong as a hard regression
-    for a directory that used to load.
+    Native flat directories with an architecture-only ``config.json`` do not
+    declare an external layout and return ``False``.
     """
     root = Path(model_dir)
     if (root / METADATA_NAME).is_file():
@@ -257,9 +238,8 @@ def has_layout_metadata(model_dir) -> bool:
         return True
     if document.get("type") == "pi05":
         return True
-    # Before layout adapters existed, ApxInf exports wrote this compact Rust
-    # architecture config next to model.safetensors. It is still consumed by
-    # Model.load itself and must not be reinterpreted as a LeRobot manifest.
+    # ApxInf native directories use this compact Rust architecture config. It is
+    # consumed by Model.load and is not a LeRobot manifest.
     native_markers = {"action_dim", "action_horizon", "paligemma_variant"}
     return not native_markers.issubset(document)
 
@@ -468,10 +448,10 @@ def require_norm_stats(layout: CheckpointLayout) -> Path:
     else:
         example = '{"actions": {"q01": [...], "q99": [...]}, "state": {...}}'
         hint = (
-            f"This legacy LeRobot directory has no serialized policy processor. Current "
-            f"LeRobot repositories put statistics in a state_file referenced by "
-            f"policy_preprocessor.json; older repositories may keep them in the model "
-            f"state or the source dataset's meta/stats.json. Convert them into {example} "
+            f"This LeRobot directory has no serialized policy processor. LeRobot "
+            f"repositories may store statistics in a state_file referenced by "
+            f"policy_preprocessor.json, in model state, or in the source dataset's "
+            f"meta/stats.json. Convert them into {example} "
             f"and put it in the checkpoint root, or pass --norm-stats."
         )
     raise CheckpointError(

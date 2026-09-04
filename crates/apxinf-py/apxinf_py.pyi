@@ -30,12 +30,10 @@ class Model:
 
         ``device`` is ``cuda:N`` (default) or ``cpu``.
         ``precision`` is ``auto`` (default), ``fp8``, ``bf16``, or ``int8``.
-        ``config_json`` supplies PI0.5 architecture metadata for a checkpoint
-        that has no config.json; ``None`` leaves config loading to AutoModel.
         ``config_json`` supplies the architecture for a checkpoint that has no
         ``config.json`` — an openpi PyTorch export keeps its constants in
         ``metadata.pt``, which :mod:`apxinf.checkpoints` reads and passes here.
-        ``None`` reads ``config.json`` from the checkpoint directory as before.
+        ``None`` leaves config loading to AutoModel.
         ``action_horizon`` overrides the checkpoint's chunk length (a sequence
         length, not a weight dimension).
         ``num_views`` serves fewer cameras than the checkpoint declares (1..=its

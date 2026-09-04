@@ -7,9 +7,6 @@ All reusable logic lives in the library: the transport shell in
 :mod:`apxinf.robots.presets`. This file is only argument parsing + wiring — load
 an **in-process** policy through the ``apxinf_py`` PyO3 binding and serve it.
 
-The old subprocess + stdio hop (``ApxInfStdioEngine`` + ``pi05_libero_server``)
-is gone; so are the script's private resize/tokenize/unnormalize copies.
-
 **Embodiment:** ``--robot`` selects the wire keys and the robot pre/post steps,
 the way openpi's ``serve_policy.py --policy.config <TrainConfig>`` does. It
 defaults to ``franka_libero``; a checkpoint fine-tuned for another robot **must**
@@ -21,8 +18,7 @@ fixed dialect.
 **State:** each preset decides whether ``state`` is injected (discretized into
 the prompt, normalized to [-1, 1] from ``norm_stats``) or dropped —
 ``--discrete-state`` / ``--no-discrete-state`` override it. ``franka_libero``
-drops state to match the numerics of the prior serving link; a joint-space robot
-needs it.
+drops state; a joint-space robot needs it.
 
 **Images are RGB.** Neither this server nor openpi converts colour: an
 ``H×W×3`` uint8 array is taken as RGB as-is. A client reading frames with

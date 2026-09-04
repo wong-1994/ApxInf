@@ -23,21 +23,18 @@ returns the **unnormalized-domain** chunk. The intermediate normalized action is
 also returned (``normalized_actions``) so the layering invariant
 ``L2 minus unnormalize == L1`` can be checked directly.
 
-**State injection (opt-in, off by default):** state is dropped by default so the
-numerics match today's serving link. Enable it with ``discrete_state=True``: the
+**State injection (opt-in, off by default):** state is dropped by default.
+Enable it with ``discrete_state=True``: the
 raw state is first mapped to ``[-1, 1]`` by a ``state_normalizer`` (a
 :class:`~apxinf.processors.Normalizer` over ``norm_stats["state"]`` by default),
 then discretized into the prompt — matching openpi's "normalize then discretize"
 order. This path does **not** assume the incoming state is already in ``[-1, 1]``.
 
-**This module names no dataset's wire keys.** ``image_keys`` falls back to the
+**This module defines no dataset wire keys.** ``image_keys`` falls back to the
 model's own :data:`~apxinf.policies.base.VIEW_SLOTS`, and ``state_key`` has no
 fallback at all — it is required exactly when state is read and may stay ``None``
-when state is dropped. ``("observation/image", "observation/wrist_image")`` and
-``"observation/state"`` used to be the defaults here, which is LIBERO's dialect
-applied to every checkpoint: a G1 checkpoint served bare ran LIBERO's contract
-and looked like an accuracy problem. Wire keys belong to
-:mod:`apxinf.conventions`; a robot preset pairs one with a body.
+when state is dropped. Wire keys belong to :mod:`apxinf.conventions`; a robot
+preset pairs one with a body.
 
 This module registers ``Pi05Policy`` under ``model_type="pi05"`` so
 :class:`~apxinf.policies.auto.AutoPolicy` can dispatch to it.
@@ -951,14 +948,8 @@ def _default_image_keys(num_views: int) -> Tuple[str, ...]:
     """Name exactly ``num_views`` cameras when the caller names none.
 
     Returns the model's own :data:`~apxinf.policies.base.VIEW_SLOTS` vocabulary,
-    truncated to the loaded view count, so the fallback describes the *model*
-    rather than some dataset. That is the whole point of not having a default
-    here: ``("observation/image", "observation/wrist_image")`` used to be it, and
-    those are LIBERO's wire keys — as *the* default they silently applied to
-    every checkpoint, so a G1 checkpoint served bare ran LIBERO's contract and
-    looked like an accuracy problem. Slot names cannot masquerade as anyone's
-    wire keys: a client sending LIBERO keys against this fallback gets a
-    ``KeyError`` naming both sides, which is the loud failure we want.
+    truncated to the loaded view count. A client using different keys receives a
+    ``KeyError`` that reports both contracts.
 
     Beyond the declared slots the names continue as ``view_3_rgb``, ... so the
     ``len(image_keys) == model.num_views`` contract holds for any view count.

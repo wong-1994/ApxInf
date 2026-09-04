@@ -5,21 +5,14 @@
     torch.save({"global_step": ..., "config": dataclasses.asdict(train_config),
                 "timestamp": ...}, checkpoint_dir / "metadata.pt")
 
-so the checkpoint carries its own serving contract: action width, chunk length,
-token budget, whether state is discretized, which cameras the client sends, and
-— the field that matters most here — the ``asset_id`` that says where the real
-``norm_stats.json`` lives. Nothing in apxinf's serving path read it, which is
-why an openpi export silently fell back to :func:`Pi05Config::default` for its
-architecture and to a flat ``norm_stats.json`` for its statistics.
+The checkpoint metadata describes action width, chunk length, token budget,
+state handling, camera keys, and the ``asset_id`` used to locate
+``norm_stats.json``. The reader uses the standard library so preflight and
+offline inspection do not require torch.
 
-**Why not just call torch.load.** ``metadata.pt`` is a config object graph, not
-weights, so needing a 2 GB dependency to read 30 kB of nested dicts is
-backwards: the preflight checks are supposed to run *before* anything heavy, and
-``scripts/openpi_metadata_to_apxinf.py`` is supposed to run on a laptop.
-``torch.save``'s modern format is a plain zip whose ``<archive>/data.pkl``
-member is an ordinary pickle, so the standard library can read it — provided the
-unpickler refuses to import the openpi/flax/jax classes the stream names, which
-are not installed here and would be arbitrary code execution if they were.
+Modern ``torch.save`` files are zip archives containing ``<archive>/data.pkl``.
+The restricted unpickler reads the configuration without importing the
+openpi/flax/jax classes referenced by the pickle stream.
 
 **Security.** :class:`_RestrictedUnpickler` never imports anything outside
 :data:`_ALLOWED`, which is a set of explicit ``(module, name)`` pairs. Allowing a

@@ -1,6 +1,6 @@
 """Processor steps and the :class:`Pipeline` container.
 
-Design (mirrors the PRD's "narrow interface, thick module" goal):
+Interfaces:
 
 * A :class:`ProcessorStep` is a plain callable. Its ``__call__`` takes the
   step's *natural* input (an image, a prompt, an action array, nothing) and
@@ -140,16 +140,7 @@ class Pipeline:
                 return i
         raise KeyError(f"Pipeline has no step named {name!r}; have {self.names}")
 
-    # --- composition: wrap a chain without knowing its steps -----------------
-    #
-    # ``prepend``/``append`` are the only editing verbs that do not name an
-    # existing step. That distinction is load-bearing: an *outer* layer (a robot
-    # adapter wrapping a model's pre/post chain) has an **ordering** requirement
-    # — "run before everything the model does" — not a *naming* one. Expressed
-    # with ``insert_before("tokenize", ...)`` it would have to know that the
-    # chain contains a step called ``tokenize``, which is the model's private
-    # business and changes when the model does. These two verbs let the outer
-    # layer state the ordering directly and stay ignorant of the inner names.
+    # --- composition: wrap a chain without naming its existing steps ---------
 
     def prepend(self, *specs: StepSpec) -> "Pipeline":
         """Return a new pipeline running ``specs``, in order, before every current step.

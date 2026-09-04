@@ -1,6 +1,6 @@
 """ApxInf Python frontend.
 
-Three layers, kept deliberately decoupled:
+Public modules:
 
 * :mod:`apxinf.processors` — pure-numpy pre/post-processing *steps* (resize,
   tokenize, normalize, noise) plus a :class:`~apxinf.processors.Pipeline`
@@ -22,9 +22,7 @@ Three layers, kept deliberately decoupled:
 * **robots** — the assembly layer (:mod:`apxinf.robots`). A ``build_*`` factory
   binds one robot to a model policy by wrapping its
   :mod:`apxinf.processors.robots` steps *around* the policy's own chain, through
-  :class:`~apxinf.policies.base.ComposablePolicy`. It names no model class, so the
-  dependency is on a capability rather than on ``Pi05Policy``; ``policies``,
-  ``processors`` and ``conventions`` never depend back. A
+  :class:`~apxinf.policies.base.ComposablePolicy`. A
   :class:`~apxinf.robots.presets.RobotPreset` pairs one body with one convention
   and is the only deployable unit.
 * **bindings** — :class:`Model` re-exports the ``apxinf_py`` PyO3 handle (L1
