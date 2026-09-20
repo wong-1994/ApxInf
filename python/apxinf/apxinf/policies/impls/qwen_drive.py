@@ -8,8 +8,8 @@ reference ``QwenDriveProcessor`` contract exactly: PIL bicubic resize
 (torchvision dispatches PIL inputs to PIL resize), ``smart_resize`` factor
 snapping with Python ``round()``, pixel normalization ``(x/255 - 0.5) / 0.5``,
 block-ordered patchify (permute ``(1,3,6,4,7,0,2,5,8)``), ChatML prompt
-composition, history re-referencing/normalization, detokenization with
-think-block stripping, and trajectory denormalization with heading wrap.
+composition, history re-referencing/normalization, and trajectory
+denormalization with heading wrap. Reasoning stays internal to planning.
 
 All model computation runs in the Rust/CUDA executor through
 ``apxinf.ModelRunner``. No torch/Transformers model execution, no CPU
@@ -38,7 +38,6 @@ HISTORY_FRAME_LABELS = ("t-1.5s", "t-1.0s", "t-0.5s", "t-0s")
 REASONING_REQUEST = (
     "\n\nGive a one-sentence brief reasoning of the ego's future driving decision ONLY."
 )
-THINK_CLOSE = "</think>"
 
 _INSTRUCTION_HEADER = (
     "The input images are organized by camera view. Each view contains {num_frames} temporal "
@@ -48,11 +47,6 @@ _INSTRUCTION_HEADER = (
     "Positive x points forward, positive y points left, and a positive heading indicates a left "
     "turn\uff1a\n"
 )
-
-
-def _strip_thinking(text: str) -> str:
-    """Drop a leading thinking block, keeping the answer that follows it."""
-    return text.split(THINK_CLOSE)[-1].strip()
 
 
 def _round_by_factor(value: float, factor: int) -> int:
@@ -518,18 +512,12 @@ class QwenDrivePolicy:
                 max_new_tokens=self.max_new_tokens, min_new_tokens=self.min_new_tokens,
                 terminator_ids=terminators, closing_ids=[self.im_end_id, *self.newline_ids],
             )
-        generated, trajectory = self.model_runner._infer_planning(
+        trajectory = self.model_runner._infer_preprocessed(
             pixel_values, np.ascontiguousarray(grids, dtype=np.uint32),
-            np.ascontiguousarray(token_ids, dtype=np.uint32), state, noise_array,
+            np.ascontiguousarray(token_ids, dtype=np.uint32),
+            np.ones(len(token_ids), dtype=np.uint8), state, None, noise_array,
             **options,
         )
-        if with_reasoning:
-            content = list(generated)
-            for position, token in enumerate(generated):
-                if token in terminators:
-                    content = list(generated[:position])
-                    break
-            reasoning = _strip_thinking(self.tokenizer.decode(content, skip_special_tokens=True))
         model_ms = (time.perf_counter() - model_started) * 1000.0
         actions = _wrap_heading(
             np.asarray(trajectory, dtype=np.float32) * self.scale
@@ -539,9 +527,6 @@ class QwenDrivePolicy:
             "timing": {"model_ms": model_ms, "total_ms": (time.perf_counter() - started) * 1000.0},
             "metadata": self.metadata,
         }
-        if with_reasoning:
-            result["reasoning"] = reasoning
-            result["token_ids"] = list(generated)
         return result
 
     @property

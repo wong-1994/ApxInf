@@ -33,7 +33,7 @@ impl QwenDriveModelRunner {
             }),
         }
     }
-    fn execute(&self, request: &VlaRequest<'_>) -> Result<(Vec<u32>, Tensor)> {
+    fn execute(&self, request: &VlaRequest<'_>) -> Result<Tensor> {
         let backend = self.model.backend();
         let c = self.model.config();
         let observation = request.observation;
@@ -235,14 +235,11 @@ impl VlaRuntime for QwenDriveModelRunner {
         }
     }
     fn infer(&self, request: &VlaRequest<'_>) -> Result<Action> {
-        Ok(Action::new(self.execute(request)?.1))
+        Ok(Action::new(self.execute(request)?))
     }
     fn infer_host_f32(&self, request: &VlaRequest<'_>) -> Result<Vec<f32>> {
-        Ok(self.infer_planning_host(request)?.1)
-    }
-    fn infer_planning_host(&self, request: &VlaRequest<'_>) -> Result<(Vec<u32>, Vec<f32>)> {
-        let (tokens, action) = self.execute(request)?;
-        Ok((tokens, transfers::to_cpu(&action)?.to_f32_vec()?))
+        let action = self.infer(request)?;
+        transfers::to_cpu(action.tensor())?.to_f32_vec()
     }
     fn prepare(&self, _spec: &InferenceSpec) -> Result<Box<dyn PreparedInference>> {
         Err(Error::Other("qwen_drive full planning preparation is not implemented; per-layer GDN graphs do not establish a prepared VLA plan".into()))

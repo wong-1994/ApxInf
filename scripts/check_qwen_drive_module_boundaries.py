@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1] / "crates/apxinf-model/src/qwen_drive
 RULES = {
     "model": r"\b(model_runner|QwenDriveModelRunner|QwenDrivePreparedInference|ExecStrategy|CapturedGraph|ExecutionPolicy|VlaRequest|InferenceSpec)\b",
     "weights": r"\b(QwenDriveModel|QwenDriveModelRunner|QwenDrivePreparedInference)\b|\b(model_runner|model)\s*::|::(?:model_runner|model)\b|\buse\s+[^;]*\{[^;]*\b(?:model_runner|model)\b",
-    "model_runner": r"\b(Bf16Blocks)\b|ModelVariant\s*::",
+    "model_runner": r"\b(Bf16Blocks|BackboneBf16|PlannerBf16)\b|ModelVariant\s*::",
 }
 
 def source(path):

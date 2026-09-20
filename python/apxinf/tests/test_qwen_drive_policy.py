@@ -41,9 +41,11 @@ class Runner:
     def __init__(self):
         self.calls = []
 
-    def _infer_planning(self, pixels, grids, tokens, state, noise, **options):
+    def _infer_preprocessed(self, pixels, grids, tokens, attention_mask, state, embodiment_id, noise, **options):
+        np.testing.assert_array_equal(attention_mask, np.ones(len(tokens), dtype=np.uint8))
+        assert embodiment_id is None
         self.calls.append((pixels, grids, tokens, state, noise, options))
-        return [7, 12], np.ones((3, 3), np.float32)
+        return np.ones((3, 3), np.float32)
 
 
 def policy(config, mode="direct_planning", steps=4):
@@ -85,7 +87,8 @@ def test_planning_preserves_noise_steps_and_conditioning(config, mode):
         assert options["terminator_ids"] == [12, 13]
         assert options["max_new_tokens"] == 8
         assert options["min_new_tokens"] == 2
-        assert result["reasoning"] == "slow down"
+        assert "reasoning" not in result
+        assert "token_ids" not in result
     else:
         assert options == {"num_steps": 4}
         assert "reasoning" not in result
@@ -127,5 +130,6 @@ def test_invalid_steps_and_noise_fail_before_execution(config):
 
 def test_native_planning_uses_shared_runner():
     native = pytest.importorskip("apxinf_py")
-    assert hasattr(native.ModelRunner, "_infer_planning")
+    assert hasattr(native.ModelRunner, "_infer_preprocessed")
+    assert not hasattr(native.ModelRunner, "_infer_planning")
     assert not hasattr(native, "QwenDriveModel")

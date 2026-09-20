@@ -4,7 +4,10 @@ use super::{
     config::{ProjectionLayout, QwenDriveConfig},
     model::QwenDriveModel,
     model_runner::QwenDriveModelRunner,
-    weights::{bf16::QwenDriveDeviceWeights, QwenDriveExpertWeights, QwenDriveVlmWeights},
+    weights::{
+        bf16::{BackboneDeviceWeights, ExpertDeviceWeights},
+        QwenDriveExpertWeights, QwenDriveVlmWeights,
+    },
 };
 use crate::auto::{LoadOptions, LoadedModel, ModelPrecision};
 use apxinf_core::{Backend, Device, Error, Result};
@@ -61,13 +64,13 @@ pub(crate) fn load_registered(
     let (tensors, _) = apxinf_loader::safetensors::load_native_path(&planner)
         .map_err(|e| Error::Other(format!("load qwen_drive planner: {e}")))?;
     let expert = QwenDriveExpertWeights::from_map(&config, &tensors)?;
-    let weights = QwenDriveDeviceWeights::from_maps(
+    let backbone = BackboneDeviceWeights::from_maps(
         &config,
         vlm,
-        expert,
         ProjectionLayout::from_environment(),
         &*backend,
     )?;
-    let model = QwenDriveModel::new(config, cuda, weights);
+    let planner = ExpertDeviceWeights::from_weights(&config, expert, &*backend)?;
+    let model = QwenDriveModel::new(config, cuda, backbone, planner);
     Ok(LoadedModel::Vla(Box::new(QwenDriveModelRunner::new(model))))
 }

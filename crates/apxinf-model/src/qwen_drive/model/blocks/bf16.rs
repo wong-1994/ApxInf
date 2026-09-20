@@ -6,7 +6,7 @@ use crate::qwen_drive::backend::{
 };
 use crate::qwen_drive::config::{ProjectionLayout, QwenDriveConfig};
 use crate::qwen_drive::diagnostics_enabled;
-use crate::qwen_drive::weights::bf16::{MixerWeights, QwenDriveDeviceWeights};
+use crate::qwen_drive::weights::bf16::{BackboneDeviceWeights, ExpertDeviceWeights, MixerWeights};
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
 use kernels::{activation, attention, elementwise, embedding, gemm, linear_attention as la};
 use std::path::Path;
@@ -28,11 +28,41 @@ fn gdn_stage_mark(
     *since = std::time::Instant::now();
     Ok(())
 }
-pub(crate) struct Bf16Blocks {
+pub(crate) struct BackboneBf16 {
     pub config: QwenDriveConfig,
     pub cuda: Arc<RuntimeBackend>,
-    pub weights: QwenDriveDeviceWeights,
+    pub weights: BackboneDeviceWeights,
 }
+/// Planning expert computation; independent of backbone weights and request state.
+pub(crate) struct PlannerBf16 {
+    pub config: QwenDriveConfig,
+    pub cuda: Arc<RuntimeBackend>,
+    pub weights: ExpertDeviceWeights,
+}
+impl PlannerBf16 {
+    pub fn prepare(&self, input: &expert::ExpertPlan<'_>) -> Result<expert::ExpertState> {
+        expert::prepare(&self.config, &self.weights, self.cuda.context(), input)
+    }
+    pub fn step(
+        &self,
+        input: &expert::ExpertPlan<'_>,
+        state: &expert::ExpertState,
+        index: usize,
+    ) -> Result<()> {
+        expert::step(
+            &self.config,
+            &self.weights,
+            self.cuda.context(),
+            input,
+            state,
+            index,
+        )
+    }
+    pub fn output(&self, state: expert::ExpertState) -> Tensor {
+        expert::output(state)
+    }
+}
+
 pub(crate) enum LayerCache {
     FullAttention {
         k: Tensor,
@@ -215,7 +245,7 @@ fn cache_view(cache: &Tensor, kv_len: usize) -> Result<Tensor> {
     view.as_tensor(Shape::new(vec![kv_len, dims[1], dims[2]]), DType::BF16)
         .map_err(Error::Cuda)
 }
-impl Bf16Blocks {
+impl BackboneBf16 {
     pub(crate) fn fresh_caches(
         config: &QwenDriveConfig,
         cuda: &RuntimeBackend,

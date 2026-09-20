@@ -326,21 +326,19 @@ mod frequency_tests {
     }
 }
 
-pub struct QwenDriveDeviceWeights {
+pub struct BackboneDeviceWeights {
     /// `[vocab, hidden]`; doubles as the tied lm_head via a transposed GEMM.
     pub embed_tokens: Tensor,
     pub layers: Vec<MixerWeights>,
     pub final_norm: Tensor,
     pub vision: VisionDeviceWeights,
-    pub expert: ExpertDeviceWeights,
     pub projection_layout: ProjectionLayout,
 }
 
-impl QwenDriveDeviceWeights {
+impl BackboneDeviceWeights {
     pub fn from_maps(
         config: &QwenDriveConfig,
         vlm: QwenDriveVlmWeights,
-        expert: QwenDriveExpertWeights,
         projection_layout: ProjectionLayout,
         backend: &dyn Backend,
     ) -> Result<Self> {
@@ -607,18 +605,18 @@ impl QwenDriveDeviceWeights {
             )));
         }
 
-        let expert = Self::upload_expert(config, expert, backend)?;
         Ok(Self {
             embed_tokens,
             layers,
             final_norm,
             vision,
-            expert,
             projection_layout,
         })
     }
+}
 
-    fn upload_expert(
+impl ExpertDeviceWeights {
+    pub fn from_weights(
         config: &QwenDriveConfig,
         weights: QwenDriveExpertWeights,
         backend: &dyn Backend,

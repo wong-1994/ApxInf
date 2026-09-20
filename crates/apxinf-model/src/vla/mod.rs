@@ -323,14 +323,6 @@ pub trait VlaRuntime {
     /// already owns the backend.
     fn infer_host_f32(&self, request: &VlaRequest<'_>) -> Result<Vec<f32>>;
 
-    /// Planning result plus internal reasoning tokens for policy-side decoding.
-    /// Explicitly unsupported by runtimes without a planning-options contract.
-    fn infer_planning_host(&self, _request: &VlaRequest<'_>) -> Result<(Vec<u32>, Vec<f32>)> {
-        Err(Error::Other(
-            "planning options are not supported by this VLA runtime".into(),
-        ))
-    }
-
     /// Discrete action-token output shape for autoregressive token VLAs.
     ///
     /// A runtime whose deployable output is a token sequence (π0-FAST) returns

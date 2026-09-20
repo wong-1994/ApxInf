@@ -14,11 +14,12 @@ The family follows the [model layer ownership rules](model-layer-architecture.md
   physical projection layout once, and constructs a `QwenDriveModelRunner`.
 - `weights/host.rs` maps checkpoint names; `weights/bf16.rs` owns device weight
   representations. Weights do not depend on the model or runner.
-- `model/mod.rs` connects the multimodal prefix, optional reasoning and flow
-  solver. Reasoning tokens are an intermediate result of planning.
-- `model/blocks/bf16.rs` is the single BF16 network implementation. Vision,
-  hybrid text blocks and planner computations are grouped internally in this
-  file. There is no directory per modality or speculative variant dispatch.
+- `model/vla.rs` connects the multimodal prefix, optional reasoning and flow
+  solver. Reasoning tokens stay internal; inference returns only the action tensor.
+- `model/blocks/bf16.rs` contains `BackboneBf16` (vision and hybrid text) and
+  `PlannerBf16` (expert). Each owns independently constructed device weights;
+  the planning model composes both. Backbone weight construction does not load
+  expert weights. There is no directory per modality or speculative variant dispatch.
 - `model_runner/runner.rs` implements `VlaRuntime`, validates canonical requests,
   binds inputs/RNG and owns mutable state. Vision position interpolation has a
   bounded cache retained by the runner across requests. KV/recurrent state is
@@ -39,6 +40,10 @@ binding, which loads native `LoadedModel::Vla`. `model_variant="auto"` and
 `planner=...` to the policy (native named asset `assets["planner"]`) or
 provide `planner-sft` under the model directory. A missing planner is an error;
 there is no backbone-only fallback.
+
+The policy uses the shared `_infer_preprocessed` binding and existing
+`infer_host_f32` conversion around `VlaRuntime::infer`; there is no planning-specific
+inference method or public reasoning-token result.
 
 The policy owns prompt construction, patchification, conditioning normalization
 and trajectory decoding. Native requests contain canonical patches, image grids,
@@ -76,10 +81,20 @@ Python direct/reasoning request wiring. A CUDA-feature check on a machine withou
 a CUDA toolkit does not compile device kernels or run the model. Before claiming
 numerical equivalence or performance, run both planning modes on target GPUs
 with the same checkpoint, patches, token IDs, conditioning and exact supplied
-noise as the integrated baseline. Compare trajectories and reasoning tokens,
+noise as the integrated baseline. Compare trajectories for direct and reasoning planning,
 exercise multiple flow step counts, and test the GDN graph toggle with enough
 reasoning tokens to enter replay. Record warm-up, steady-state latency and peak
 memory separately. Both datacenter and edge targets need their own evidence.
+
+### Interface split validation (2026-09-20)
+
+The split backbone/planner objects and shared inference binding were checked on
+Thor SM110 against the existing bias-fixed native baseline. Four fixed scenes
+ran in direct/SFT and reasoning/RL modes, twice each at ten flow steps; scene 0
+also ran at one and four steps. All 20 candidate trajectories matched the baseline
+exactly, and all eight repeated-request pairs matched exactly. The policy returned
+only actions, metadata and timing. This is a structural regression check, not a
+full dataset evaluation, performance benchmark or CUDA Graph qualification.
 
 ### Biased planner projections
 

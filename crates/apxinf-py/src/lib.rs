@@ -191,7 +191,7 @@ struct PreprocessedVlaInput {
     latent: Tensor,
     attention_mask: Vec<u8>,
     image_grid_thw: Vec<[u32; 3]>,
-    embodiment_id: usize,
+    embodiment_id: Option<usize>,
 }
 
 impl ModelRunner {
@@ -312,7 +312,7 @@ impl ModelRunner {
         token_ids: PyReadonlyArray1<'py, u32>,
         attention_mask: PyReadonlyArray1<'py, u8>,
         state: PyReadonlyArrayDyn<'py, f32>,
-        embodiment_id: usize,
+        embodiment_id: Option<usize>,
         noise: PyReadonlyArrayDyn<'py, f32>,
     ) -> PyResult<PreprocessedVlaInput> {
         let pixels_shape = pixel_values.shape();
@@ -552,100 +552,6 @@ impl ModelRunner {
         })
     }
 
-    /// Canonical planning inputs. Returns internal reasoning IDs and normalized actions.
-    #[pyo3(name = "_infer_planning", signature = (pixel_values, image_grid_thw, token_ids, state, noise, num_steps=None, max_new_tokens=None, min_new_tokens=0, terminator_ids=None, closing_ids=None))]
-    #[allow(clippy::too_many_arguments)]
-    fn infer_planning<'py>(
-        &self,
-        py: Python<'py>,
-        pixel_values: PyReadonlyArray2<'py, f32>,
-        image_grid_thw: PyReadonlyArray2<'py, u32>,
-        token_ids: PyReadonlyArray1<'py, u32>,
-        state: PyReadonlyArray1<'py, f32>,
-        noise: PyReadonlyArrayDyn<'py, f32>,
-        num_steps: Option<usize>,
-        max_new_tokens: Option<usize>,
-        min_new_tokens: usize,
-        terminator_ids: Option<Vec<u32>>,
-        closing_ids: Option<Vec<u32>>,
-    ) -> PyResult<(Vec<u32>, Bound<'py, PyArray2<f32>>)> {
-        use apxinf_model::vla::{PlanningOptions, ReasoningOptions};
-        let tokens = token_ids.as_slice().map_err(runtime_err)?.to_vec();
-        self.validate_tokens(&tokens)?;
-        let dims = pixel_values.shape();
-        if dims[0] == 0
-            || (self.contract.patch_shape[1] != 0 && dims[1] != self.contract.patch_shape[1])
-        {
-            return Err(PyValueError::new_err(
-                "pixel_values has invalid patch dimensions",
-            ));
-        }
-        if image_grid_thw.shape()[0] == 0 || image_grid_thw.shape()[1] != 3 {
-            return Err(PyValueError::new_err(
-                "image_grid_thw must have shape [images,3]",
-            ));
-        }
-        let grids: Vec<[u32; 3]> = image_grid_thw
-            .as_slice()
-            .map_err(runtime_err)?
-            .chunks_exact(3)
-            .map(|g| [g[0], g[1], g[2]])
-            .collect();
-        let pixels = Tensor::from_f32(dims.to_vec(), pixel_values.as_slice().map_err(runtime_err)?)
-            .map_err(runtime_err)?;
-        let state = Tensor::from_f32(
-            state.shape().to_vec(),
-            state.as_slice().map_err(runtime_err)?,
-        )
-        .map_err(runtime_err)?;
-        let latent = Tensor::from_f32(
-            noise.shape().to_vec(),
-            noise.as_slice().map_err(runtime_err)?,
-        )
-        .map_err(runtime_err)?;
-        let reasoning = match max_new_tokens {
-            Some(max_new_tokens) => Some(ReasoningOptions {
-                max_new_tokens,
-                min_new_tokens,
-                terminator_ids: terminator_ids
-                    .ok_or_else(|| PyValueError::new_err("reasoning requires terminator_ids"))?,
-                closing_ids: closing_ids
-                    .ok_or_else(|| PyValueError::new_err("reasoning requires closing_ids"))?,
-            }),
-            None => {
-                if min_new_tokens != 0 || terminator_ids.is_some() || closing_ids.is_some() {
-                    return Err(PyValueError::new_err(
-                        "reasoning options require max_new_tokens",
-                    ));
-                }
-                None
-            }
-        };
-        let options = PlanningOptions {
-            num_steps,
-            reasoning,
-        };
-        let observation = Observation {
-            vision: VisionObservation::Patches(pixels),
-            token_ids: tokens,
-            state: Some(state),
-            action_mask: None,
-        };
-        let metadata = VlaMetadata {
-            image_grid_thw: Some(&grids),
-            planning: Some(&options),
-            ..VlaMetadata::default()
-        };
-        let request = VlaRequest::provided_with_metadata(&observation, &latent, metadata);
-        let (tokens, flat) = self
-            .model
-            .vla()
-            .map_err(runtime_err)?
-            .infer_planning_host(&request)
-            .map_err(runtime_err)?;
-        Ok((tokens, self.action_array(py, flat)?))
-    }
-
     /// Build a **checkpoint-free** pi05 model with deterministic random weights.
     ///
     /// Latency depends only on tensor shape and dtype, so the L0/L1 engine can be
@@ -821,6 +727,8 @@ impl ModelRunner {
         state,
         embodiment_id,
         noise,
+        *, num_steps=None, max_new_tokens=None, min_new_tokens=0,
+        terminator_ids=None, closing_ids=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn infer_preprocessed<'py>(
@@ -831,8 +739,13 @@ impl ModelRunner {
         token_ids: PyReadonlyArray1<'py, u32>,
         attention_mask: PyReadonlyArray1<'py, u8>,
         state: PyReadonlyArrayDyn<'py, f32>,
-        embodiment_id: usize,
+        embodiment_id: Option<usize>,
         noise: PyReadonlyArrayDyn<'py, f32>,
+        num_steps: Option<usize>,
+        max_new_tokens: Option<usize>,
+        min_new_tokens: usize,
+        terminator_ids: Option<Vec<u32>>,
+        closing_ids: Option<Vec<u32>>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
         let input = self.preprocessed_vla_input(
             "_infer_preprocessed",
@@ -844,11 +757,35 @@ impl ModelRunner {
             embodiment_id,
             noise,
         )?;
+        use apxinf_model::vla::{PlanningOptions, ReasoningOptions};
+        let reasoning = match max_new_tokens {
+            Some(max_new_tokens) => Some(ReasoningOptions {
+                max_new_tokens,
+                min_new_tokens,
+                terminator_ids: terminator_ids
+                    .ok_or_else(|| PyValueError::new_err("reasoning requires terminator_ids"))?,
+                closing_ids: closing_ids
+                    .ok_or_else(|| PyValueError::new_err("reasoning requires closing_ids"))?,
+            }),
+            None => {
+                if min_new_tokens != 0 || terminator_ids.is_some() || closing_ids.is_some() {
+                    return Err(PyValueError::new_err(
+                        "reasoning options require max_new_tokens",
+                    ));
+                }
+                None
+            }
+        };
+        let options = PlanningOptions {
+            num_steps,
+            reasoning,
+        };
         let metadata = VlaMetadata {
             attention_mask: Some(&input.attention_mask),
             image_grid_thw: Some(&input.image_grid_thw),
-            embodiment_id: Some(input.embodiment_id),
-            planning: None,
+            embodiment_id: input.embodiment_id,
+            planning: (options.num_steps.is_some() || options.reasoning.is_some())
+                .then_some(&options),
         };
         let request =
             VlaRequest::provided_with_metadata(&input.observation, &input.latent, metadata);
@@ -886,13 +823,13 @@ impl ModelRunner {
             token_ids,
             attention_mask,
             state,
-            embodiment_id,
+            Some(embodiment_id),
             noise,
         )?;
         let metadata = VlaMetadata {
             attention_mask: Some(&input.attention_mask),
             image_grid_thw: Some(&input.image_grid_thw),
-            embodiment_id: Some(input.embodiment_id),
+            embodiment_id: input.embodiment_id,
             planning: None,
         };
         self.model
