@@ -80,3 +80,17 @@ noise as the integrated baseline. Compare trajectories and reasoning tokens,
 exercise multiple flow step counts, and test the GDN graph toggle with enough
 reasoning tokens to enter replay. Record warm-up, steady-state latency and peak
 memory separately. Both datacenter and edge targets need their own evidence.
+
+### Biased planner projections
+
+The planner's one-row MLPs and adaLN modulation use `gemm::bf16_addmv` with
+checkpoint-layout weights. Its contract adds bias before the final BF16
+rounding. On Thor, the BF16-output cuBLAS GEMV path can round the dot product
+before adding bias. The operator therefore keeps the accumulator and bias in
+FP32, using BF16 matrix/vector operands, then casts the completed result to
+BF16. This preserves the model layout and uses workspace-backed device buffers.
+
+CUDA regressions cover cancellation-sensitive projection inputs and graph
+capture/replay with an updated bias. These operator checks do not establish
+whole-model graph support or downstream planning accuracy; those remain subject
+to the validation limits above.
