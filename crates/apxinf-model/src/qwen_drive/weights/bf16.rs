@@ -1,19 +1,10 @@
-//! Device-resident BF16 weights for the Qwen-Drive native executor.
-//!
-//! Built once at load from the checkpoint maps: most HF `[out, in]` projections
-//! are transposed to `[in, out]` for the row-major GEMM path (the scaffold's
-//! transpose), per-layer Q/K/V and gate/up projections are concatenated into
-//! fused weights. GDN input projections retain their original [out,in] layout
-//! and separate GEMMs: their BF16 reductions depend on physical geometry.
-//! Every checkpoint transformation runs
-//! once at load, never on the hot path.
-
+//! BF16 weights and load-time physical layouts.
 use std::collections::HashMap;
 
 use apxinf_core::{Backend, DType, Error, Result, Tensor};
 
-use super::config::QwenDriveConfig;
-use super::weights::{transpose_2d, QwenDriveExpertWeights, QwenDriveVlmWeights};
+use super::super::config::{ProjectionLayout, QwenDriveConfig};
+use super::host::{transpose_2d, QwenDriveExpertWeights, QwenDriveVlmWeights};
 
 fn take(map: &mut HashMap<String, Tensor>, name: &str) -> Result<Tensor> {
     map.remove(name)
@@ -106,8 +97,8 @@ fn narrow_to_bf16(tensor: &Tensor) -> Result<Tensor> {
 /// `[m,k] @ [k,n]` and needs `[in, out]`. Transposing once here keeps the
 /// per-call cost at zero; doing it the other way -- leaving the layout alone
 /// and transposing at each call -- would cost more than the tuning saves.
-fn projection(tensor: &Tensor) -> Result<Tensor> {
-    if super::general::tuned_projection() {
+fn projection(tensor: &Tensor, layout: ProjectionLayout) -> Result<Tensor> {
+    if layout == ProjectionLayout::Tuned {
         transpose_2d(tensor)
     } else {
         Ok(tensor.clone())
@@ -144,7 +135,7 @@ fn up(backend: &dyn Backend, tensor: &Tensor) -> Result<Tensor> {
 
 fn up_mlp(
     backend: &dyn Backend,
-    mlp: &super::weights::ExpertMlp,
+    mlp: &super::host::ExpertMlp,
     checkpoint_layout: bool,
 ) -> Result<DeviceMlp> {
     let fc1 = if checkpoint_layout {
@@ -243,18 +234,6 @@ pub struct VisionDeviceWeights {
     pub merger_fc1_b: Tensor,
     pub merger_fc2_w: Tensor,
     pub merger_fc2_b: Tensor,
-    /// Host copy of `pos_embed`, read back once instead of once per request.
-    pub pos_table_host: std::sync::OnceLock<Vec<f32>>,
-    /// Interpolated position embeddings, keyed by patch grid.
-    ///
-    /// `compute_pos_embeds` is a pure function of `pos_embed` and `grid_thw`,
-    /// so caching it is exact -- but it costs 41.5 ms per request on Orin (a
-    /// table readback, 12.5M scalar bilinear taps on the host, a BF16 pass and
-    /// a 25MB upload) and a fixed camera rig presents the same grid every time.
-    /// The cache lives on the weights rather than in a process-global map, so
-    /// it cannot outlive the model it belongs to or be shared between two of
-    /// them, and it is bounded because a rig has few distinct grids.
-    pub pos_embed_cache: std::sync::Mutex<Vec<(Vec<[u32; 3]>, Tensor)>>,
 }
 
 pub struct ExpertLayerDeviceWeights {
@@ -353,16 +332,19 @@ pub struct QwenDriveDeviceWeights {
     pub layers: Vec<MixerWeights>,
     pub final_norm: Tensor,
     pub vision: VisionDeviceWeights,
-    pub expert: Option<ExpertDeviceWeights>,
+    pub expert: ExpertDeviceWeights,
+    pub projection_layout: ProjectionLayout,
 }
 
 impl QwenDriveDeviceWeights {
     pub fn from_maps(
         config: &QwenDriveConfig,
         vlm: QwenDriveVlmWeights,
-        expert: Option<QwenDriveExpertWeights>,
+        expert: QwenDriveExpertWeights,
+        projection_layout: ProjectionLayout,
         backend: &dyn Backend,
     ) -> Result<Self> {
+        let projection = |tensor: &Tensor| projection(tensor, projection_layout);
         let mut language = vlm.language;
         let mut visual = vlm.visual;
         let text = &config.text;
@@ -497,7 +479,8 @@ impl QwenDriveDeviceWeights {
         // bf16-grid rounding (lands in the captured load section; expected max_delta>0).
         qdiag!(
             "[qwen_drive] a_log_bf16_round max_delta={:.6} layer0_first4={:?}",
-            a_log_max_delta, a_log_layer0_first4
+            a_log_max_delta,
+            a_log_layer0_first4
         );
         let embed_tokens = up(
             backend,
@@ -613,8 +596,6 @@ impl QwenDriveDeviceWeights {
                 backend,
                 &take(&mut visual, "model.visual.merger.linear_fc2.bias")?,
             )?,
-            pos_table_host: std::sync::OnceLock::new(),
-            pos_embed_cache: std::sync::Mutex::new(Vec::new()),
         };
         if !visual.is_empty() {
             let mut names: Vec<String> = visual.keys().cloned().collect();
@@ -626,15 +607,14 @@ impl QwenDriveDeviceWeights {
             )));
         }
 
-        let expert = expert
-            .map(|expert| Self::upload_expert(config, expert, backend))
-            .transpose()?;
+        let expert = Self::upload_expert(config, expert, backend)?;
         Ok(Self {
             embed_tokens,
             layers,
             final_norm,
             vision,
             expert,
+            projection_layout,
         })
     }
 

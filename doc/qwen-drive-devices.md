@@ -1,123 +1,82 @@
-# Qwen-Drive on more than one device
+# Qwen-Drive planning runtime
 
-One model implementation, three boards -- Jetson AGX Orin (sm_87), Jetson AGX
-Thor (sm_110) and the RTX 4090 (sm_89). This is what to know before changing
-anything that behaves differently on one of them: where each kind of
-per-device decision belongs, and what the constants currently are.
+Qwen-Drive is registered as a CUDA VLA runtime. The supported workload is
+trajectory planning, with either a direct prompt or internal reasoning before
+planning. VQA/text generation and BEV perception are not public or development
+entry points. The Qwen vision/text backbone provides scene context to the planner;
+it is not exposed as a separate Qwen-Drive language model.
 
-## The fixed workload
+## Ownership
 
-Four public VQA scenes from WOD_E2E, batch 1, BF16, exactly 64 generated
-tokens, one warmup and three measured requests per scene, warm median. Each
-scene is three camera views (front, front-left, front-right) of four frames at
-0.5 s spacing — twelve images — plus a 16-point history, ego velocity and
-acceleration, and the driving and navigation commands. The four differ in ego
-state: stationary, just-braked, 2.67 m/s, 6.99 m/s.
+The family follows the [model layer ownership rules](model-layer-architecture.md):
 
-`control/verify_perf_orin.py` runs it; `control/verify_gpu_orin.py` is the
-four-mode correctness gate over the same inputs.
+- `load.rs` validates the variant/assets, loads both checkpoints, chooses the
+  physical projection layout once, and constructs a `QwenDriveModelRunner`.
+- `weights/host.rs` maps checkpoint names; `weights/bf16.rs` owns device weight
+  representations. Weights do not depend on the model or runner.
+- `model/mod.rs` connects the multimodal prefix, optional reasoning and flow
+  solver. Reasoning tokens are an intermediate result of planning.
+- `model/blocks/bf16.rs` is the single BF16 network implementation. Vision,
+  hybrid text blocks and planner computations are grouped internally in this
+  file. There is no directory per modality or speculative variant dispatch.
+- `model_runner/runner.rs` implements `VlaRuntime`, validates canonical requests,
+  binds inputs/RNG and owns mutable state. Vision position interpolation has a
+  bounded cache retained by the runner across requests. KV/recurrent state is
+  replaced per request, after dropping graphs that reference its buffers.
+- `model_runner/prepare.rs` owns the optional per-layer GDN graph resources.
+  Blocks submit an eager operation through an execution callback; the runner
+  does not select or access concrete BF16 Blocks.
 
-## Where the per-device decisions live
+Run `python3 scripts/check_qwen_drive_module_boundaries.py` to check the
+explicit dependency directions.
 
-Three layers, and a change belongs to exactly one of them.
+## Loading and requests
 
-**Compile time — which kernels exist.** `build_support/cuda_arch.rs` selects
-the architecture, and the family predicates in `build.rs`
-(`is_fa2_sm80_family`, `is_fa2_bf16_arch`, `is_cutlass_sm100_family`,
-`is_cutlass_sm89_family`) turn that into `cargo:rustc-cfg=apxinf_*`. Adding a
-board that shares a family with one already supported is usually one arm of one
-of those predicates — #60 added GB10 that way, and the head-64 and head-256
-FlashAttention-2 dispatch adapters reached Thor the same way here.
+Use `AutoPolicy.from_pretrained(checkpoint, mode="direct_planning")`, or select
+`mode="reasoning_planning"`. Both use the shared Python `ModelRunner.load`
+binding, which loads native `LoadedModel::Vla`. `model_variant="auto"` and
+`"bf16"` are supported. The planner checkpoint is required: pass
+`planner=...` to the policy (native named asset `assets["planner"]`) or
+provide `planner-sft` under the model directory. A missing planner is an error;
+there is no backbone-only fallback.
 
-**Run time — which compiled path runs, with what constants.**
-`CudaDeviceCaps` carries the hardware facts and classifies the family;
-`kernels/gdn_policy.rs` carries the policy that follows from them. The GDN
-kernels take their tile widths, block width, recurrence split and tensor-core
-form from that one table rather than deciding for themselves, and each field
-has an environment override so a new board can be re-swept without a rebuild.
+The policy owns prompt construction, patchification, conditioning normalization
+and trajectory decoding. Native requests contain canonical patches, image grids,
+prompt token IDs and a host F32 conditioning vector, packed in this order:
+normalized history poses, history velocity, history acceleration, ego status,
+navigation command. Section sizes come from the model configuration.
 
-**Data — which tactic each shape uses.**
-`configs/tuning/<vendor>/<family>-sm<N>/tactics.json`, resolved by
-`TuningPaths::resolve_for_cuda`. Four stores ship: `rtx4090-sm89`, `orin-sm87`,
-`thor-sm101`, `thor-sm110`. Recording one is a run of the autotuner, not a code
-change.
+`PlanningOptions` carries the flow step count and optional reasoning token bounds
+and turn delimiters. The policy's `num_steps` reaches the actual solver. Provided
+noise is preserved, validated against the configured horizon/dimension and copied
+into a private solver buffer. The CUDA VLA API can alternatively generate noise
+from the request RNG. Public actions use the configured `[horizon, 3]` shape;
+the Python policy includes the batch dimension and decodes physical coordinates.
 
-A tactic is only valid for the libraries that measured it, and all three boards
-were running a different toolkit from the one their store was recorded on, so
-every record was rejected at load and the GEMMs quietly fell back to the
-untuned heuristic. The resolver therefore prefers
-`<family>-sm<N>/cuda<major>.<minor>-cublas<major>.<minor>/tactics.json` and uses
-the unqualified file only when its header matches the running libraries — the
-subdirectory is named by the same truncation the loader compares, so a store
-found under it is one this toolkit can use in full. Nothing relocates: a board
-running the toolkit its store was recorded on resolves to exactly the file it
-resolved to before. A second toolkit now writes beside the first rather than
-over it. See `doc/jetson-roofline.md` for what regenerating is worth — 12.6% on
-Orin, 0.05% on Thor after the accuracy filter, nothing at all on the 4090.
+The family uses common `tactics`/`autotune` loading options. The former standalone
+`APXINF_QWEN_TUNING_DIR`/`APXINF_QWEN_AUTOTUNE` loader controls are superseded by
+those shared options. `APXINF_QWEN_LINEAR_TUNED` still selects the projection
+layout at load time; changing it after loading cannot change weight layout.
 
-## What the constants actually are
+## Execution and validation limits
 
-`GdnLaunchPolicy::defaults_for` is the whole table, and the point of collecting
-it in one place is that not one of these values transfers between the two
-families:
+Existing BF16 kernels and fused operations are retained. This organization change
+does not establish a new fusion scheme or a performance baseline. Direct planning
+skips the unused final language projection; reasoning still computes token logits.
 
-| | sm80 family | sm100 family |
-|---|---:|---:|
-| chunk-state tile | 8 | 4 |
-| chunk-state block | 512 | 1024 |
-| chunk-gemm tile | 8 | 4 |
-| recurrence split | 1 | 4 |
-| chunk-state scan | scalar fp32 | two BF16 terms on tensor cores |
-| blocks per head in the scan | from the multiprocessor count | from the multiprocessor count |
+`APXINF_QWEN_DECODE_GRAPH` enables the inherited local GDN decode graph path,
+including separate convolution parity captures. It does not capture vision,
+full-attention cache management or the planner/flow loop. Full VLA `prepare`
+returns an explicit unsupported error; callers must not treat local captures as
+a prepared full-model execution plan. Vision position interpolation still uses
+host computation on cache misses.
 
-The curves are not merely shifted, either: a chunk-state tile of 16 is 8% off
-the optimum on Orin and 26% off on Thor, and a chunk-gemm tile of 32 -- which
-was the sm80 default until the kernel's two products were fused -- is a 10%
-regression rather than a mild one.
-
-Every field has an environment override (`APXINF_GDN_*`, named in
-`gdn_policy.rs`) so a new board can be re-swept without a rebuild. Re-sweep
-after changing any of these kernels: the chunk-state block width has moved
-twice already, and the chunk-gemm width once.
-
-## When a measurement is needed
-
-Three things decide correctness questions on this model, in this order, and the
-four-mode gate is not one of them -- it reports scene 0's maximum trajectory
-error, which on this checkpoint only ever takes the two adjacent BF16 output
-ULPs 0.0403 and 0.0806, so it flips on changes that move nothing:
-
-1. `cargo test -p apxinf-cuda gdn_ -- --nocapture` runs the fp64 operator
-   oracles for the GDN kernels and the bit-exactness test for the value split.
-   A kernel change that claims to preserve the arithmetic has to say so here.
-2. `control/precision_probe.py` reports token agreement and error
-   distributions over every scene of every runnable mode, which move
-   continuously where the gate does not.
-3. `control/verify_perf_orin.py` for speed, always as alternating A/B rounds on
-   one machine.
-
-A recorded store belongs to the toolkit that measured it, so it is committed
-at the path that says so:
-
-```
-configs/tuning/nvidia/thor-sm110/tactics.json                       CUDA 13.0, 116 records
-configs/tuning/nvidia/thor-sm110/cuda13.2-cublas13.4/tactics.json   CUDA 13.2,   7 records
-```
-
-Both boards work. The autotuner rewrites rather than merges, so recording on
-13.2 into the unqualified file would have left a Thor on 13.0 with seven
-records for a toolkit it is not running. An autotune report is an artifact,
-not a deliverable -- the engine only ever appends to it -- so it does not
-belong in a commit either.
-
-Measurement evidence for the three boards -- rooflines, kernel tables, the
-per-device sweeps behind the table above -- is kept out of the review diff
-under `devlocal/qwen-drive/reports/` per `AGENTS.md`, along with the probes
-that produced it and the two subsystems this revision does not reach: the
-packed-weight GEMV and the perception scaffold.
-
-One measurement note that costs hours if it is learned the hard way: on a
-Jetson the same build measures several percent apart over an afternoon, and
-6.29 s/scene at 14:20 became 6.75 s at 17:40 with nothing changed. Any
-comparison has to be alternating rounds of both sides on one machine within
-one run. Two numbers an hour apart are not a comparison.
+Local checks cover Rust types, portable conditioning/configuration logic and
+Python direct/reasoning request wiring. A CUDA-feature check on a machine without
+a CUDA toolkit does not compile device kernels or run the model. Before claiming
+numerical equivalence or performance, run both planning modes on target GPUs
+with the same checkpoint, patches, token IDs, conditioning and exact supplied
+noise as the integrated baseline. Compare trajectories and reasoning tokens,
+exercise multiple flow step counts, and test the GDN graph toggle with enough
+reasoning tokens to enter replay. Record warm-up, steady-state latency and peak
+memory separately. Both datacenter and edge targets need their own evidence.

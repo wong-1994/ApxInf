@@ -63,6 +63,23 @@ pub enum InitialLatent<'a> {
     Provided(&'a Tensor),
 }
 
+/// Internal autoregressive reasoning before continuous action generation.
+/// Token IDs and turn completion are supplied by the policy/tokenizer.
+#[derive(Clone, Debug)]
+pub struct ReasoningOptions {
+    pub max_new_tokens: usize,
+    pub min_new_tokens: usize,
+    pub terminator_ids: Vec<u32>,
+    pub closing_ids: Vec<u32>,
+}
+
+/// Per-request planning controls for runtimes with a planning-options contract.
+#[derive(Clone, Debug, Default)]
+pub struct PlanningOptions {
+    pub num_steps: Option<usize>,
+    pub reasoning: Option<ReasoningOptions>,
+}
+
 /// Optional typed metadata emitted by preprocessors for VLA families whose
 /// inputs include more than image patches and token IDs.
 ///
@@ -75,6 +92,7 @@ pub struct VlaMetadata<'a> {
     pub attention_mask: Option<&'a [u8]>,
     pub image_grid_thw: Option<&'a [[u32; 3]]>,
     pub embodiment_id: Option<usize>,
+    pub planning: Option<&'a PlanningOptions>,
 }
 
 /// Complete VLA request: an environment observation plus the model-generation
@@ -95,6 +113,7 @@ impl<'a> VlaRequest<'a> {
                 attention_mask: None,
                 image_grid_thw: None,
                 embodiment_id: None,
+                planning: None,
             },
         }
     }
@@ -107,6 +126,7 @@ impl<'a> VlaRequest<'a> {
                 attention_mask: None,
                 image_grid_thw: None,
                 embodiment_id: None,
+                planning: None,
             },
         }
     }
@@ -302,6 +322,14 @@ pub trait VlaRuntime {
     /// This convenience performs the device→host copy inside the runtime, which
     /// already owns the backend.
     fn infer_host_f32(&self, request: &VlaRequest<'_>) -> Result<Vec<f32>>;
+
+    /// Planning result plus internal reasoning tokens for policy-side decoding.
+    /// Explicitly unsupported by runtimes without a planning-options contract.
+    fn infer_planning_host(&self, _request: &VlaRequest<'_>) -> Result<(Vec<u32>, Vec<f32>)> {
+        Err(Error::Other(
+            "planning options are not supported by this VLA runtime".into(),
+        ))
+    }
 
     /// Discrete action-token output shape for autoregressive token VLAs.
     ///

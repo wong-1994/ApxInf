@@ -71,42 +71,21 @@ fn load_qwen3vl(
     Ok(LoadedModel::text(Box::new(model)))
 }
 
-/// Load the Qwen-Drive VLM through the maintained registry surface. When the
-/// checkpoint ships the SFT planner head beside the VLM it is attached so the
-/// direct-planning flow works out of the box; the Python policy passes an
-/// explicit planner path for the RL head. CUDA-only: other devices fail
-/// clearly here.
 fn load_qwen_drive(
     path: &Path,
     device: Device,
     backend: Arc<dyn Backend>,
-    _options: &LoadOptions,
+    options: &LoadOptions,
 ) -> Result<LoadedModel> {
     #[cfg(feature = "cuda")]
     {
-        let model_dir = if path.is_dir() {
-            path
-        } else {
-            path.parent().unwrap_or_else(|| Path::new("."))
-        };
-        let planner_dir = model_dir.join("planner-sft");
-        let planner = if planner_dir.is_dir() {
-            Some(planner_dir.as_path())
-        } else {
-            None
-        };
-        let model = crate::qwen_drive::QwenDriveModel::load_with_backend(
-            model_dir, planner, backend,
-        )?;
-        Ok(LoadedModel::text(Box::new(model)))
+        crate::qwen_drive::load::load_registered(path, device, backend, options)
     }
     #[cfg(not(feature = "cuda"))]
     {
-        let _ = (path, device, backend);
+        let _ = (path, device, backend, options);
         Err(Error::Other(
-            "qwen_drive requires the cuda feature (native CUDA deployment); \
-             this build has no CUDA support"
-                .into(),
+            "qwen_drive planning requires the CUDA feature and a CUDA device".into(),
         ))
     }
 }
