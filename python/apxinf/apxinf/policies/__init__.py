@@ -59,3 +59,6 @@ __all__ = [
     "QwenDrivePolicy",
     "WallossPolicy",
 ]
+
+from .impls.openvla import OpenVlaPolicy
+__all__.append("OpenVlaPolicy")

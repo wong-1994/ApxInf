@@ -7,6 +7,7 @@
 pub mod activation;
 pub mod attention;
 pub mod cache;
+pub mod convolution;
 mod contracts;
 pub mod elementwise;
 pub mod embedding;

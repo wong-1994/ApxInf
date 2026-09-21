@@ -77,3 +77,10 @@ with named wire dialects — rather than a different `--action-dim`.
 WallOSS state-token binning is likewise loaded from checkpoint metadata
 (`config.json`, then legacy `config.yml`) and falls back to 256 only when absent.
 An explicit `"state_bins"` in `--policy-options` has highest precedence.
+
+## Original OpenVLA
+
+`openvla_infer.py --model-dir /path/to/openvla-7b --image observation.png
+--prompt "put spoon on towel"` uses the registered native BF16 policy and
+`bridge_orig` action normalization. See [the family contract](../../../doc/openvla.md)
+for build requirements, input semantics and graph preparation.

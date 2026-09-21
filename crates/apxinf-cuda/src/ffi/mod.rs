@@ -22,3 +22,6 @@ pub(crate) use cutlass::*;
 pub(crate) use driver::*;
 pub(crate) use fa2::*;
 pub(crate) use linear_attention::*;
+
+#[cfg(apxinf_cudnn)]
+pub(crate) mod cudnn;

@@ -15,6 +15,93 @@ use crate::context::CudaContext;
 use crate::cublas::CublasTranspose;
 use crate::tuning::{TacticStore, TuningDb, TuningMode, TuningPaths, TuningSession};
 
+/// Prepared cuBLAS BF16 linear execution with checkpoint-row-major weights.
+/// Owns a dedicated handle and stable 8 MiB workspace, so algorithm selection
+/// does not depend on another model's handle or the default workspace pool.
+pub struct Bf16LinearPlan {
+    stream: usize,
+    handle: crate::CublasHandle,
+    workspace: CudaBuffer,
+}
+impl Bf16LinearPlan {
+    pub fn new(ctx: &CudaContext) -> Result<Self> {
+        if !crate::workspace::may_prepare_native_resources() {
+            return Err(Error::Other(
+                "BF16 linear plan must be created before capture".into(),
+            ));
+        }
+        let workspace = CudaBuffer::alloc(8 * 1024 * 1024, ctx.device_id()).map_err(Error::Cuda)?;
+        let handle = crate::CublasHandle::new().map_err(Error::Cuda)?;
+        handle.set_stream(ctx.stream()).map_err(Error::Cuda)?;
+        handle.set_workspace(&workspace).map_err(Error::Cuda)?;
+        Ok(Self {
+            handle,
+            workspace,
+            stream: ctx.stream().handle() as usize,
+        })
+    }
+    /// BF16 linear projection preserving checkpoint-row-major weight `[N,K]`.
+    /// This explicit layout uses the cuBLAS transpose path and FP32 accumulation.
+    pub fn run(&self, ctx: &CudaContext, x: &Tensor, weight: &Tensor) -> Result<Tensor> {
+        if self.stream != ctx.stream().handle() as usize {
+            return Err(Error::Other(
+                "BF16 linear plan belongs to a different stream".into(),
+            ));
+        }
+        require_buffers(
+            ctx,
+            "BF16 linear workspace",
+            &[("workspace", &self.workspace, 8 * 1024 * 1024)],
+        )?;
+        let a = x.shape().dims();
+        let b = weight.shape().dims();
+        if a.len() != 2 || b.len() != 2 || a.contains(&0) || b.contains(&0) || a[1] != b[1] {
+            return Err(Error::Other(
+                "BF16 linear expects [M,K] and weight[N,K]".into(),
+            ));
+        }
+        for t in [x, weight] {
+            if t.dtype() != DType::BF16 || t.device() != Device::Cuda(ctx.device_id()) {
+                return Err(Error::Other(
+                    "BF16 linear requires inputs on the context device".into(),
+                ));
+            }
+            checked_bytes(DType::BF16, t.shape().dims(), "BF16 linear")?;
+        }
+        let int = |v: usize| {
+            i32::try_from(v).map_err(|_| Error::Other("BF16 linear dimension overflow".into()))
+        };
+        int(a[0])?;
+        let k = int(a[1])?;
+        let n = int(b[0])?;
+        let out = crate::workspace::output_buffer(
+            ctx,
+            checked_bytes(DType::BF16, &[a[0], b[0]], "BF16 linear")?,
+        )?;
+        let xp = CudaBuffer::from_tensor(x).map_err(Error::Cuda)?;
+        let wp = CudaBuffer::from_tensor(weight).map_err(Error::Cuda)?;
+        self.handle
+            .gemm_ex(
+                DType::BF16,
+                CublasTranspose::None,
+                CublasTranspose::Transpose,
+                a[0],
+                b[0],
+                a[1],
+                1.,
+                &xp,
+                k,
+                &wp,
+                k,
+                0.,
+                &out,
+                n,
+            )
+            .map_err(Error::Cuda)?;
+        Ok(out.into_tensor(apxinf_core::Shape::new(vec![a[0], b[0]]), DType::BF16))
+    }
+}
+
 /// BF16 `bias + weight @ vector`, with checkpoint-row-major weight `[N,K]`.
 /// Bias is the GEMM accumulator input, preserving the original matrix layout
 /// and avoiding a BF16 rounding between the dot product and the bias addition.
@@ -127,6 +214,73 @@ pub fn bf16_bias(ctx: &CudaContext, x: &Tensor, weight: &Tensor, bias: &Tensor) 
             m,
             n,
             k,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(out.into_tensor(apxinf_core::Shape::new(vec![a[0], b[1]]), DType::BF16))
+}
+
+/// Bias-epilogue GEMM with an explicit heuristic workspace limit.
+/// Prepared plans are keyed by the limit as well as the shape and bias pointer.
+pub fn bf16_bias_with_workspace_limit(
+    ctx: &CudaContext,
+    x: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    workspace_limit: usize,
+) -> Result<Tensor> {
+    if workspace_limit == 0 || workspace_limit > 32 * 1024 * 1024 {
+        return Err(Error::Other(
+            "BF16 bias workspace limit must be 1..=32 MiB".into(),
+        ));
+    }
+    let a = x.shape().dims();
+    let b = weight.shape().dims();
+    if a.len() != 2 || b.len() != 2 || a[1] != b[0] || bias.shape().dims() != [b[1]] {
+        return Err(Error::Other(
+            "BF16 biased GEMM expects [M,K] @ [K,N] + [N]".into(),
+        ));
+    }
+    for t in [x, weight, bias] {
+        if t.dtype() != DType::BF16 || t.device() != Device::Cuda(ctx.device_id()) {
+            return Err(Error::Other(
+                "biased GEMM requires BF16 inputs on the context device".into(),
+            ));
+        }
+        checked_bytes(DType::BF16, t.shape().dims(), "biased GEMM")?;
+    }
+    let int = |v: usize| {
+        i32::try_from(v).map_err(|_| Error::Other("biased GEMM dimension overflow".into()))
+    };
+    let (m, k, n) = (int(a[0])?, int(a[1])?, int(b[1])?);
+    let out = crate::workspace::output_buffer(
+        ctx,
+        checked_bytes(DType::BF16, &[a[0], b[1]], "biased GEMM output")?,
+    )?;
+    let xp = CudaBuffer::from_tensor(x).map_err(Error::Cuda)?;
+    let wp = CudaBuffer::from_tensor(weight).map_err(Error::Cuda)?;
+    let bp = CudaBuffer::from_tensor(bias).map_err(Error::Cuda)?;
+    unsafe {
+        if crate::workspace::may_prepare_native_resources() {
+            crate::ffi::check_cublas(crate::ffi::apxinf_static_prepare_bf16_gemm_bias_limited(
+                m,
+                n,
+                k,
+                bp.ptr(),
+                workspace_limit,
+            ))
+            .map_err(Error::Cuda)?;
+        }
+        crate::ffi::check_cublas(crate::ffi::apxinf_static_bf16_gemm_bias_limited(
+            xp.ptr(),
+            wp.ptr(),
+            bp.ptr(),
+            out.ptr(),
+            m,
+            n,
+            k,
+            workspace_limit,
             ctx.stream().handle(),
         ))
         .map_err(Error::Cuda)?;

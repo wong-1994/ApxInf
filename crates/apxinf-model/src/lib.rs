@@ -40,3 +40,6 @@ pub use vla::{
     PreparationStatus, PreparedInference, VisionObservation, VlaContract, VlaMetadata, VlaRequest,
     VlaRuntime,
 };
+
+#[cfg(feature="cuda")]
+pub mod openvla;

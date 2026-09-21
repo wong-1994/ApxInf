@@ -84,3 +84,15 @@ patch -p4 < /tmp/fa-fix.patch   # strip leading csrc/flash_attn/src/
 
 Record each applied fix in the commit log on this path. Do NOT edit
 the CUTLASS submodule without bumping the pin commit above.
+
+## Precise BF16 forward profile
+
+The ApxInf-owned `../fa2_precise.cu` instantiates head 64 and padded head 96
+(for actual head 72) without fast math and with `UNFUSE_FMA`, matching the
+PyTorch SDPA score-scaling convention. It uses a distinct C++ template namespace
+so the linker cannot substitute differently compiled instantiations. Upstream
+FA2 headers remain shared; this adds no dependency on PyTorch.
+
+The neighboring custom Welford LayerNorm and warp softmax implementation follow
+PyTorch v2.9.1 reduction ordering. The full upstream copyright notice is retained
+in `../licenses/PyTorch-LICENSE.txt`.

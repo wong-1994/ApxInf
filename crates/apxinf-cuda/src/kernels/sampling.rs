@@ -12,12 +12,13 @@ use crate::buffer::CudaBuffer;
 use crate::context::CudaContext;
 use crate::ffi;
 
-/// Write the index of the maximum element of 1-D BF16 `logits` into `out`.
+/// Write the smallest index of a maximum BF16 logit into `out`.
+/// Equal logits (including signed zero) and NaNs select the first index.
 ///
 /// `out` must hold at least one `u32`. Callers that need the index on the host
 /// can pass a host-mapped buffer and read it after synchronizing the stream.
 pub fn argmax_bf16_into(ctx: &CudaContext, logits: &Tensor, out: &CudaBuffer) -> Result<()> {
-    if logits.dtype() != DType::BF16 {
+    if logits.dtype() != DType::BF16 || logits.device() != apxinf_core::Device::Cuda(ctx.device_id()) {
         return Err(Error::Other(format!(
             "CUDA argmax supports BF16 logits, got {}",
             logits.dtype()

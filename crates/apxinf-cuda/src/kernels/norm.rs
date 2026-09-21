@@ -720,3 +720,88 @@ pub fn adaptive_rms_quant_f16_e4m3(
         output,
     ))
 }
+
+/// RMSNorm with a BF16 cast before the learned scale.
+pub fn rms_bf16_rounded(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+) -> Result<Tensor> {
+    let (rows, cols) = matrix_shape(input, "RMSNorm")?;
+    if rows == 0
+        || cols <= 128
+        || cols % 4 != 0
+        || rows > i32::MAX as usize
+        || cols > i32::MAX as usize
+        || !eps.is_finite()
+        || eps <= 0.
+        || input.device() != apxinf_core::Device::Cuda(ctx.device_id())
+        || weight.device() != input.device()
+        || input.dtype() != DType::BF16
+        || weight.dtype() != DType::BF16
+        || weight.shape().dims() != [cols]
+    {
+        return Err(Error::Other(
+            "static inference BF16 RMSNorm shape mismatch".into(),
+        ));
+    }
+    let output = bf16_output(ctx, rows, cols)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_rms_norm_bf16_rounded(
+            gpu_ptr(input)?,
+            gpu_ptr(weight)?,
+            output.ptr(),
+            rows as i32,
+            cols as i32,
+            eps,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(matrix_tensor(ctx, rows, cols, output))
+}
+
+/// BF16 LayerNorm using four-value Welford accumulation and a 128-thread tree.
+/// This preserves the reference vectorized reduction and affine operation order.
+pub fn layer_bf16_welford(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    eps: f32,
+) -> Result<Tensor> {
+    let (rows, cols) = matrix_shape(input, "Welford LayerNorm")?;
+    if rows == 0
+        || rows > i32::MAX as usize
+        || cols == 0
+        || cols % 4 != 0
+        || cols > (1 << 24)
+        || weight.shape().dims() != [cols]
+        || bias.shape().dims() != [cols]
+        || !eps.is_finite()
+        || eps <= 0.
+        || [input, weight, bias].iter().any(|t| {
+            t.dtype() != DType::BF16 || t.device() != apxinf_core::Device::Cuda(ctx.device_id())
+        })
+    {
+        return Err(Error::Other(
+            "invalid BF16 Welford LayerNorm arguments".into(),
+        ));
+    }
+    let output = bf16_output(ctx, rows, cols)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_layer_norm_welford_bf16(
+            gpu_ptr(input)?,
+            gpu_ptr(weight)?,
+            gpu_ptr(bias)?,
+            output.ptr(),
+            rows as _,
+            cols as _,
+            eps,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(matrix_tensor(ctx, rows, cols, output))
+}

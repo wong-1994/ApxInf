@@ -551,9 +551,11 @@ fn qkv_rope_impl(
     theta: f32,
     position_offset: usize,
     caches: Option<(&Tensor, &Tensor, usize)>,
+    frequencies: Option<&Tensor>,
 ) -> Result<QkvTensors> {
     let (tokens, width) = matrix_shape(qkv, "QKV RoPE")?;
-    let expected = (q_heads + 2 * kv_heads) * head_dim;
+    let expected = kv_heads.checked_mul(2).and_then(|n|q_heads.checked_add(n)).and_then(|n|n.checked_mul(head_dim)).ok_or_else(||Error::Other("QKV width overflow".into()))?;
+    if tokens==0 || q_heads==0 || kv_heads==0 || head_dim==0 || tokens>i32::MAX as usize || expected>i32::MAX as usize || position_offset.checked_add(tokens).is_none_or(|n|n>i32::MAX as usize) || !theta.is_finite() || theta<=0. || qkv.device()!=apxinf_core::Device::Cuda(ctx.device_id()) || bias.is_some_and(|t|t.device()!=qkv.device()) {return Err(Error::Other("invalid QKV RoPE dimensions, device or theta".into()));}
     if qkv.dtype() != DType::BF16
         || width != expected
         || head_dim > 256
@@ -564,6 +566,12 @@ fn qkv_rope_impl(
         return Err(Error::Other(
             "static inference BF16 QKV RoPE shape mismatch".into(),
         ));
+    }
+    if frequencies.is_some_and(|t| {
+        t.dtype() != DType::F32 || t.shape().dims() != [head_dim / 2]
+            || t.device() != qkv.device()
+    }) {
+        return Err(Error::Other("rounded RoPE requires device F32 inverse frequencies [head_dim/2]".into()));
     }
     let q_buffer = bf16_output(ctx, tokens * q_heads, head_dim)?;
     let owned_k = caches
@@ -578,11 +586,10 @@ fn qkv_rope_impl(
         let cache_shape = k.shape().dims();
         if k.dtype() != DType::BF16
             || v.dtype() != DType::BF16
-            || cache_shape.len() != 2
             || v.shape().dims() != cache_shape
-            || cache_shape[1] != head_dim
-            || kv_heads != 1
-            || offset + tokens > cache_shape[0]
+            || !((cache_shape.len()==2 && kv_heads==1 && cache_shape[1]==head_dim) || (cache_shape.len()==3 && cache_shape[1]==kv_heads && cache_shape[2]==head_dim))
+            || k.device()!=qkv.device() || v.device()!=qkv.device()
+            || offset.checked_add(tokens).is_none_or(|end|end>cache_shape[0] || end>i32::MAX as usize)
         {
             return Err(Error::Other(
                 "static inference BF16 cached QKV shape mismatch".into(),
@@ -597,23 +604,24 @@ fn qkv_rope_impl(
         )
     };
     unsafe {
-        ffi::check_cuda(ffi::apxinf_static_qkv_rope_bf16(
-            gpu_ptr(qkv)?,
-            optional_ptr(bias)?,
-            q_buffer.ptr(),
-            k_ptr,
-            v_ptr,
-            tokens as i32,
-            q_heads as i32,
-            kv_heads as i32,
-            head_dim as i32,
-            theta,
-            position_offset as i32,
-            output_offset as i32,
-            ctx.stream().handle(),
-        ))
-        .map_err(Error::Cuda)?;
+        let result = if let Some(frequencies) = frequencies {
+            ffi::apxinf_static_qkv_rope_bf16_rounded(
+                gpu_ptr(qkv)?, optional_ptr(bias)?, q_buffer.ptr(), k_ptr, v_ptr,
+                tokens as i32, q_heads as i32, kv_heads as i32, head_dim as i32,
+                gpu_ptr(frequencies)?, position_offset as i32, output_offset as i32,
+                ctx.stream().handle(),
+            )
+        } else {
+            ffi::apxinf_static_qkv_rope_bf16(
+                gpu_ptr(qkv)?, optional_ptr(bias)?, q_buffer.ptr(), k_ptr, v_ptr,
+                tokens as i32, q_heads as i32, kv_heads as i32, head_dim as i32,
+                theta, position_offset as i32, output_offset as i32,
+                ctx.stream().handle(),
+            )
+        };
+        ffi::check_cuda(result).map_err(Error::Cuda)?;
     }
+
     let q = make_gpu_tensor(
         Shape::new(vec![tokens, q_heads, head_dim]),
         DType::BF16,
@@ -666,6 +674,7 @@ pub fn split_qkv_apply_bf16(
         theta,
         position_offset,
         None,
+        None,
     )
 }
 
@@ -693,6 +702,7 @@ pub fn apply_q_write_kv_bf16(
         theta,
         position_offset,
         Some((k_cache, v_cache, output_offset)),
+        None,
     )?
     .q)
 }
@@ -827,4 +837,62 @@ pub fn apply_q_write_kv_f16(
         ctx.device_id(),
         q_buffer,
     ))
+}
+
+/// Rotary application retaining BF16 cosine and product rounding.
+/// `frequencies` is a device F32 `[head_dim / 2]` tensor prepared at load time.
+#[allow(clippy::too_many_arguments)]
+pub fn split_qkv_apply_bf16_rounded(
+    ctx: &CudaContext,
+    qkv: &Tensor,
+    bias: Option<&Tensor>,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    frequencies: &Tensor,
+    position_offset: usize,
+) -> Result<QkvTensors> {
+    qkv_rope_impl(
+        ctx,
+        qkv,
+        bias,
+        q_heads,
+        kv_heads,
+        head_dim,
+        1.0,
+        position_offset,
+        None,
+        Some(frequencies),
+    )
+}
+
+/// Rotary application retaining BF16 cosine and product rounding.
+/// `frequencies` is a device F32 `[head_dim / 2]` tensor prepared at load time.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_q_write_kv_bf16_rounded(
+    ctx: &CudaContext,
+    qkv: &Tensor,
+    bias: Option<&Tensor>,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    frequencies: &Tensor,
+    position_offset: usize,
+    k_cache: &Tensor,
+    v_cache: &Tensor,
+    output_offset: usize,
+) -> Result<Tensor> {
+    Ok(qkv_rope_impl(
+        ctx,
+        qkv,
+        bias,
+        q_heads,
+        kv_heads,
+        head_dim,
+        1.0,
+        position_offset,
+        Some((k_cache, v_cache, output_offset)),
+        Some(frequencies),
+    )?
+    .q)
 }

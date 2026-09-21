@@ -66,6 +66,7 @@ from .policies import (
     ComposablePolicy,
     Gr00tPolicy,
     Pi05Policy,
+    OpenVlaPolicy,
     Policy,
     WallossPolicy,
 )
@@ -87,6 +88,7 @@ __all__ = [
     "ComposablePolicy",
     # L2 policies
     "Pi05Policy",
+    "OpenVlaPolicy",
     "Pi0FastPolicy",
     "Gr00tPolicy",
     "WallossPolicy",

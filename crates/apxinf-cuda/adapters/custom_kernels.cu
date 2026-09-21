@@ -23,6 +23,7 @@ namespace {
 #include "../kernels/custom/preprocess.cuh"
 #include "../kernels/custom/attention.cuh"
 #include "../kernels/custom/normalization.cuh"
+#include "../kernels/custom/layer_norm_welford.cuh"
 #include "../kernels/custom/activation.cuh"
 #include "../kernels/custom/embedding.cuh"
 #include "../kernels/custom/elementwise.cuh"
@@ -33,6 +34,48 @@ namespace {
 #include "../kernels/custom/gdn_chunk_gemm_wmma.cuh"
 #include "../kernels/custom/gdn_attn_raw_wmma.cuh"
 }  // namespace
+
+// Warp-order FP32 softmax followed by the explicit BF16 probability boundary.
+// Reduction order follows PyTorch PersistentSoftmax.cuh (BSD, notice in licenses).
+__global__ void attention_softmax_warp_bf16_kernel(
+    const __nv_bfloat16* scores, __nv_bfloat16* output, int cols, int rows,
+    int offset, int heads) {
+  int row = blockIdx.x * 4 + threadIdx.y;
+  if (row >= rows) return;
+  int lane = threadIdx.x, limit = offset + row / heads;
+  float values[64];
+  int iterations = (cols + 31) / 32;
+  float maximum = -INFINITY;
+  for (int i = 0; i < iterations; ++i) {
+    int col = lane + i * 32;
+    float value = col < cols && col <= limit
+        ? __bfloat162float(scores[static_cast<int64_t>(row) * cols + col]) : -INFINITY;
+    values[i] = value;
+    maximum = fmaxf(maximum, value);
+  }
+  for (int d = 16; d > 0; d >>= 1)
+    maximum = fmaxf(maximum, __shfl_xor_sync(0xffffffff, maximum, d));
+  float sum = 0.f;
+  for (int i = 0; i < iterations; ++i) {
+    values[i] = expf(values[i] - maximum);
+    sum += values[i];
+  }
+  for (int d = 16; d > 0; d >>= 1)
+    sum += __shfl_xor_sync(0xffffffff, sum, d);
+  for (int i = 0; i < iterations; ++i) {
+    int col = lane + i * 32;
+    if (col < cols) output[static_cast<int64_t>(row) * cols + col] = __float2bfloat16(values[i] / sum);
+  }
+}
+extern "C" cudaError_t apxinf_attention_softmax_warp_bf16(
+    const void* scores, void* output, unsigned cols, unsigned rows,
+    unsigned offset, unsigned heads, cudaStream_t stream) {
+  if (!scores || !output || !cols || cols > 2048 || !rows || !heads)
+    return cudaErrorInvalidValue;
+  attention_softmax_warp_bf16_kernel<<<(rows + 3) / 4, dim3(32, 4), 0, stream>>>(
+      (const __nv_bfloat16*)scores, (__nv_bfloat16*)output, cols, rows, offset, heads);
+  return cudaGetLastError();
+}
 
 extern "C" cudaError_t apxinf_sinusoidal_embedding_bf16(const void* positions,void* output,
     int rows,int dim,float scale,float frequency_step,cudaStream_t stream) {
@@ -1695,4 +1738,10 @@ extern "C" cudaError_t apxinf_static_gelu_exact_bf16(
       static_cast<const __nv_bfloat16*>(input),
       static_cast<__nv_bfloat16*>(output), count);
   return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_layer_norm_welford_bf16(const void* x,const void* w,const void* b,void* y,int rows,int cols,float eps,cudaStream_t stream) {
+ if(!x||!w||!b||!y||rows<=0||cols<=0||cols%4||cols>(1<<24)||!std::isfinite(eps)||eps<=0) return cudaErrorInvalidValue;
+ layer_norm_welford_bf16_kernel<<<rows,dim3(32,4),0,stream>>>((const __nv_bfloat16*)x,(const __nv_bfloat16*)w,(const __nv_bfloat16*)b,(__nv_bfloat16*)y,rows,cols,eps);
+ return cudaGetLastError();
 }

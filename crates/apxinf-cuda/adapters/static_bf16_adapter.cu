@@ -653,3 +653,35 @@ extern "C" cudaError_t apxinf_static_bias_position_f32_bf16(
       static_cast<__nv_bfloat16*>(output), count, cols, tokens_per_view);
   return cudaGetLastError();
 }
+
+extern "C" cudaError_t apxinf_static_rms_norm_bf16_rounded(
+    const void* input, const void* weight, void* output,
+    int rows, int cols, float eps, cudaStream_t stream) {
+  if(!input||!weight||!output||rows<=0||cols<=128||cols%4||!std::isfinite(eps)||eps<=0)
+    return cudaErrorInvalidValue;
+  rms_norm_bf16_rounded_kernel<<<rows, [&]{
+    int row_power=1;while(row_power<16 && row_power*2<=rows)row_power*=2;
+    int threads=512/row_power;while(threads>32 && threads>cols/4)threads/=2;
+    return threads;
+  }(), 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<const __nv_bfloat16*>(weight),
+      static_cast<__nv_bfloat16*>(output), rows, cols, eps);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_static_qkv_rope_bf16_rounded(
+    const void* qkv, const void* bias, void* q, void* k, void* v,
+    int tokens, int q_heads, int kv_heads, int head_dim,
+    const void* frequencies, int position_offset, int kv_output_offset,
+    cudaStream_t stream) {
+  if (!qkv || !q || !k || !v || !frequencies || tokens <= 0 || q_heads <= 0 || kv_heads <= 0 || head_dim <= 0 || head_dim > 256 || head_dim % 2 || position_offset < 0 || kv_output_offset < 0) return cudaErrorInvalidValue;
+  dim3 grid(tokens, q_heads + 2 * kv_heads, 1);
+  qkv_rope_bf16_rounded_kernel<<<grid, head_dim / 2, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(qkv),
+      static_cast<const __nv_bfloat16*>(bias),
+      static_cast<__nv_bfloat16*>(q), static_cast<__nv_bfloat16*>(k),
+      static_cast<__nv_bfloat16*>(v), tokens, q_heads, kv_heads, head_dim,
+      static_cast<const float*>(frequencies), position_offset, kv_output_offset);
+  return cudaGetLastError();
+}

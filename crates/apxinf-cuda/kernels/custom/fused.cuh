@@ -1011,3 +1011,62 @@ __global__ void vision_qkv_rope_kernel(
     v[token * projection_width + col] = __float2bfloat16(value);
   }
 }
+
+// Unfused BF16 rotary multiply/add boundaries.
+__global__ void qkv_rope_bf16_rounded_kernel(
+    const __nv_bfloat16* qkv, const __nv_bfloat16* bias,
+    __nv_bfloat16* q, __nv_bfloat16* k, __nv_bfloat16* v,
+    int tokens, int q_heads, int kv_heads, int head_dim,
+    const float* frequencies, int position_offset, int kv_output_offset) {
+  const int token = blockIdx.x;
+  const int projection_head = blockIdx.y;
+  const int half_dim = head_dim / 2;
+  const int pair = threadIdx.x;
+  if (pair >= half_dim) return;
+  const int q_width = q_heads * head_dim;
+  const int kv_width = kv_heads * head_dim;
+  const int fused_width = q_width + 2 * kv_width;
+  const int position = position_offset + token;
+  const float frequency = frequencies[pair];
+  float sine, cosine;
+  sincosf(position * frequency, &sine, &cosine);
+  sine = __bfloat162float(__float2bfloat16(sine));
+  cosine = __bfloat162float(__float2bfloat16(cosine));
+
+  if (projection_head < q_heads) {
+    const int source = token * fused_width + projection_head * head_dim;
+    float first = __bfloat162float(qkv[source + pair]);
+    float second = __bfloat162float(qkv[source + half_dim + pair]);
+    if (bias != nullptr) {
+      first += __bfloat162float(bias[projection_head * head_dim + pair]);
+      second += __bfloat162float(bias[projection_head * head_dim + half_dim + pair]);
+    }
+    const int destination = (token * q_heads + projection_head) * head_dim;
+    q[destination + pair] = __float2bfloat16(__fsub_rn(__bfloat162float(__float2bfloat16(first * cosine)), __bfloat162float(__float2bfloat16(second * sine))));
+    q[destination + half_dim + pair] = __float2bfloat16(__fadd_rn(__bfloat162float(__float2bfloat16(second * cosine)), __bfloat162float(__float2bfloat16(first * sine))));
+  } else if (projection_head < q_heads + kv_heads) {
+    const int head = projection_head - q_heads;
+    const int source = token * fused_width + q_width + head * head_dim;
+    float first = __bfloat162float(qkv[source + pair]);
+    float second = __bfloat162float(qkv[source + half_dim + pair]);
+    if (bias != nullptr) {
+      first += __bfloat162float(bias[q_width + head * head_dim + pair]);
+      second += __bfloat162float(bias[q_width + head * head_dim + half_dim + pair]);
+    }
+    const int destination = ((kv_output_offset + token) * kv_heads + head) * head_dim;
+    k[destination + pair] = __float2bfloat16(__fsub_rn(__bfloat162float(__float2bfloat16(first * cosine)), __bfloat162float(__float2bfloat16(second * sine))));
+    k[destination + half_dim + pair] = __float2bfloat16(__fadd_rn(__bfloat162float(__float2bfloat16(second * cosine)), __bfloat162float(__float2bfloat16(first * sine))));
+  } else {
+    const int head = projection_head - q_heads - kv_heads;
+    const int source = token * fused_width + q_width + kv_width + head * head_dim;
+    const int destination = ((kv_output_offset + token) * kv_heads + head) * head_dim;
+    float first = __bfloat162float(qkv[source + pair]);
+    float second = __bfloat162float(qkv[source + half_dim + pair]);
+    if (bias != nullptr) {
+      first += __bfloat162float(bias[q_width + kv_width + head * head_dim + pair]);
+      second += __bfloat162float(bias[q_width + kv_width + head * head_dim + half_dim + pair]);
+    }
+    v[destination + pair] = __float2bfloat16(first);
+    v[destination + half_dim + pair] = __float2bfloat16(second);
+  }
+}
