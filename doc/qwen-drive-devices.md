@@ -109,3 +109,16 @@ CUDA regressions cover cancellation-sensitive projection inputs and graph
 capture/replay with an updated bias. These operator checks do not establish
 whole-model graph support or downstream planning accuracy; those remain subject
 to the validation limits above.
+
+## PR78 follow-up integration
+
+The planning-only runtime incorporates PR78 through `5d7d785`, including
+reference-math FA2 symbol isolation, reduction/attention scratch synchronization,
+cached LayerNorm regression coverage and legacy FP8 TN layout support. The
+BF16 addmv FP32-accumulator fix is retained. Projection layout remains an explicit
+construction-time enum; zero KV grouping is rejected before division. Upstream
+text-registry loading tests are adapted to the VLA contract: both default and
+explicit invalid planners fail, with no text-only fallback.
+
+Earlier numerical and latency measurements do not qualify this rebuilt backend;
+re-run fixed-input accuracy and alternating latency measurements after integration.

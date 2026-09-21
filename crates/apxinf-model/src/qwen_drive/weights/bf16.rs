@@ -308,6 +308,26 @@ mod frequency_tests {
     use super::fourier_freq_table;
 
     #[test]
+    fn projection_packing_obeys_the_explicit_layout() {
+        let values: Vec<_> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+            .into_iter()
+            .map(half::bf16::from_f32)
+            .collect();
+        let weight = apxinf_core::Tensor::from_bf16(vec![2, 3], &values).unwrap();
+        let checkpoint = super::projection(
+            &weight,
+            crate::qwen_drive::config::ProjectionLayout::Checkpoint,
+        )
+        .unwrap();
+        assert_eq!(checkpoint.shape().dims(), &[2, 3]);
+        assert_eq!(checkpoint.as_bf16().unwrap(), values);
+        let in_out =
+            super::projection(&weight, crate::qwen_drive::config::ProjectionLayout::Tuned).unwrap();
+        assert_eq!(in_out.shape().dims(), &[3, 2]);
+        assert_eq!(in_out.to_f32_vec().unwrap(), [1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
     fn bf16_logspace_matches_frozen_cuda_reference() {
         let expected = [
             1.0, 1.203125, 1.4453125, 1.7421875, 2.09375, 2.515625, 3.015625, 3.65625, 4.375,
