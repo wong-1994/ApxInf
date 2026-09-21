@@ -373,3 +373,7 @@ A concrete operator/capture blocker is unfinished port work, not completion.
 Update the family's capability documentation and the shared registry/interface
 documentation in the same change; historical performance or another family's
 prepared-plan tests do not establish support for the new family.
+
+The original BF16 OpenVLA port is another family-local example of an
+autoregressive VLA with a whole-model graph; its token and continuous-action
+boundaries are documented in [OpenVLA](openvla.md).

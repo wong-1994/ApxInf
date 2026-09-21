@@ -14,23 +14,19 @@ __global__ void argmax_bf16_kernel(
     const __nv_bfloat16* logits, uint32_t n, uint32_t* out)
 {
     uint32_t tid = threadIdx.x;
-    // Pack (value, index) as uint64: value in the high 32 bits (reinterpreted
-    // from float bits via -value so larger float → larger uint), index low.
+    // Order equal values by the smallest index, including ties across warps.
     auto pack = [](float v, uint32_t i) -> uint64_t {
+        if (v == 0.f) v = 0.f; // -0 and +0 compare equal.
         uint32_t bits = __float_as_uint(v);
-        // Flip the sign bit for positive, invert all bits for negative, so the
-        // uint ordering matches float ordering. Then bias to non-negative.
-        uint32_t ordered = (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
-        return ((uint64_t)ordered << 32) | (uint64_t)i;
+        uint32_t ordered = isnan(v) ? 0xffffffffu
+            : ((bits & 0x80000000u) ? ~bits : (bits | 0x80000000u));
+        return (static_cast<uint64_t>(ordered) << 32) | static_cast<uint64_t>(~i);
     };
     uint64_t best = 0;
-    float best_v = -INFINITY;
-    uint32_t best_i = 0;
     for (uint32_t i = tid; i < n; i += blockDim.x) {
-        float v = __bfloat162float(logits[i]);
-        if (v > best_v) { best_v = v; best_i = i; }
+        uint64_t candidate = pack(__bfloat162float(logits[i]), i);
+        if (candidate > best) best = candidate;
     }
-    best = pack(best_v, best_i);
     // Warp reduce: keep the (max value, its index).
     for (int off = 16; off > 0; off >>= 1) {
         uint64_t other = __shfl_xor_sync(0xffffffff, best, off);
@@ -45,7 +41,7 @@ __global__ void argmax_bf16_kernel(
         uint64_t v = (tid < (blockDim.x + 31) / 32) ? warp_best[tid] : 0;
         for (int off = 16; off > 0; off >>= 1)
             v = max(v, __shfl_xor_sync(0xffffffff, v, off));
-        if (lane == 0) *out = (uint32_t)v;   // low 32 bits = index
+        if (lane == 0) *out = ~static_cast<uint32_t>(v);
     }
 }
 

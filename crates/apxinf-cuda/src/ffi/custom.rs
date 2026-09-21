@@ -1136,6 +1136,16 @@ extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
 
+    pub fn apxinf_attention_softmax_warp_bf16(
+        scores: *const c_void,
+        output: *mut c_void,
+        cols: u32,
+        rows: u32,
+        kv_offset: u32,
+        n_heads: u32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
     pub fn apxinf_attention_softmax_bf16(
         scores: *const c_void,
         output: *mut c_void,
@@ -1402,3 +1412,32 @@ extern "C" {
     ) -> cudaError_t;
 
 }
+
+extern "C" {
+    pub fn apxinf_static_rms_norm_bf16_rounded(
+        input: *const c_void,
+        weight: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_static_qkv_rope_bf16_rounded(
+        qkv: *const c_void,
+        bias: *const c_void,
+        q: *mut c_void,
+        k: *mut c_void,
+        v: *mut c_void,
+        tokens: i32,
+        q_heads: i32,
+        kv_heads: i32,
+        head_dim: i32,
+        frequencies: *const c_void,
+        position_offset: i32,
+        kv_output_offset: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+}
+
+extern "C" { pub fn apxinf_layer_norm_welford_bf16(x:*const c_void,w:*const c_void,b:*const c_void,y:*mut c_void,rows:i32,cols:i32,eps:f32,stream:cudaStream_t)->cudaError_t; }

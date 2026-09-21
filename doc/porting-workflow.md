@@ -180,8 +180,10 @@ abs(actual - reference) <= atol + rtol * abs(reference)
 ```
 
 Do not approve a rewrite solely because shapes match or the final output looks
-plausible. If a supposedly canonical rewrite changes semantics, stop and report
-the gap.
+plausible. If a supposedly canonical rewrite changes semantics, pause the
+rewrite, locate the first divergence, and repair it before continuing. A failed
+comparison is a debugging checkpoint; stop the task only if the next required
+step depends on unavailable external information, authority, hardware or artifacts.
 
 ## 5. Design the target execution path
 

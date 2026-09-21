@@ -26,3 +26,6 @@ from .qwen_drive import QwenDrivePolicy
 from .walloss import WallossPolicy
 
 __all__ = ["Pi05Policy", "Pi0FastPolicy", "Gr00tPolicy", "QwenDrivePolicy", "WallossPolicy"]
+
+from .openvla import OpenVlaPolicy
+__all__.append("OpenVlaPolicy")

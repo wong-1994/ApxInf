@@ -41,6 +41,7 @@ extern "C" {
     pub fn cublasCreate_v2(handle: *mut cublasHandle_t) -> cublasStatus_t;
     pub fn cublasDestroy_v2(handle: cublasHandle_t) -> cublasStatus_t;
     pub fn cublasSetStream_v2(handle: cublasHandle_t, stream: cudaStream_t) -> cublasStatus_t;
+    pub fn cublasSetWorkspace_v2(handle: cublasHandle_t, workspace: *mut c_void, bytes: usize) -> cublasStatus_t;
     pub fn cublasGetVersion_v2(handle: cublasHandle_t, version: *mut i32) -> cublasStatus_t;
 
     /// Single-precision GEMM: C = alpha * op(A) * op(B) + beta * C

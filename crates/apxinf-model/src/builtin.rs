@@ -27,6 +27,8 @@ pub fn register_builtin_models() {
     crate::pi0fast::register_builtin();
     #[cfg(feature = "cuda")]
     crate::gr00t::register_builtin();
+    #[cfg(feature = "cuda")]
+    crate::openvla::register_builtin();
 }
 fn load_llama(
     path: &Path,

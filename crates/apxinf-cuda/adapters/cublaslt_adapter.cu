@@ -135,6 +135,8 @@ thread_local std::unordered_map<ShapeKey, Bf16GemmPlan, ShapeHash>
     g_bf16_plans;
 thread_local std::unordered_map<ResidualKey, Bf16GemmPlan, ResidualHash>
     g_bf16_bias_plans;
+thread_local std::unordered_map<size_t, std::unordered_map<ResidualKey,Bf16GemmPlan,ResidualHash>>
+    g_bf16_bias_limited_plans;
 thread_local std::unordered_map<ShapeKey, GemmPlan, ShapeHash>
     g_fp8_split_plans;
 thread_local std::unordered_map<ShapeKey, GemmPlan, ShapeHash>
@@ -489,7 +491,7 @@ cublasStatus_t make_fp8_bf16_plan(const ShapeKey& key, GemmPlan* plan) {
   return status;
 }
 
-cublasStatus_t make_bf16_plan(const ShapeKey& key, Bf16GemmPlan* plan, const void* bias = nullptr) {
+cublasStatus_t make_bf16_plan(const ShapeKey& key, Bf16GemmPlan* plan, const void* bias = nullptr, size_t workspace_limit = kWorkspaceBytes) {
   // Row-major D=A@B is represented as the column-major identity
   // D^T=B^T@A^T, matching the existing cuBLAS physical GEMM contract.
   cublasStatus_t status = cublasLtMatmulDescCreate(
@@ -541,7 +543,7 @@ cublasStatus_t make_bf16_plan(const ShapeKey& key, Bf16GemmPlan* plan, const voi
   cublasLtMatmulPreference_t preference = nullptr;
   status = cublasLtMatmulPreferenceCreate(&preference);
   if (status != CUBLAS_STATUS_SUCCESS) return status;
-  size_t workspace_bytes = kWorkspaceBytes;
+  size_t workspace_bytes = workspace_limit;
   status = cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
       &workspace_bytes, sizeof(workspace_bytes));
@@ -963,6 +965,35 @@ extern "C" int apxinf_static_bf16_gemm_bias(const void* x,const void* weight,con
   auto& plan=it->second;const float alpha=1.0f,beta=0.0f;
   return static_cast<int>(cublasLtMatmul(g_lt,plan.operation,&alpha,weight,plan.weight,x,plan.activation,
       &beta,output,plan.output,output,plan.output,&plan.algorithm,g_workspace,kWorkspaceBytes,stream));
+}
+
+extern "C" int apxinf_static_prepare_bf16_gemm_bias_limited(int m, int n, int k, const void* bias, size_t workspace_limit) {
+  if(workspace_limit==0||workspace_limit>kWorkspaceBytes) return static_cast<int>(CUBLAS_STATUS_INVALID_VALUE);
+  if(m<=0||n<=0||k<=0||bias==nullptr) return static_cast<int>(CUBLAS_STATUS_INVALID_VALUE);
+  auto status=initialize();
+  if(status!=CUBLAS_STATUS_SUCCESS) return static_cast<int>(status);
+  auto& plans=g_bf16_bias_limited_plans[workspace_limit];
+  ResidualKey key{ShapeKey{m,n,k},bias};
+  if(plans.find(key)!=plans.end()) return 0;
+  Bf16GemmPlan plan;
+  status=make_bf16_plan(key.shape,&plan,bias,workspace_limit);
+  if(status!=CUBLAS_STATUS_SUCCESS) {destroy_bf16_plan(&plan);return static_cast<int>(status);}
+  plans.emplace(key,plan);
+  return 0;
+}
+
+extern "C" int apxinf_static_bf16_gemm_bias_limited(const void* x,const void* weight,const void* bias,
+    void* output,int m,int n,int k,size_t workspace_limit,cudaStream_t stream) {
+  if(workspace_limit==0||workspace_limit>kWorkspaceBytes) return static_cast<int>(CUBLAS_STATUS_INVALID_VALUE);
+  if(!x||!weight||!bias||!output||m<=0||n<=0||k<=0) return static_cast<int>(CUBLAS_STATUS_INVALID_VALUE);
+  auto group=g_bf16_bias_limited_plans.find(workspace_limit);
+  if(group==g_bf16_bias_limited_plans.end()) return static_cast<int>(CUBLAS_STATUS_NOT_INITIALIZED);
+  auto& plans=group->second;
+  auto it=plans.find(ResidualKey{ShapeKey{m,n,k},bias});
+  if(it==plans.end()) return static_cast<int>(CUBLAS_STATUS_NOT_INITIALIZED);
+  auto& plan=it->second;const float alpha=1.0f,beta=0.0f;
+  return static_cast<int>(cublasLtMatmul(g_lt,plan.operation,&alpha,weight,plan.weight,x,plan.activation,
+      &beta,output,plan.output,output,plan.output,&plan.algorithm,g_workspace,workspace_limit,stream));
 }
 
 extern "C" int apxinf_static_prepare_bf16_gemm_split(

@@ -139,9 +139,15 @@ completion criteria, a concrete blocker, or an approval the agent cannot grant.
 In hands-on mode, pause at named checkpoints with a concrete question and a
 default next action, including whether to commit when that choice is useful.
 
-Stop with a concrete blocker when the reference cannot run, semantics remain
-unknown, canonical equivalence fails, a required kernel has no correct path, or
-the maintained public integration cannot be exercised. Missing ApxInf-native
+Treat numerical equivalence failures as diagnosis checkpoints: locate the first
+divergence, repair the implementation, and replay the unchanged reference cases.
+Continue while safe in-scope debugging is possible. Record compiler/runtime
+versions, reduction and rounding boundaries, GEMM workspace/algorithm choices,
+and argmax tie behavior when they affect the confirmed precision contract.
+
+Stop with a concrete blocker only when the next required action depends on
+unavailable external information, authority, hardware or artifacts; explain
+that dependency rather than treating a failed comparison itself as a stop. Missing ApxInf-native
 GPU coverage is a blocker; it does not authorize a third-party engine or CPU
 partition. For a VLA, absence of both a whole-model graph and the complete
 Vision/Language/Action fallback partition is also a blocker. A performance gap alone

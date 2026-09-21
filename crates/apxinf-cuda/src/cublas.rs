@@ -44,6 +44,10 @@ impl CublasHandle {
         unsafe { ffi::check_cublas(ffi::cublasSetStream_v2(self.handle, stream.handle())) }
     }
 
+    pub(crate) fn set_workspace(&self, workspace: &CudaBuffer) -> Result<(), String> {
+        unsafe { ffi::check_cublas(ffi::cublasSetWorkspace_v2(self.handle,workspace.ptr(),workspace.len())) }
+    }
+
     /// Return the linked cuBLAS library version encoded as `CUBLAS_VERSION`.
     pub fn version(&self) -> Result<i32, String> {
         let mut version = 0;
@@ -223,6 +227,30 @@ impl CublasHandle {
                 }
             }
             DType::F8E4M3 => Err("use kernels::gemm::fp8 for FP8 operands".into()),
+        }
+    }
+
+    /// BF16 strided batch with explicit row strides and transpose operations.
+    /// Strides are measured in elements. The caller validates buffer extents.
+    pub(crate) fn batched_gemm_bf16_ex(
+        &self, transa: CublasTranspose, transb: CublasTranspose,
+        m: usize, n: usize, k: usize,
+        a: &CudaBuffer, lda: i32, stride_a: i64,
+        b: &CudaBuffer, ldb: i32, stride_b: i64,
+        c: &CudaBuffer, ldc: i32, stride_c: i64, batches: i32,
+    ) -> Result<(), String> {
+        let alpha = 1.0f32;
+        let beta = 0.0f32;
+        unsafe {
+            ffi::check_cublas(ffi::cublasGemmStridedBatchedEx(
+                self.handle, transb.raw(), transa.raw(), n as i32, m as i32, k as i32,
+                &alpha as *const f32 as *const c_void,
+                b.ptr(), ffi::cudaDataType_t::CUDA_R_16BF, ldb, stride_b,
+                a.ptr(), ffi::cudaDataType_t::CUDA_R_16BF, lda, stride_a,
+                &beta as *const f32 as *const c_void,
+                c.ptr(), ffi::cudaDataType_t::CUDA_R_16BF, ldc, stride_c,
+                batches, ffi::cublasComputeType_t::CUBLAS_COMPUTE_32F, -1,
+            ))
         }
     }
 

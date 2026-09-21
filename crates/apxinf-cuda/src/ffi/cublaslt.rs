@@ -23,6 +23,24 @@ extern "C" {
         k: i32,
         stream: cudaStream_t,
     ) -> cublasStatus_t;
+    pub fn apxinf_static_prepare_bf16_gemm_bias_limited(
+        m: i32,
+        n: i32,
+        k: i32,
+        bias: *const c_void,
+        workspace_limit: usize,
+    ) -> cublasStatus_t;
+    pub fn apxinf_static_bf16_gemm_bias_limited(
+        x: *const c_void,
+        weight: *const c_void,
+        bias: *const c_void,
+        output: *mut c_void,
+        m: i32,
+        n: i32,
+        k: i32,
+        workspace_limit: usize,
+        stream: cudaStream_t,
+    ) -> cublasStatus_t;
     pub fn apxinf_static_set_cublaslt_bf16_gemm_heuristic(
         m: i32,
         n: i32,

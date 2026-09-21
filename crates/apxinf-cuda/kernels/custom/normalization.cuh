@@ -457,3 +457,36 @@ __global__ void ada_rms_norm_bf16_kernel(
         __bfloat162float(style[cols + col]));
   }
 }
+
+// Vectorized FP32 square/mean order, followed by the BF16 normalization boundary.
+__global__ void rms_norm_bf16_rounded_kernel(
+    const __nv_bfloat16* input, const __nv_bfloat16* weight,
+    __nv_bfloat16* output, int rows, int cols, float eps) {
+  __shared__ float partial[512];
+  const int row=blockIdx.x,tid=threadIdx.x;
+  const int64_t base=static_cast<int64_t>(row)*cols;
+  float sums[4]={0.f,0.f,0.f,0.f};
+  for(int col=tid*4;col<cols;col+=blockDim.x*4) {
+    #pragma unroll
+    for(int j=0;j<4;++j) {
+      float v=__bfloat162float(input[base+col+j]);
+      sums[j]=__fadd_rn(sums[j],__fmul_rn(v,v));
+    }
+  }
+  float sum=((sums[0]+sums[1])+sums[2])+sums[3];
+  partial[tid]=sum;
+  for(int offset=blockDim.x/2;offset>=32;offset>>=1) {
+    __syncthreads();
+    if(tid<offset){sum+=partial[tid+offset];partial[tid]=sum;}
+  }
+  __syncthreads();
+  if(tid<32) {
+    for(int offset=1;offset<32;offset<<=1)sum+=__shfl_down_sync(0xffffffff,sum,offset);
+    if(tid==0)partial[0]=rsqrtf(__fadd_rn(__fmul_rn(sum,1.f/cols),eps));
+  }
+  __syncthreads();
+  for(int col=tid;col<cols;col+=blockDim.x) {
+    float normalized=__bfloat162float(__float2bfloat16(__bfloat162float(input[base+col])*partial[0]));
+    output[base+col]=__float2bfloat16(normalized*__bfloat162float(weight[col]));
+  }
+}

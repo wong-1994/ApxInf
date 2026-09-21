@@ -161,6 +161,16 @@ fn is_cutlass_sm89_family(arch: &str) -> bool {
 }
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(apxinf_cudnn)");
+    println!("cargo:rerun-if-env-changed=CUDNN_LIB_DIR");
+    if let Ok(dir) = env::var("CUDNN_LIB_DIR") {
+        let library = std::path::Path::new(&dir).join("libcudnn.so.9");
+        assert!(library.is_file(), "CUDNN_LIB_DIR must contain libcudnn.so.9");
+        println!("cargo:rustc-link-search=native={dir}");
+        println!("cargo:rustc-link-lib=dylib:+verbatim=libcudnn.so.9");
+        println!("cargo:rustc-cfg=apxinf_cudnn");
+    }
+
     println!("cargo:rustc-check-cfg=cfg(nvtx_v2)");
     println!("cargo:rustc-check-cfg=cfg(nvtx_v3)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_cutlass_fmha)");
@@ -468,6 +478,7 @@ fn main() {
                 fa2_sources.extend([
                     fa2_wrapper.clone(),
                     fa2_hdim64_apx,
+                    cutlass_root.join("fa2_precise.cu"),
                     fa2_hdim96,
                     fa2_hdim128,
                     fa2_hdim256,
@@ -602,7 +613,8 @@ fn main() {
                         // Reference SDPA specializations use libdevice exp/log in the
                         // split combiner; fast math changes BF16 output rounding.
                         if !entry.ends_with("fa2_head256_adapter.cu")
-                            && !entry.ends_with("fa2_head64_adapter.cu") {
+                            && !entry.ends_with("fa2_head64_adapter.cu")
+                            && !entry.ends_with("fa2_precise.cu") {
                             cmd.arg("--use_fast_math");
                         }
                         cmd.args([

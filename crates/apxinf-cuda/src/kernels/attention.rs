@@ -3212,3 +3212,100 @@ pub fn mqa_f16_e4m3_522(
         "FA2 direct E4M3 requires an SM100-family FA2 build".into(),
     ))
 }
+
+mod rounded;
+pub use rounded::causal_mha_bf16_rounded;
+
+#[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
+#[allow(clippy::too_many_arguments)]
+fn fa2_attention_precise(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    batches: usize,
+    query_tokens: usize,
+    key_tokens: usize,
+    query_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    let output = output_buffer(ctx, q.size_in_bytes())?;
+    let lse_elements = batches
+        .checked_mul(query_heads)
+        .and_then(|value| value.checked_mul(query_tokens))
+        .ok_or_else(|| Error::Other("static inference BF16 FA2 LSE size overflow".into()))?;
+    let softmax_lse = output_buffer(
+        ctx,
+        lse_elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                Error::Other("static inference BF16 FA2 LSE byte size overflow".into())
+            })?,
+    )?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_fa2_bf16_precise(
+            gpu_ptr(q)?,
+            gpu_ptr(k)?,
+            gpu_ptr(v)?,
+            output.ptr(),
+            softmax_lse.ptr(),
+            batches as i32,
+            query_tokens as i32,
+            key_tokens as i32,
+            query_heads as i32,
+            kv_heads as i32,
+            head_dim as i32,
+            (head_dim as f32).sqrt().recip(),
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(make_gpu_tensor(
+        q.shape().clone(),
+        DType::BF16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
+/// Noncausal MHA preserving the upstream head-64 arithmetic specialization.
+/// Other head dimensions use the ordinary MHA implementation. Both paths use
+/// graph-workspace storage and execute without native resource preparation.
+pub fn mha_bf16_precise(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    tokens: usize,
+) -> Result<Tensor> {
+    let shape = q.shape().dims();
+    if shape.len() != 3
+        || shape.contains(&0)
+        || tokens == 0
+        || shape[0] % tokens != 0
+        || q.shape() != k.shape()
+        || q.shape() != v.shape()
+        || [q, k, v]
+            .iter()
+            .any(|t| t.dtype() != DType::BF16 || t.device() != Device::Cuda(ctx.device_id()))
+    {
+        return Err(Error::Other("BF16 MHA shape/dtype/device mismatch".into()));
+    }
+    #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
+    if matches!(shape[2], 64 | 72) {
+        return fa2_attention_precise(
+            ctx,
+            q,
+            k,
+            v,
+            shape[0] / tokens,
+            tokens,
+            tokens,
+            shape[1],
+            shape[1],
+            shape[2],
+        );
+    }
+    mha_bf16(ctx, q, k, v, tokens)
+}
