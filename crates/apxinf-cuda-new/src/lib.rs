@@ -29,6 +29,7 @@ pub use ops::{
 };
 pub use phase::PreparedPhase;
 pub use stream::CudaStream;
+pub use workspace::ProviderWorkspace;
 
 pub mod ops;
 
