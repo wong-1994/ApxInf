@@ -380,6 +380,19 @@ impl AutoModel {
                     config_path.display()
                 ))
             })?;
+        // WallOSS keeps Qwen2.5-VL's generic model_type. Two execution
+        // experts plus the action head are the stable discriminator; do not
+        // route every qwen2_5_vl checkpoint to WallOSS.
+        if model_type == "qwen2_5_vl"
+            && config
+                .get("experts")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|experts| experts.len() == 2)
+            && config.get("action_hidden_size").is_some()
+            && config.get("noise_scheduler").is_some()
+        {
+            return Ok("walloss".to_owned());
+        }
         Ok(model_type.to_owned())
     }
 
@@ -407,6 +420,12 @@ impl AutoModel {
             return Err(Error::Other(format!(
                 "model {model_name} does not yet support model_variant"
             )));
+        }
+
+        if matches!(model_name, "walloss" | "wall-oss" | "wall_oss_05")
+            && device == Device::Cpu
+        {
+            return crate::cpu_walloss::load(path, options);
         }
 
         if matches!(model_name, "pi05" | "pi05-cuda" | "pi05-hip") {
@@ -653,7 +672,9 @@ fn supports_model_variant(model_name: &str, device: Device) -> bool {
             | "d3-cuda"
             | "smolvla"
             | "smolvla_libero"
-    ) || matches!(device, Device::Metal(_))
+    ) || (device == Device::Cpu
+        && matches!(model_name, "walloss" | "wall-oss" | "wall_oss_05"))
+        || matches!(device, Device::Metal(_))
 }
 #[cfg(test)]
 mod tests {

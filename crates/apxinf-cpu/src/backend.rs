@@ -96,6 +96,29 @@ impl Backend for CpuBackend {
         crate::gemm::matmul(a, b)
     }
 
+    fn rope_mrope(
+        &self,
+        input: &Tensor,
+        n_heads: usize,
+        head_dim: usize,
+        theta: f32,
+        sections: [usize; 3],
+        pos_ids: &[u32],
+    ) -> Result<Tensor> {
+        crate::rope::mrope(input, n_heads, head_dim, theta, sections, pos_ids)
+    }
+
+    fn rope_vision_2d(
+        &self,
+        input: &Tensor,
+        n_heads: usize,
+        head_dim: usize,
+        theta: f32,
+        pos_ids: &[u32],
+    ) -> Result<Tensor> {
+        crate::rope::vision_2d(input, n_heads, head_dim, theta, pos_ids)
+    }
+
     fn rope(
         &self,
         input: &Tensor,

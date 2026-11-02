@@ -10,7 +10,7 @@ policy: `python/apxinf/apxinf/policies/impls/walloss.py`.
 
 | Item | Supported |
 | --- | --- |
-| Device | CUDA; measured on Jetson AGX Thor (sm_110) |
+| Device | CUDA; measured on Jetson AGX Thor (sm_110). CPU FP32 reference via `cpu_walloss` ([guide](walloss-cpu-reference.md)) |
 | Precision | BF16 (default), dynamic FP8 (`precision="fp8"`, per-token activation scales) |
 | Views | any count; all views of one request resize to one shared size |
 | Image size | any size the processor produces (patch grids divisible by the merge size); square and rectangular |

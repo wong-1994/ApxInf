@@ -67,3 +67,5 @@ pub use vla::{
 
 /// Self-contained FP32 CPU PI0.5 port.
 pub mod cpu_pi05;
+/// Self-contained FP32 CPU WallOSS reference port.
+pub mod cpu_walloss;

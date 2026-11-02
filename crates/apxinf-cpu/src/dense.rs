@@ -2,10 +2,31 @@
 use crate::CpuBackend;
 use apxinf_core::{Error, Result, Tensor};
 
+/// Visibility mask for [`CpuBackend::attention_masked`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CpuAttentionMask {
+    /// Every supplied key is visible.
+    None,
+    /// Query `i` sees keys `0..=i`; requires one key per query.
+    Causal,
+}
+
 impl CpuBackend {
     /// Non-causal GQA/MHA: Q [queries, heads, dim], K/V [keys, kv_heads, dim].
     /// All supplied keys are visible. Callers partition independent image batches.
     pub fn attention(&self, q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
+        self.attention_masked(q, k, v, CpuAttentionMask::None)
+    }
+
+    /// GQA/MHA with an explicit visibility mask. Heads are scheduled
+    /// serially and BLAS owns GEMM threading.
+    pub fn attention_masked(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        mask: CpuAttentionMask,
+    ) -> Result<Tensor> {
         let qs = q.shape().dims();
         let ks = k.shape().dims();
         if qs.len() != 3
@@ -15,6 +36,7 @@ impl CpuBackend {
             || ks.iter().any(|&n| n == 0)
             || qs[2] != ks[2]
             || qs[1] % ks[1] != 0
+            || (mask == CpuAttentionMask::Causal && qs[0] != ks[0])
         {
             return Err(Error::Other("CPU attention: invalid Q/K/V geometry".into()));
         }
@@ -41,9 +63,15 @@ impl CpuBackend {
                     .copy_from_slice(&v[(t * nkh + kh) * d..(t * nkh + kh + 1) * d]);
             }
             crate::gemm::sgemm(nq, d, nk, &query, &key_t, &mut scores);
-            for row in scores.chunks_exact_mut(nk) {
+            let scale = (d as f32).sqrt();
+            for (t, row) in scores.chunks_exact_mut(nk).enumerate() {
                 for x in row.iter_mut() {
-                    *x /= (d as f32).sqrt();
+                    *x /= scale;
+                }
+                if mask == CpuAttentionMask::Causal {
+                    for x in row.iter_mut().skip(t + 1) {
+                        *x = f32::NEG_INFINITY;
+                    }
                 }
                 let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                 let mut sum = 0.;
